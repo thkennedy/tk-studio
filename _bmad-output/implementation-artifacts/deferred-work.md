@@ -1,6 +1,6 @@
 # Deferred Work
 
-<!-- deferred-work counter: last minted DW-183; mint through plansync.py deferred mint -->
+<!-- deferred-work counter: last minted DW-185; mint through plansync.py deferred mint -->
 
 ### DW-124: Contract §4 `submit` admitted a full job definition but the CLI/skill surface was id-only
 origin: migrated from legacy ledger ("Deferred from: code review of feat/tk-studio-connector (2026-08-06)"), 2026-10-29
@@ -1462,7 +1462,8 @@ location: apps/supervisor/src/closeout.ts (`guardS = run.worker_guard_s ?? guard
 severity: high
 reason: The worker guard bounds the engine's session (a story's dev or review clock), and the close-out reused it for the host leg because both are "the run's guard". The gate has grown with every epic: on 2026-11-05 the operator's own run of it took 522 s conformance + 1499 s supervisor (38 files) + 2271 s lib suite (2860 tests) = 72 min, and the green first legs of Epic 36 already ran 43 to 52 min. Two gates on one box halve each other's speed (the engine's leg started at 23:40Z while the operator's gate for DW-170 ran 23:00 to 00:12Z: the leg spent its 60 min on conformance and the supervisor files alone), and nothing serialises them: the leg takes a `host-verify-leg` lease against a second leg, never against an operator's `verify_host.py`. A leg that times out is red for a reason the code did not cause (hole 108's class: a time bound, not a fault), costs the whole hour, and the re-run route (`POST /runs/{id}/verify`) inherits the same figure, so an uncontended re-run is the only recovery and a coin flip at the current size. Fix to make: (1) the leg gets its own guard — a job `guards.host_verify_seconds` (default sized from the gate's own history: the last green leg's duration plus headroom, floor 3600; or a flat 7200) read by closeout.ts and hostleg.ts in place of `worker_guard_s`, the `host-verify` event naming `guard: host_verify_seconds (Ns)`; (2) `verify_host.py` prints a per-suite duration line and the leg records `suite_durations`, so the figure is measurable; (3) the operator rule (runbook): never run `verify_host.py` on the box while a leg is live (a `host-verify-leg` lease held, or a run in its close-out) — the leg's duration doubles; a candidate serialisation: `verify_host.py` refuses to start, or warns, when the queue holds a live `host-verify-leg` lease; (4) a leg that ends on the guard with every suite verdict so far green is reported `inconclusive (guard)` rather than red (Story 35.3's shape), so the PR body says "timed out", not "failed". No owner input needed: the figure and the rule are the loop's.
 interim: 2026-11-06 (day-8n): Story 37.3's green leg took 3417 s of the 3600 with nothing else on the box (the rule held), 183 s from a second hole-113 red, so `.tk-studio/jobs/run-epic-37.json` now carries guards of its own (`max_turns` 80, `max_wall_clock_seconds` 7200) in place of the shipped run-epic type's 3600 (a job's `guards` key replaces the type's wholesale: lib/job.py `resolve_instance`); the figure bounds the launch worker session (about a minute) and the leg; the engine runs detached under its own clock. Story 37.4's leg then ran 3384 s and Story 37.5's 3752 s (2026-11-06, both alone on the box, both green): the second is the first leg over the old 3600, so the interim has already prevented a red. The leg's own guard, the per-suite durations and the `inconclusive (guard)` verdict stay the fix to make.
-status: open
+resolution: Story 38.1 (contract 0.1.34): the key `guards.host_verify_seconds` (7200 on run-epic, run-vertical-slice and run-sweep; guards merged key-wise, so run-epic-38 dropped its interim and resolves 3600 for the engine) read by all three leg callers through `legGuard` in place of `worker_guard_s`, the trip named `guard: host_verify_seconds (Ns)`; `verify_host.py`'s `== durations:` line recorded as `suite_durations`; the verdict `inconclusive (guard)` for a guard trip with every suite verdict so far green (`partial`, the PR body "timed out"); the refusal: `verify_host.py` exits 2 beside a live `host-verify-leg` lease (the close-out now notes one too), `--beside-leg` overriding with a warning.
+status: resolved 2026-11-07 by Story 38.1
 
 ### DW-175: The loop's follow-up review cap is one global figure (`[limits] max_followup_reviews = 1` in `.bmad-loop/policy.toml`) and the bands carry no field for it, so the owner's decision R5 — the cap raised to 2 for band-L stories only — cannot be expressed in the policy as it stands.
 origin: owner decision R5 (TKSTUDIO-211, Tim 2026-11-05: option B, "raise the cap to 2 for band-L stories only"), ingested 2026-11-06 (hole 112's first ingestion)
@@ -1534,4 +1535,20 @@ source_spec: `36-5-the-supervisors-own-faults-spec.md` § Consult Log (the 2026-
 location: apps/supervisor/src/sandbox.ts `skillInStore` :354 (`listed?.includes(skill)`), `parseSkillsList` (first token per line: the header's `SKILL` lands in the list), `skillsLsArgv`; apps/supervisor/test (the parser's fixture)
 severity: low
 reason: The real output on 2026-11-06 is three lines — `SKILL       STORE`, then `synced <store path>` and `tk-studio <store path>` — the store folder's entries, where `tk-studio` is the plugin folder whose `skills/` holds `tk-studio-launch` and the rest. So the listing can never contain a target skill's name; `in_store: true` comes from the walk of `<store>/tk-studio/skills/` on the host, and the listing check is dead weight that would also accept a plugin named like a skill. Fix to make: pin `parseSkillsList` to this capture (skip the header line; the first token is a store entry, not a skill); make the listing check a plugin-folder check (`tk-studio` present) and keep the `skills/` walk as the skill check, or drop the listing from the decision and keep it as evidence in the refusal text; one fixture from the capture.
+status: open
+
+### DW-184: A stale host-verify-leg lease (serve died mid-leg, or a crash between noteCloseOutLease and host-verify with no later leg) makes every operator verify_host.py refuse with exit 2 until --beside-leg, an
+origin: spec-deferred c0b0d948903d
+source_spec: `38-1-the-host-legs-own-guard-and-its-measure-spec.md`
+location: tools/verify_host.py:398-449
+severity: medium
+reason: live_legs treats any latest host-verify-leg with a non-null owner and no later host-verify as live (tools/verify_host.py:398-418); the lease records no guard or deadline (apps/supervisor/src/hostverify.ts:238-242); no pid probe by design (plan Settled shape 7: os.kill on win32 is TerminateProcess). Meets deferral (a): the refusal is behaviour AC3 names. A re-run of the leg (takeVerifyLeg takes over a dead owner) or --beside-leg clears it today. Raised by both review layers.
+status: open
+
+### DW-185: On the Windows host a guard's tree kill (taskkill /F /T) may kill a gate's child before verify_host.py itself, letting it print "== <suite>: FAILED rc=1" so a guard-cut leg reads red instead of inconc
+origin: spec-deferred 7d0b593c83a5
+source_spec: `38-1-the-host-legs-own-guard-and-its-measure-spec.md`
+location: apps/supervisor/src/hostverify.ts:970-971
+severity: medium
+reason: guardInconclusive requires redSuites empty (apps/supervisor/src/hostverify.ts:970-971); a FAILED gate line printed by the parent after its child was killed would count as red. Unproven on the host (kill order is not guaranteed); the first real guard trip on the box shows it. Meets deferral (a): the inconclusive (guard) verdict is behaviour AC2 names.
 status: open

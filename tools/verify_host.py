@@ -26,15 +26,26 @@ counts, the tsc line, and a closing line with the totals and the slowest file. A
 counts as failed (rc 127); past its timeout the file's process tree is killed (its process group on
 POSIX).
 
-Usage: uv run python tools/verify_host.py [--tail N]
+Story 38.1 (DW-174): the script ends with one `== durations: <suite>=<N>s, …` line (the suites that ran, in run order,
+integer seconds) immediately before its final `verify_host: ok|FAILED (…)` line; the host leg records it as
+`suite_durations` on its `host-verify` event. Before the first gate it reads the supervisor's queue read-only
+(`queue.db` at TK_SUPERVISOR_DB, opened `file:<path>?mode=ro`): while a host leg is live on this box (a run's latest
+`host-verify-leg` lease with a non-null owner and no later `host-verify`: a re-run, or a run in its close-out) it
+refuses to start, exit 2, naming the lease's run id and the remedy (hole 113: two gates on one box halve each other);
+`--beside-leg` runs anyway after a printed warning. No queue (the variable unset, or its file absent) is no check; an
+unreadable one prints one line and the gates run. The leg's own run (TK_SUPERVISOR_HOST_LEG set) never reads it.
+
+Usage: uv run python tools/verify_host.py [--tail N] [--beside-leg]
 """
 from __future__ import annotations
 
 import argparse
 import os
 import re
+import json
 import shutil
 import signal
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -371,24 +382,103 @@ def run_supervisor_gate() -> tuple[int, str]:
     return (1 if failed else 0), "\n".join(tails)
 
 
+# ------------------------------------------------------------ the beside-leg gate (Story 38.1, hole 113)
+
+HOST_LEG_ENV = "TK_SUPERVISOR_HOST_LEG"  # set by the supervisor's host leg on its own run (hostverify.ts)
+QUEUE_ENV = "TK_SUPERVISOR_DB"  # the supervisor's configured queue path
+QUEUE_TIMEOUT_S = 5
+LIVE_LEGS_SQL = """
+SELECT l.run_id, l.at, l.detail FROM events l
+WHERE l.kind = 'host-verify-leg'
+  AND l.seq = (SELECT MAX(seq) FROM events WHERE run_id = l.run_id AND kind = 'host-verify-leg')
+  AND NOT EXISTS (SELECT 1 FROM events h WHERE h.run_id = l.run_id AND h.kind = 'host-verify' AND h.seq > l.seq)
+"""
+
+
+def live_legs(env=None) -> tuple[list[tuple[str, str, str]], str | None]:
+    """The live host legs in the supervisor's queue, read-only: `([(run_id, by, at), …], None)`, one per run whose
+    latest `host-verify-leg` lease has a non-null owner and no later `host-verify`. `([], None)` when TK_SUPERVISOR_DB
+    is unset or its file absent (no queue on this box); `([], "<error>")` when the queue could not be read. Never
+    probes the owner's pid (on win32 `os.kill(pid, 0)` terminates the process): a crashed leg's stale lease is
+    answered by `--beside-leg`."""
+    env = os.environ if env is None else env
+    raw = (env.get(QUEUE_ENV) or "").strip()
+    if not raw:
+        return [], None
+    path = Path(raw)
+    if not path.is_file():
+        return [], None
+    conn = None
+    try:
+        conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=QUEUE_TIMEOUT_S)
+        rows = conn.execute(LIVE_LEGS_SQL).fetchall()
+        legs: list[tuple[str, str, str]] = []
+        for run_id, at, detail in rows:
+            d = json.loads(detail) if detail else {}
+            if not isinstance(d, dict) or d.get("owner") is None:
+                continue
+            legs.append((str(run_id), str(d.get("by") or "re-run"), str(at)))
+        return legs, None
+    except (sqlite3.Error, OSError, ValueError) as exc:
+        return [], str(exc) or type(exc).__name__
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def beside_leg_check(beside_leg: bool, env=None) -> int | None:
+    """The beside-leg gate before the first gate: 2 (the refusal printed) while a host leg is live and `--beside-leg`
+    is not given; None to run the gates (a warning printed first under `--beside-leg`, a note when the queue is
+    unreadable, nothing when there is none or this is the leg's own run)."""
+    env = os.environ if env is None else env
+    if env.get(HOST_LEG_ENV):
+        return None
+    legs, error = live_legs(env)
+    if error is not None:
+        print(f"verify_host: the queue at {env.get(QUEUE_ENV)} was not read ({error}); running without the beside-leg check", flush=True)
+        return None
+    if not legs:
+        return None
+    if beside_leg:
+        ids = ", ".join(run_id for run_id, _, _ in legs)
+        print(f"verify_host: WARNING: --beside-leg: running beside the live host leg of queue run {ids}; "
+              "both gates slow each other and the leg may run out its guard (hole 113)", flush=True)
+        return None
+    named = "; ".join(f"queue run {run_id} (by {by}, since {at})" for run_id, by, at in legs)
+    print(f"verify_host: refused: a host leg is live on this box: {named}; two gates on one box halve each other "
+          f"(hole 113): wait for its host-verify event (GET /runs/{legs[0][0]}), or pass --beside-leg to run anyway", flush=True)
+    return 2
+
+
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="run tk-studio's host gates (lib suite, conformance, supervisor and studio-web when changed) with argv only")
+    parser = argparse.ArgumentParser(description="run tk-studio's host gates (lib suite, conformance, supervisor and studio-web when changed) "
+                                     "with argv only; refuses to start beside a live host leg (hole 113) unless --beside-leg; "
+                                     "ends with one `== durations:` line before its verdict")
     parser.add_argument("--tail", type=int, default=40, help="lines of each failing gate's output to repeat last")
+    parser.add_argument("--beside-leg", action="store_true",
+                        help="run even while a host leg is live on this box (prints a warning; both gates slow each other)")
     args = parser.parse_args(argv)
+    refused = beside_leg_check(args.beside_leg)
+    if refused is not None:
+        return refused
     failures: list[tuple[str, int, str]] = []
     ran: list[str] = []
+    durations: list[tuple[str, float]] = []  # Story 38.1: each gate that ran, in run order
     for name, cwd, cmd in GATES:
         print(f"== {name}: {' '.join(cmd)}  (cwd {cwd.relative_to(ROOT)})", flush=True)
         rc, out, seconds = run_gate(name, cwd, cmd)
         verdict = "ok" if rc == 0 else f"FAILED rc={rc}"
         print(f"== {name}: {verdict} in {seconds:.0f}s", flush=True)
         ran.append(name)
+        durations.append((name, seconds))
         if rc != 0:
             failures.append((name, rc, out))
     sup_changed, sup_why = app_changed("apps/supervisor")
     if sup_changed:
         print(f"== {SUPERVISOR_GATE}: {sup_why}", flush=True)
+        t0 = time.monotonic()
         rc, out = run_supervisor_gate()
+        durations.append((SUPERVISOR_GATE, time.monotonic() - t0))
         ran.append(SUPERVISOR_GATE)
         if rc != 0:
             failures.append((SUPERVISOR_GATE, rc, out))
@@ -403,18 +493,23 @@ def main(argv: list[str] | None = None) -> int:
         verdict = "ok" if rc == 0 else f"FAILED rc={rc}"
         print(f"== {name}: {verdict} in {seconds:.0f}s", flush=True)
         ran.append(name)
+        durations.append((name, seconds))
         if rc != 0:
             failures.append((name, rc, out))
     else:
         print(f"== {STUDIO_WEB_GATE[0]}: skipped ({why})", flush=True)
+    # Story 38.1: one summary line, immediately before the verdict (after every failure tail).
+    summary = f"== durations: {', '.join(f'{name}={seconds:.0f}s' for name, seconds in durations)}"
     if not failures:
+        print(summary)
         print(f"verify_host: ok ({', '.join(ran)})")
         return 0
     for name, rc, out in failures:
         tail = out.rstrip().splitlines()[-args.tail:]
         print(f"\n== {name} failed (rc={rc}); last {len(tail)} lines:")
         print("\n".join(tail))
-    print(f"\nverify_host: FAILED ({', '.join(n for n, _, _ in failures)})")
+    print(f"\n{summary}")
+    print(f"verify_host: FAILED ({', '.join(n for n, _, _ in failures)})")
     return 1
 
 

@@ -11,12 +11,24 @@
  *            `verify: {host: "<one command line>"}`, split into argv on whitespace with `"…"`/`'…'`
  *            grouping and backslashes literal; never run through a shell.
  *   spawn    argv only, through the `CAPTURE` wrapper spawned by `runProcess` (`windowsHide`, never
- *            `detached` on win32, the tree killed on timeout), the worker's env (`buildWorkerEnv`), under the
- *            host-tier worker's wall-clock guard; both streams go to files, so a timeout keeps their tails.
+ *            `detached` on win32, the tree killed on timeout), the worker's env (`buildWorkerEnv`) with
+ *            `TK_SUPERVISOR_HOST_LEG=<run id>` (Story 38.1: `tools/verify_host.py` skips its beside-leg check for the
+ *            leg's own run), under the leg's own guard (`legGuard`); both streams go to files, so a timeout keeps
+ *            their tails.
+ *   guard    Story 38.1 (DW-174): every caller of the leg (the close-out's boundary and sweep-tail legs, the re-run)
+ *            reads `legGuard(queue.definition(run))`: the job's `guards.host_verify_seconds`, else (a definition
+ *            snapshot taken before 38.1) `guards.max_wall_clock_seconds`, else 600 — never the worker's
+ *            `worker_guard_s`. Every step's trip reads `guard: <key> (<N>s)`. The close-out legs note a
+ *            `host-verify-leg {owner, by: "close-out"}` lease first (closed by the leg's `host-verify`). A ran leg
+ *            records `suite_durations` (`suiteDurations`: the last `== durations:` line, else the gate-level
+ *            `ok|FAILED … in Ns` lines). A host step ended on the guard after at least one gate-level suite verdict,
+ *            none red, is `inconclusive (guard)` (`guardInconclusive`, Story 35.3's shape): `partial`, the reason
+ *            naming the guard and the suites still unrun, the PR body's `**Timed out:**`, never red.
  *   result   a `host-verify` event: `{command, argv, cwd, exit, duration_ms, signal?, guard?, error?, green,
- *            stdout_tail, stderr_tail, verdicts?, engine}`, or `{skipped: true, reason}` (no `engine`). Green is exit 0; a
- *            timeout, a spawn failure or a non-zero exit is red: the run ends `partial` naming the command, the
- *            PR a draft. Story 37.2 (DW-150): on a red host command, `verdicts` lists every suite's own verdict line
+ *            stdout_tail, stderr_tail, verdicts?, suite_durations?, engine}`, or `{skipped: true, reason}` (no `engine`).
+ *            Green is exit 0; a spawn failure, a non-zero exit or a timeout is red (a timeout after at least one
+ *            gate-level verdict, none red, is `inconclusive (guard)` instead, never red: see `guard`): the run ends
+ *            `partial` naming the command, the PR a draft. Story 37.2 (DW-150): on a red host command, `verdicts` lists every suite's own verdict line
  *            from its stdout (`tools/verify_host.py`'s `== <lib suite|conformance|supervisor|studio-web>: …`; the
  *            `(cwd …)` headers and the `== <suite> failed (rc=N); last …` tail headers excluded; the gate-level
  *            `ok`/`FAILED`/`skipped` lines always, a per-file `supervisor` line only with a fail, an `rc=` or a
@@ -34,8 +46,8 @@
             prepended before the `GODOT` folder under the same key, an argv[0] of `godot`/`godot.exe` (any case,
             no separator) is spawned as `$GODOT` itself, and the event gains `godot_shim` (the shim dir; absent
             otherwise, the command running as in 0.1.29). Skip reasons: `no verify.engine`, `verify.engine is not a non-empty string`,
- *            `verify.host red`. The leg's `green` is host green and engine not red, so every consumer reads an
- *            engine red through `isRed` as a red leg; its reason reads `host verify red (engine): …`.
+ *            `verify.host red` (`verify.host timed out` when the host step ended on the guard, Story 38.1). The
+ *            leg's `green` is host green and engine not red, so every consumer reads an engine red through `isRed` as a red leg; its reason reads `host verify red (engine): …`.
  *   playable Story 34.3: the playable-verify step. `playable: {scenario, seed, ticks}` (top level of the same base
  *            config; `scenario` relative to the served root) runs only after a green engine gate: `uv run
  *            <plugin>/lib/playable.py run --directory <served root> --scenario <served root>/<scenario> --seed <n>
@@ -118,7 +130,7 @@ export function gitUsrBin(env: Record<string, string | undefined>): string | nul
 }
 import { load as loadYaml } from "js-yaml";
 import { buildWorkerEnv, invokeSkill, lastJsonObject, runProcess, type RunResult, type Spawner } from "./server";
-import { servedRoot, type QueueEvent, type QueueRun } from "./queue";
+import { selfOwner, servedRoot, type Owner, type Queue, type QueueEvent, type QueueRun } from "./queue";
 import { pluginRoot, studioHome } from "./env";
 import { showAtBase } from "./gitshow";
 import { resolveRoute } from "./route";
@@ -135,6 +147,8 @@ export type HostVerifyRan = {
   signal?: string; guard?: string; error?: string; green: boolean; stdout_tail: string[]; stderr_tail: string[];
   /** Story 37.2 (DW-150): every suite's own verdict line (`verdictLines`), only on a red host command that printed one. */
   verdicts?: string[];
+  /** Story 38.1: each suite's seconds (`suiteDurations`), on any ran leg that printed them (green, red or guard). */
+  suite_durations?: Record<string, number>;
   /** Hole 46 (win32): Git's `usr\bin` put first on the leg's PATH, when it was there. */
   git_bash?: string;
   /** Hole 52 (win32): the command's first token as spawned, when it was a bare name found in that `usr\bin`. */
@@ -193,7 +207,7 @@ export type HostVerifyResult = HostVerifyRan | HostVerifySkipped;
 /** Story 34.3: the run's sandbox (the judge's tier), engine and studio run ids (the media folders) and project id
  * (the route) ride along; a run without them (an older caller) gets a `fail` playable step only when it declares one. */
 type Run = Pick<QueueRun, "root" | "worktree" | "base_ref" | "tier" | "prefix">
-  & Partial<Pick<QueueRun, "sandbox" | "engine_run_id" | "studio_run_id" | "project_id">>;
+  & Partial<Pick<QueueRun, "sandbox" | "engine_run_id" | "studio_run_id" | "project_id" | "run_id">>;
 /** Story 34.3: the judge session (default: `invokeSkill` on the sbx tier, mounted at the served root). */
 export type PlayableJudge = (servedRoot: string, args: {
   tier: "sbx"; sandbox: string; model: string; effort: string; timeout_s: number; payload: { media: string };
@@ -202,7 +216,31 @@ export type PlayableJudge = (servedRoot: string, args: {
 export type PlayableRoute = (root: string, projectId: string) => Promise<Record<string, unknown>>;
 /** `sbx`: the seam the default judge's pin (`sbx run -d --name <sb>`) runs through; `spawner`: the default judge's
  * `invokeSkill` spawner (its preflight and worker; default `runProcess`). */
-type Deps = Pick<WorktreeDeps, "env" | "run" | "sbx"> & { judge?: PlayableJudge; route?: PlayableRoute; spawner?: Spawner };
+type Deps = Pick<WorktreeDeps, "env" | "run" | "sbx"> & { judge?: PlayableJudge; route?: PlayableRoute; spawner?: Spawner;
+  /** Story 38.1: the guard key every step's trip names (set by `hostVerify` from `opts.guardKey`). */
+  guardKey?: GuardKey };
+
+/** Story 38.1: the key a leg's guard was read from. */
+export type GuardKey = "host_verify_seconds" | "max_wall_clock_seconds";
+/** Story 38.1 (CAP-1): the host leg's own guard from a run's definition snapshot: `guards.host_verify_seconds` when a
+ * positive number, else `guards.max_wall_clock_seconds` (a snapshot taken before 38.1), else 600 (`cli.ts guardsFor`'s
+ * default). Never the worker's `worker_guard_s`. */
+export function legGuard(defn: Record<string, any> | null | undefined): { seconds: number; key: GuardKey } {
+  const g = defn && typeof defn === "object" && defn.guards && typeof defn.guards === "object" ? defn.guards as Record<string, unknown> : {};
+  const pos = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v) && v > 0;
+  if (pos(g.host_verify_seconds)) return { seconds: g.host_verify_seconds, key: "host_verify_seconds" };
+  if (pos(g.max_wall_clock_seconds)) return { seconds: g.max_wall_clock_seconds, key: "max_wall_clock_seconds" };
+  return { seconds: 600, key: "max_wall_clock_seconds" };
+}
+
+/** Story 38.1 (CAP-3): the close-out's lease, noted before a close-out leg (boundary or sweep tail): `host-verify-leg
+ * {owner: {pid, host, nonce, start?}, by: "close-out"}`, closed by the leg's own `host-verify` (as `takeVerifyLeg`'s
+ * is) — the queue record of "a run in its close-out" that `tools/verify_host.py` refuses to start beside. */
+export function noteCloseOutLease(queue: Pick<Queue, "note">, runId: string, self: Owner = selfOwner()): void {
+  queue.note(runId, "host-verify-leg", {
+    owner: { pid: self.pid, host: self.host, nonce: self.nonce, ...(self.start ? { start: self.start } : {}) }, by: "close-out",
+  });
+}
 
 /** The tracked config's path, as `git show <rev>:<path>` takes it. */
 export const CONFIG_PATH = ".tk-studio/config.yaml";
@@ -339,6 +377,48 @@ const SKIP_LINE = /^\S+ skip: /;
  * supervisor's refusals), so the scan stops there. */
 const TAIL_HEADER = /^== [^:]+ failed \(rc=-?\d+\); last \d+ lines:$/;
 
+/** Story 38.1: `verify_host.py`'s suites in its run order (`GATES`, then the supervisor gate and `STUDIO_WEB_GATE`). */
+export const LEG_SUITES = ["lib suite", "conformance", "supervisor", "studio-web"] as const;
+/** Story 38.1: `verify_host.py`'s summary line (`== durations: lib suite=3s, conformance=9s`), and one of its entries. */
+const DURATIONS_LINE = /^== durations: (.+)$/;
+const DURATION_ENTRY = /^(.+)=(\d+)s$/;
+/** Story 38.1: a gate-level suite line carrying its seconds (`ok in 3s`, `FAILED rc=1 in 9s`, `ok in 44s; …`). */
+const GATE_SECONDS = /^(?:ok|FAILED)\b.*? in (\d+)s\b/;
+
+/** Story 38.1 (CAP-2): each suite's seconds in a leg's stdout: the last `== durations:` line's entries; else (a guard
+ * kill: the tree dies before the script's end) the gate-level `ok|FAILED … in Ns` suite lines before the first tail
+ * header. Per-file, install and tsc lines never count. Empty when none printed. */
+export function suiteDurations(stdout: string): Record<string, number> {
+  const lines = stdout.split(/\r?\n/).map((l) => l.replace(/\s+$/, ""));
+  const summary = lines.findLast((l) => DURATIONS_LINE.test(l));
+  const out: Record<string, number> = {};
+  if (summary !== undefined) {
+    for (const entry of DURATIONS_LINE.exec(summary)![1]!.split(", ")) {
+      const m = DURATION_ENTRY.exec(entry.trim());
+      if (m) out[m[1]!] = Number(m[2]);
+    }
+    return out;
+  }
+  for (const line of lines) {
+    if (TAIL_HEADER.test(line)) break;
+    const m = SUITE_LINE.exec(line);
+    const s = m ? GATE_SECONDS.exec(m[2]!) : null;
+    if (m && s) out[m[1]!] = Number(s[1]);
+  }
+  return out;
+}
+
+/** Story 38.1: the gate-level verdict lines among a leg's verdicts (`== <suite>: ok|FAILED|skipped …`). */
+export function gateVerdicts(verdicts: readonly string[]): string[] {
+  return verdicts.filter((line) => { const m = SUITE_LINE.exec(line); return !!m && GATE_VERDICT.test(m[2]!); });
+}
+
+/** Story 38.1: `LEG_SUITES` with no gate-level verdict line (the suite cut mid-run counts as unrun). */
+export function unrunSuites(verdicts: readonly string[]): string[] {
+  const seen = new Set(gateVerdicts(verdicts).map((l) => SUITE_LINE.exec(l)![1]!));
+  return LEG_SUITES.filter((s) => !seen.has(s));
+}
+
 /** Story 37.2 (DW-150): every suite's own verdict line in a leg's stdout, in order, each clipped and redacted. The
  * `(cwd …)` headers and the reasons a gate runs never match, and the scan stops at the first `== <suite> failed
  * (rc=N); last …` tail header; a per-file `supervisor` line only when it failed, its gate refusals always. */
@@ -378,8 +458,9 @@ export const TOOL_WALL_MARGIN_S = 30;
 /** Story 35.3: a tool's own wall clock under the leg's guard. */
 export const toolWall = (guardS: number) => Math.min(Math.max(1, guardS), 86400);
 
-/** `guard: max_wall_clock_seconds (<n>s)` — as a host-tier worker's trip is named (cli.ts `guardReason`). */
-export const wallClockTrip = (guardS: number) => `guard: max_wall_clock_seconds (${guardS}s)`;
+/** `guard: <key> (<n>s)` — Story 38.1: the leg's own `host_verify_seconds` (`max_wall_clock_seconds` only for a definition
+ * snapshot without it, as a host-tier worker's trip is named, cli.ts `guardReason`). */
+export const wallClockTrip = (guardS: number, key: GuardKey = "host_verify_seconds") => `guard: ${key} (${guardS}s)`;
 
 /** The capture wrapper the command runs under: `<bun> -e CAPTURE <spec.json>` (spawned through `runProcess`, so
  * argv only, `windowsHide`, never `detached` on win32, the tree killed past the guard, the worker's env). It
@@ -469,7 +550,7 @@ async function runStep(
         : await runProcess(process.execPath, args, { cwd, timeoutS: guardS, env });
     } catch (e) {
       const m = message(e);
-      if (TIMED_OUT.test(m)) return withShim(out({ exit: null, guard: wallClockTrip(guardS), ...streams() }));
+      if (TIMED_OUT.test(m)) return withShim(out({ exit: null, guard: wallClockTrip(guardS, deps.guardKey), ...streams() }));
       return withShim(out({ exit: null, error: clip(m), ...streams() }));
     }
     let status: { exit?: number | null; signal?: string | null; error?: string } | undefined;
@@ -489,12 +570,18 @@ async function runStep(
  * green, `verify.engine` the same way with the folder of `GODOT` first on PATH, under the full guard again;
  * then (Story 34.3), when the engine gate is green, the playable step (`playable.py run`, the media copy, the
  * judge). Never throws. */
-export async function hostVerify(run: Run, guardS: number, deps: Deps = {}, opts: { slice?: boolean } = {}): Promise<HostVerifyResult> {
+export async function hostVerify(
+  run: Run, guardS: number, callerDeps: Deps = {}, opts: { slice?: boolean; guardKey?: GuardKey } = {},
+): Promise<HostVerifyResult> {
   const startedAt = new Date().toISOString();
+  // Story 38.1: every step's trip names the key the guard was read from (`legGuard`).
+  const deps: Deps = { ...callerDeps, guardKey: opts.guardKey ?? "host_verify_seconds" };
   const cmd = await verifyCommand(run, deps);
   if ("skipped" in cmd) return cmd;
   const cwd = servedRoot(run)!; // Story 28.5: the root the run serves (`<worktree>/<prefix>`)
   const env = buildWorkerEnv(deps.env ?? process.env);
+  // Story 38.1 (CAP-3): the leg's own `tools/verify_host.py` never refuses itself beside its own lease.
+  env.TK_SUPERVISOR_HOST_LEG = run.run_id ?? "host-leg";
   // Hole 46: on the Windows host the console's `bash` is the WindowsApps WSL launcher, so a `verify.host`
   // that says `bash …` (and the lib suite's own bash-driven tests) ran inside WSL against Windows paths. Git's
   // own `usr\bin` (Git Bash, not on PATH by default) goes first when it is there.
@@ -510,11 +597,15 @@ export async function hostVerify(run: Run, guardS: number, deps: Deps = {}, opts
   const hostOut: { stdout?: string } = {};
   const host = await runStep(argv, cwd, env, guardS, deps, hostOut);
   const verdicts = stepGreen(host) ? [] : verdictLines(hostOut.stdout ?? "");
+  // Story 38.1 (CAP-2): each suite's seconds, on green, red and guard alike.
+  const durations = suiteDurations(hostOut.stdout ?? "");
+  // Story 38.1 (AC2): a host step ended on the guard skips the later steps as `verify.host timed out`, never "red".
+  const hostSkip = host.guard ? "verify.host timed out" : "verify.host red";
   // Story 34.8: the assets step (a slice run only), after a green host command, before the engine gate.
   let assets: AssetsStep | undefined;
   if (opts.slice) {
     const layout = cmd.assets ?? assetsLayout(undefined);
-    if (!stepGreen(host)) assets = { verdict: "skipped", reason: "verify.host red", steps: [] };
+    if (!stepGreen(host)) assets = { verdict: "skipped", reason: hostSkip, steps: [] };
     else assets = await assetsStep(layout, cwd, env, guardS, deps);
   }
   // Story 34.1: the engine gate. `GODOT` from the leg's env; its folder first on the step's PATH (one key).
@@ -523,7 +614,7 @@ export async function hostVerify(run: Run, guardS: number, deps: Deps = {}, opts
   const godot = (deps.env ?? process.env).GODOT;
   const godotDir = typeof godot === "string" && godot.trim() && isAbsolute(godot.trim()) ? dirname(godot.trim()) : null;
   let engine: EngineStep;
-  if (!stepGreen(host)) engine = { verdict: "skipped", reason: "verify.host red", godot_dir: godotDir };
+  if (!stepGreen(host)) engine = { verdict: "skipped", reason: hostSkip, godot_dir: godotDir };
   else if (assets?.verdict === "red") engine = { verdict: "skipped", reason: "assets red", godot_dir: godotDir };
   else if ("skipped" in cmd.engine) engine = { verdict: "skipped", reason: cmd.engine.skipped, godot_dir: godotDir };
   else {
@@ -552,7 +643,8 @@ export async function hostVerify(run: Run, guardS: number, deps: Deps = {}, opts
     command: cmd.command, argv: cmd.argv, cwd, exit: host.exit, duration_ms: host.duration_ms, started_at: startedAt, ...(gitBash ? { git_bash: gitBash } : {}), ...(resolved ? { resolved } : {}),
     ...(host.signal ? { signal: host.signal } : {}), ...(host.guard ? { guard: host.guard } : {}), ...(host.error ? { error: host.error } : {}),
     green: stepGreen(host) && assets?.verdict !== "red" && engine.verdict !== "red" && playable.verdict !== "fail" && playable.verdict !== "inconclusive",
-    stdout_tail: host.stdout_tail, stderr_tail: host.stderr_tail, ...(verdicts.length ? { verdicts } : {}), engine, playable,
+    stdout_tail: host.stdout_tail, stderr_tail: host.stderr_tail, ...(verdicts.length ? { verdicts } : {}),
+    ...(Object.keys(durations).length ? { suite_durations: durations } : {}), engine, playable,
     ...(assets ? { assets } : {}),
   };
 }
@@ -875,15 +967,28 @@ async function playableStep(
   return { ...withMedia, judge, findings };
 }
 
-/** Story 35.3: did the judge's infrastructure fail (`playable.verdict: inconclusive`)? Such a leg is neither green nor red. */
+/** Story 38.1 (CAP-2): the host step ended on the guard with every verdict so far green: at least one gate-level suite
+ * verdict printed and none red. A trip with no suite verdict (a generic command, the first suite still running) stays
+ * red; so does an engine-step trip (the engine step runs only after a green host, so `v.guard` is the host step's). */
+export const guardInconclusive = (v: HostVerifyResult | undefined): boolean =>
+  !!v && !v.skipped && !!v.guard && !v.error && gateVerdicts(v.verdicts ?? []).length >= 1 && redSuites(v.verdicts ?? []).length === 0;
+
+/** Story 35.3: did the judge's infrastructure fail (`playable.verdict: inconclusive`)? Such a leg is neither green nor red.
+ * Story 38.1: so is a leg ended on the guard with every verdict so far green (`guardInconclusive`). */
 export const isInconclusive = (v: HostVerifyResult | undefined): v is HostVerifyRan =>
-  !!v && !v.skipped && !v.green && v.playable?.verdict === "inconclusive";
+  !!v && !v.skipped && !v.green && (v.playable?.verdict === "inconclusive" || guardInconclusive(v));
 
 /** Is this result a red verify (it ran and was not green)? Story 35.3: an `inconclusive` playable step alone is not red. */
 export const isRed = (v: HostVerifyResult | undefined): v is HostVerifyRan => !!v && !v.skipped && !v.green && !isInconclusive(v);
 
-/** Story 35.3: an inconclusive run's reason: `host verify inconclusive (playable): <reason>`. */
-export const inconclusiveReason = (v: HostVerifyRan): string => `host verify inconclusive (playable): ${v.playable?.reason ?? "infrastructure"}`;
+/** Story 38.1: the guard case's `unrun:` list (`LEG_SUITES` with no gate-level verdict, else `none`). */
+const unrunText = (v: HostVerifyRan): string => unrunSuites(v.verdicts ?? []).join(", ") || "none";
+
+/** Story 35.3: an inconclusive run's reason: `host verify inconclusive (playable): <reason>`. Story 38.1: the guard case
+ * reads `host verify inconclusive (guard): timed out (guard: <key> (<N>s)) with every verdict so far green; unrun: <suites>`. */
+export const inconclusiveReason = (v: HostVerifyRan): string => guardInconclusive(v)
+  ? `host verify inconclusive (guard): timed out (${v.guard}) with every verdict so far green; unrun: ${unrunText(v)}`
+  : `host verify inconclusive (playable): ${v.playable?.reason ?? "infrastructure"}`;
 
 /** The red run's reason (`<how>`: exited <n>, timed out (<guard>), failed to start: <error>, or killed by <signal>):
  * ``host verify red: `<command>` <how>; last lines: <the last 5 stderr lines, else
@@ -959,10 +1064,17 @@ export function prSection(v: HostVerifyResult, proof?: PrProof, legs?: readonly 
     return [`${name}:`, "", tick, ...(lines.length ? lines : ["(empty)"]), tick, ""];
   };
   const hostGreen = v.exit === 0 && !v.guard && !v.error;
-  const hostLines = hostGreen ? [`Green: \`${v.command}\` (${secs(v.duration_ms)})`]
-    : [`**Red:** \`${v.command}\` — ${how(v)} (${secs(v.duration_ms)})`, "",
+  // Story 38.1: each suite's seconds (`Durations: lib suite 3s, …`), when the leg recorded them.
+  const d = v.suite_durations && Object.keys(v.suite_durations).length ? v.suite_durations : undefined;
+  const durationLines = d ? [`Durations: ${Object.entries(d).map(([k, n]) => `${k} ${n}s`).join(", ")}`, ""] : [];
+  // Story 38.1: a leg ended on the guard with every verdict so far green says "timed out", never red.
+  const timedOut = guardInconclusive(v);
+  const hostLines = hostGreen ? [`Green: \`${v.command}\` (${secs(v.duration_ms)})`, ...(d ? ["", ...durationLines].slice(0, -1) : [])]
+    : [timedOut ? `**Timed out:** \`${v.command}\` — ${v.guard} (${secs(v.duration_ms)}); every verdict so far green; unrun: ${unrunText(v)}`
+      : `**Red:** \`${v.command}\` — ${how(v)} (${secs(v.duration_ms)})`, "",
       // Story 37.2 (DW-150): every suite's own verdict, so a lib failure never hides behind the tail.
       ...(v.verdicts?.length ? ["Verdicts:", "", ...v.verdicts.map((l) => `- \`${l.replace(/`/g, "'")}\``), ""] : []),
+      ...durationLines,
       ...fence("stderr (last lines)", v.stderr_tail), ...fence("stdout (last lines)", v.stdout_tail)].slice(0, -1);
   const e = v.engine;
   if (!e) return [...head, ...hostLines];

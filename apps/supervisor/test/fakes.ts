@@ -416,3 +416,13 @@ export function gitRepo(files: Record<string, string> = {}): { checkout: string;
   const origin = gitInit(checkout, { ".gitignore": RUNTIME_GITIGNORE, ...files });
   return { checkout, origin, git: testGit };
 }
+
+/** Story 38.1 (AC1): the host leg's guard, one table pinned through all three of its callers (the close-out's sweep tail in
+ * worktree.test.ts, its boundary leg in closeout.test.ts, the re-run in hostleg.test.ts). Each row's leg runs a hanging
+ * command (it prints no suite line, so it stays red) under `worker_guard_s` 50 and the row's definition `guards`. */
+export const LEG_GUARD_ROWS: readonly { name: string; workerGuardS: number; guards: Record<string, number>; trip: string }[] = [
+  { name: "the leg's own `host_verify_seconds` wins over the worker's and the engine's", workerGuardS: 50,
+    guards: { max_wall_clock_seconds: 50, host_verify_seconds: 1 }, trip: "guard: host_verify_seconds (1s)" },
+  { name: "a definition snapshot taken before 38.1: `max_wall_clock_seconds`", workerGuardS: 50,
+    guards: { max_wall_clock_seconds: 1 }, trip: "guard: max_wall_clock_seconds (1s)" },
+];

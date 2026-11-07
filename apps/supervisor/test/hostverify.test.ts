@@ -6,7 +6,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { basename, delimiter, dirname, join } from "node:path";
 import {
-  FRAMES_DIR, gitUsrBin, hostVerify, inconclusiveReason, isInconclusive, isRed, legHistory, legVerdict, pathKey, playableConfig, prSection, redReason, splitCommand, tail,
+  FRAMES_DIR, gitUsrBin, guardInconclusive, hostVerify, inconclusiveReason, isInconclusive, isRed, LEG_SUITES, legGuard, legHistory, legVerdict, pathKey, playableConfig, prSection, redReason, splitCommand, suiteDurations, tail,
   redSuites, TOOL_WALL_MARGIN_S, verdictLines, verifyCommand, wallClockTrip, type HostVerifyRan, type PlayableJudge,
 } from "../src/hostverify";
 import { studioRunDir } from "../src/sandbox";
@@ -155,7 +155,8 @@ describe("Story 37.2 (DW-150): a red leg names every suite's own verdict", () =>
     // the tail alone hides the lib failure: the list is what names it
     expect(v.stdout_tail.some((l) => l.startsWith("== lib suite"))).toBe(false);
     const section = prSection(v).join("\n");
-    expect(section).toContain(`Verdicts:\n\n${WANT.map((l) => `- \`${l}\``).join("\n")}\n\nstderr (last lines):`);
+    // Story 38.1: the suites' seconds (the gate-level lines before the first tail header) follow the verdicts.
+    expect(section).toContain(`Verdicts:\n\n${WANT.map((l) => `- \`${l}\``).join("\n")}\n\nDurations: lib suite 3s, conformance 9s\n\nstderr (last lines):`);
   });
 
   test("the parse: a timed-out per-file line, the supervisor total, install and tsc failures count; a passing file never", () => {
@@ -282,9 +283,12 @@ describe("the leg runs the command in the worktree under the guard", () => {
   test("red timeout: the tree killed past the guard, `exit: null`, the guard named", async () => {
     const fx = project(hostKey(bunCmd("console.log('started'); setTimeout(() => {}, 60000)")));
     const v = await hostVerify(fx.run, 1) as HostVerifyRan;
-    expect(v).toMatchObject({ green: false, exit: null, guard: "guard: max_wall_clock_seconds (1s)" });
+    expect(v).toMatchObject({ green: false, exit: null, guard: "guard: host_verify_seconds (1s)" });
     expect(wallClockTrip(1)).toBe(v.guard!);
-    expect(redReason(v)).toContain("timed out (guard: max_wall_clock_seconds (1s))");
+    expect(redReason(v)).toContain("timed out (guard: host_verify_seconds (1s))");
+    // Story 38.1 (AC2): a guard-tripped host skips the engine as `verify.host timed out`, never "red"
+    expect(v.engine).toMatchObject({ verdict: "skipped", reason: "verify.host timed out" });
+    expect(prSection(v).at(-1)).toBe("Engine gate: skipped (verify.host timed out)");
   }, 20_000);
 
   test("red timeout keeps both streams: failures printed to stderr (and stdout) before the hang are in the tails, whole lines", async () => {
@@ -292,19 +296,19 @@ describe("the leg runs the command in the worktree under the guard", () => {
     const script = "for (let i = 1; i <= 3; i++) console.error('FAIL case ' + i); console.log('${long}'); console.log('last out'); setTimeout(() => {}, 60000)";
     const fx = project(hostKey(bunCmd(script.replace("${long}", long))));
     const v = await hostVerify(fx.run, 2) as HostVerifyRan;
-    expect(v).toMatchObject({ green: false, exit: null, guard: "guard: max_wall_clock_seconds (2s)" });
+    expect(v).toMatchObject({ green: false, exit: null, guard: "guard: host_verify_seconds (2s)" });
     expect(v.stderr_tail).toEqual(["FAIL case 1", "FAIL case 2", "FAIL case 3"]);
     expect(v.stdout_tail).toEqual(["y".repeat(300), "last out"]); // the 500-char line whole (clipped from its start), not a mid-line slice
-    expect(redReason(v)).toBe(`host verify red: \`${v.command}\` timed out (guard: max_wall_clock_seconds (2s)); last lines: FAIL case 1 | FAIL case 2 | FAIL case 3`);
+    expect(redReason(v)).toBe(`host verify red: \`${v.command}\` timed out (guard: host_verify_seconds (2s)); last lines: FAIL case 1 | FAIL case 2 | FAIL case 3`);
   }, 20_000);
 
   test("red timeout under a fractional guard (90.5-style): named a guard trip, never `failed to start`", async () => {
     const fx = project(hostKey(bunCmd("console.error('hung here'); setTimeout(() => {}, 60000)")));
     const v = await hostVerify(fx.run, 1.5) as HostVerifyRan;
-    expect(v).toMatchObject({ green: false, exit: null, guard: "guard: max_wall_clock_seconds (1.5s)" });
+    expect(v).toMatchObject({ green: false, exit: null, guard: "guard: host_verify_seconds (1.5s)" });
     expect(v.error).toBeUndefined();
     expect(v.stderr_tail).toEqual(["hung here"]);
-    expect(redReason(v)).toContain("timed out (guard: max_wall_clock_seconds (1.5s))");
+    expect(redReason(v)).toContain("timed out (guard: host_verify_seconds (1.5s))");
     expect(redReason(v)).not.toContain("failed to start");
   }, 20_000);
 
@@ -637,11 +641,11 @@ describe("Story 34.1: the engine gate runs after a green verify.host", () => {
     const hung = verifyKeys({ host: bunCmd("console.log('host ok')"), engine: bunCmd("console.error('importing'); setTimeout(() => {}, 60000)") });
     const t = await hostVerify(project(hung).run, 2) as HostVerifyRan;
     expect(t.exit).toBe(0);
-    expect(t.engine).toMatchObject({ verdict: "red", exit: null, guard: "guard: max_wall_clock_seconds (2s)", stderr_tail: ["importing"] });
+    expect(t.engine).toMatchObject({ verdict: "red", exit: null, guard: "guard: host_verify_seconds (2s)", stderr_tail: ["importing"] });
     expect(t.green).toBe(false);
     expect(redReason(t)).toContain("host verify red (engine): ");
-    expect(redReason(t)).toContain("timed out (guard: max_wall_clock_seconds (2s))");
-    expect(prSection(t).join("\n")).toContain("— guard: max_wall_clock_seconds (2s) (");
+    expect(redReason(t)).toContain("timed out (guard: host_verify_seconds (2s))");
+    expect(prSection(t).join("\n")).toContain("— guard: host_verify_seconds (2s) (");
 
     const missing = verifyKeys({ host: bunCmd("console.log('host ok')"), engine: "tk-sup-no-such-engine --x" });
     const m = await hostVerify(project(missing).run, 60) as HostVerifyRan;
@@ -1499,5 +1503,115 @@ describe("Story 36.1: one verdict, one frames literal", () => {
     expect(p.leg_frames!.map((f) => basename(dirname(f)))).toEqual([FRAMES_DIR, FRAMES_DIR]);
     expect(p.leg_frames!.every((f) => existsSync(f))).toBe(true);
     expect(existsSync(join(p.media!, FRAMES_DIR, "tick-000000.png"))).toBe(true);
+  });
+});
+
+describe("Story 38.1: the leg's own guard, its measure and `inconclusive (guard)`", () => {
+  test("legGuard: `host_verify_seconds`, else `max_wall_clock_seconds` (a pre-38.1 snapshot), else 600; a non-positive or non-number key falls through", () => {
+    expect(legGuard({ guards: { max_wall_clock_seconds: 50, host_verify_seconds: 7200 } })).toEqual({ seconds: 7200, key: "host_verify_seconds" });
+    expect(legGuard({ guards: { max_wall_clock_seconds: 3600 } })).toEqual({ seconds: 3600, key: "max_wall_clock_seconds" });
+    expect(legGuard(null)).toEqual({ seconds: 600, key: "max_wall_clock_seconds" });
+    expect(legGuard(undefined)).toEqual({ seconds: 600, key: "max_wall_clock_seconds" });
+    expect(legGuard({ id: "j" })).toEqual({ seconds: 600, key: "max_wall_clock_seconds" });
+    for (const bad of [0, -5, "7200", true, null, Number.NaN]) {
+      expect(legGuard({ guards: { max_wall_clock_seconds: 90, host_verify_seconds: bad } })).toEqual({ seconds: 90, key: "max_wall_clock_seconds" });
+      expect(legGuard({ guards: { host_verify_seconds: bad, max_wall_clock_seconds: bad } })).toEqual({ seconds: 600, key: "max_wall_clock_seconds" });
+    }
+  });
+
+  test("the trip text names the key: `host_verify_seconds` by default", () => {
+    expect(wallClockTrip(7200)).toBe("guard: host_verify_seconds (7200s)");
+    expect(wallClockTrip(1, "max_wall_clock_seconds")).toBe("guard: max_wall_clock_seconds (1s)");
+  });
+
+  test("a pre-38.1 key reaches the event: `opts.guardKey` names every step's trip", async () => {
+    const fx = project(hostKey(bunCmd("console.error('hung here'); setTimeout(() => {}, 60000)")));
+    const v = await hostVerify(fx.run, 1, {}, { guardKey: "max_wall_clock_seconds" }) as HostVerifyRan;
+    expect(v.guard).toBe("guard: max_wall_clock_seconds (1s)");
+    expect(isRed(v)).toBe(true); // no suite verdict printed: red
+  }, 20_000);
+
+  test("the leg's env carries `TK_SUPERVISOR_HOST_LEG=<run id>` (verify_host.py's own run skips its beside-leg check)", async () => {
+    const fx = project(hostKey(bunCmd("console.log('leg=' + process.env.TK_SUPERVISOR_HOST_LEG)")));
+    const v = await hostVerify({ ...fx.run, run_id: "q-38-1" }, 60) as HostVerifyRan;
+    expect(v.stdout_tail).toEqual(["leg=q-38-1"]);
+  });
+
+  test("suiteDurations: the last `== durations:` line; else the gate-level `ok|FAILED … in Ns` lines before the first tail header; else none", () => {
+    expect(suiteDurations(["== durations: lib suite=1s", "== lib suite: ok in 3s", "== durations: lib suite=1203s, conformance=412s, supervisor=1810s", "verify_host: ok (lib suite, conformance, supervisor)"].join("\r\n")))
+      .toEqual({ "lib suite": 1203, conformance: 412, supervisor: 1810 });
+    expect(suiteDurations([
+      "== lib suite: uv run python -m unittest discover tests  (cwd plugins/tk-studio/lib)", "== lib suite: ok in 3s",
+      "== conformance: FAILED rc=1 in 9s", "== supervisor: apps/supervisor changed since 0123456789ab",
+      "== supervisor: bun install (node_modules absent) ok in 5s", "== supervisor: test/a.test.ts 5 pass, 0 fail in 1s",
+      "== supervisor: tsc ok in 30s", "== supervisor: ok in 44s; 39 files, 900 pass, 0 fail; slowest test/a.test.ts 9s",
+      "== studio-web: skipped (apps/studio-web unchanged since 0123456789ab)",
+      "", "== conformance failed (rc=1); last 1 lines:", "== studio-web: ok in 99s",
+    ].join("\n"))).toEqual({ "lib suite": 3, conformance: 9, supervisor: 44 });
+    expect(suiteDurations("plain output\n")).toEqual({});
+    expect(LEG_SUITES).toEqual(["lib suite", "conformance", "supervisor", "studio-web"]);
+  });
+
+  test("suite_durations on the event: green, red and guard alike; absent when none printed", async () => {
+    const green = await hostVerify(project(hostKey(bunCmd("console.log('== lib suite: ok in 3s'); console.log('== durations: lib suite=3s'); console.log('verify_host: ok (lib suite)')"))).run, 60) as HostVerifyRan;
+    expect(green).toMatchObject({ green: true, suite_durations: { "lib suite": 3 } });
+    expect("verdicts" in green).toBe(false);
+    expect(prSection(green).join("\n")).toContain("Green: `");
+    expect(prSection(green).join("\n")).toContain("\n\nDurations: lib suite 3s\n");
+    const red = await hostVerify(project(hostKey(bunCmd("console.log('== lib suite: FAILED rc=1 in 4s'); console.log('== durations: lib suite=4s'); process.exit(1)"))).run, 60) as HostVerifyRan;
+    expect(red).toMatchObject({ green: false, suite_durations: { "lib suite": 4 } });
+    expect(prSection(red).join("\n")).toContain("Durations: lib suite 4s");
+    const bare = await hostVerify(project(hostKey(bunCmd("console.log('plain')"))).run, 60) as HostVerifyRan;
+    expect("suite_durations" in bare).toBe(false);
+    expect(prSection(bare).join("\n")).not.toContain("Durations:");
+  });
+
+  /** A ran leg's host step, shaped as the event records it. */
+  const ran = (o: Partial<HostVerifyRan>): HostVerifyRan => ({ command: "uv run tools/verify_host.py", argv: ["uv"], cwd: "/w", exit: null, duration_ms: 7200000,
+    green: false, stdout_tail: ["== lib suite: ok in 3s"], stderr_tail: [], engine: { verdict: "skipped", reason: "verify.host red", godot_dir: null },
+    playable: { verdict: "skipped", reason: "no playable" }, ...o });
+
+  test("guardInconclusive: a host guard trip after at least one gate-level verdict, none red; a hang with no verdict, a red suite, an error stay red", () => {
+    const guard = "guard: host_verify_seconds (7200s)";
+    const timed = ran({ guard, verdicts: ["== lib suite: ok in 1203s", "== conformance: ok in 412s"], suite_durations: { "lib suite": 1203, conformance: 412 } });
+    expect(guardInconclusive(timed)).toBe(true);
+    expect(isInconclusive(timed)).toBe(true);
+    expect(isRed(timed)).toBe(false);
+    expect(legVerdict(timed)).toBe("inconclusive");
+    expect(inconclusiveReason(timed)).toBe("host verify inconclusive (guard): timed out (guard: host_verify_seconds (7200s)) with every verdict so far green; unrun: supervisor, studio-web");
+    // a skipped gate is a verdict, so not unrun
+    expect(inconclusiveReason(ran({ guard, verdicts: ["== lib suite: ok in 1s", "== conformance: ok in 1s", "== supervisor: ok in 1s", "== studio-web: skipped (x)"] })))
+      .toEndWith("; unrun: none");
+    // stays red: no verdict, a red suite, a spawn error, no guard
+    for (const v of [ran({ guard }), ran({ guard, verdicts: ["== lib suite: ok in 3s", "== conformance: FAILED rc=1 in 9s"] }),
+      ran({ guard, verdicts: ["== lib suite: ok in 3s", "== supervisor: test/x.test.ts 3 pass, 1 fail in 2s rc=1"] }),
+      ran({ guard, error: "x", verdicts: ["== lib suite: ok in 3s"] }), ran({ exit: 1, verdicts: ["== lib suite: ok in 3s"] })]) {
+      expect(guardInconclusive(v)).toBe(false);
+      expect(isRed(v)).toBe(true);
+    }
+    // an engine-step trip after a green host stays red
+    const engine = ran({ exit: 0, stdout_tail: [], engine: { verdict: "red", command: "e", exit: null, guard, godot_dir: null } });
+    expect(isRed(engine)).toBe(true);
+    expect(redReason(engine)).toStartWith("host verify red (engine): ");
+    // the playable branch unchanged
+    expect(inconclusiveReason(ran({ exit: 0, playable: { verdict: "inconclusive", reason: "infrastructure: sbx: x" } }))).toBe("host verify inconclusive (playable): infrastructure: sbx: x");
+  });
+
+  test("the PR section of `inconclusive (guard)`: Timed out, the verdicts, the durations, the fences; never \"failed\" or \"Red\" outside the fences", () => {
+    const guard = "guard: host_verify_seconds (7200s)";
+    // the engine and assets skip reasons as `hostVerify` writes them for a guard-tripped host (a slice run)
+    const v = ran({ guard, verdicts: ["== lib suite: ok in 1203s"], suite_durations: { "lib suite": 1203 }, stdout_tail: ["== conformance: running FAILED-looking output"], stderr_tail: ["Red herring"],
+      engine: { verdict: "skipped", reason: "verify.host timed out", godot_dir: null }, assets: { verdict: "skipped", reason: "verify.host timed out", steps: [] } });
+    const lines = prSection(v);
+    const text = lines.join("\n");
+    expect(text).toContain("**Timed out:** `uv run tools/verify_host.py` — guard: host_verify_seconds (7200s) (7200.0s); every verdict so far green; unrun: conformance, supervisor, studio-web");
+    expect(text).toContain("Verdicts:\n\n- `== lib suite: ok in 1203s`\n\nDurations: lib suite 1203s\n\nstderr (last lines):");
+    expect(text).not.toContain("**Red:**");
+    // outside the fences
+    const outside = text.replace(/```[\s\S]*?```/g, "");
+    expect(outside).toContain("Engine gate: skipped (verify.host timed out)");
+    expect(outside).toContain("Assets: skipped (verify.host timed out)");
+    expect(outside).not.toMatch(/failed/i);
+    expect(outside).not.toMatch(/red/i);
   });
 });

@@ -14,7 +14,7 @@ import {
   driftingPlanes, worktreeClean, editPrBody, markPrDraft, markPrReady, proofCommit, proofCommitDue, treeClean, withRunWorktreeRollback,
 } from "../src/worktree";
 import { FRAMES_DIR, legVerdict, type HostVerifyResult, type PlayableJudge } from "../src/hostverify";
-import { fakeGh, fakeSbx, gitRepo, testGit } from "./fakes";
+import { fakeGh, fakeSbx, gitRepo, LEG_GUARD_ROWS, testGit } from "./fakes";
 import { sliceRecorder } from "./helpers/slice";
 import { tempDir, track } from "./tmp";
 
@@ -1052,28 +1052,52 @@ describe("Story 27.4: the host verify leg runs before any PR opens", () => {
     expect(fx.gh.calls().find((c) => c.argv[1] === "create")!.argv).toContain("--draft"); // Story 36.3 (DW-64)
   });
 
-  /** A hanging verify command (prints, then sleeps 60s): the leg trips the run's guard. */
+  /** A hanging verify command (prints, then sleeps 60s): the leg trips its own guard. */
   const HANG = bunCmd("console.error('hung here'); setTimeout(() => {}, 60000)");
-  const setGuards = (fx: { queue: Queue; run: { run_id: string }; defn: Record<string, unknown> }, workerGuardS: number | null, defnGuardS: number) =>
+  /** Story 38.1: the run's `worker_guard_s` and its definition snapshot's `guards` (a `LEG_GUARD_ROWS` row). */
+  const setGuards = (fx: { queue: Queue; run: { run_id: string }; defn: Record<string, unknown> }, workerGuardS: number | null, guards: Record<string, number>) =>
     (fx.queue as any).db.query("UPDATE runs SET worker_guard_s = ?, definition = ? WHERE run_id = ?")
-      .run(workerGuardS, JSON.stringify({ ...fx.defn, guards: { max_wall_clock_seconds: defnGuardS } }), fx.run.run_id);
+      .run(workerGuardS, JSON.stringify({ ...fx.defn, guards }), fx.run.run_id);
 
-  test("the guard: the run's `worker_guard_s` (before the definition's) bounds the leg, the trip named → `partial`", async () => {
-    const fx = await launchedSbx(HANG);
-    setGuards(fx, 1, 50);
+  // Story 38.1 (AC1): the sweep tail's leg reads `legGuard`, never `worker_guard_s`: the one table's rows.
+  for (const row of LEG_GUARD_ROWS) {
+    test(`Story 38.1: the sweep tail's guard — ${row.name} → \`${row.trip}\`, red, \`partial\``, async () => {
+      const fx = await launchedSbx(HANG);
+      setGuards(fx, row.workerGuardS, row.guards);
+      fx.answers.launch = { ok: true, run: { status: "finished" } };
+      expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
+      expect(hv(fx)[0]!.detail).toMatchObject({ green: false, exit: null, guard: row.trip, stderr_tail: ["hung here"] });
+      expect(fx.get()).toMatchObject({ state: "partial", reason: `host verify red: \`${HANG}\` timed out (${row.trip}); last lines: hung here` });
+    }, 30_000);
+  }
+
+  test("Story 38.1 (CAP-3): the close-out notes its `host-verify-leg` lease before the leg, and the leg's `host-verify` closes it", async () => {
+    const fx = await launchedSbx(bunCmd("console.log('all green')"));
     fx.answers.launch = { ok: true, run: { status: "finished" } };
     expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
-    expect(hv(fx)[0]!.detail).toMatchObject({ green: false, exit: null, guard: "guard: max_wall_clock_seconds (1s)", stderr_tail: ["hung here"] });
-    expect(fx.get()).toMatchObject({ state: "partial", reason: `host verify red: \`${HANG}\` timed out (guard: max_wall_clock_seconds (1s)); last lines: hung here` });
-  }, 30_000);
+    const evs = fx.queue.events(fx.run.run_id);
+    const lease = evs.findIndex((e) => e.kind === "host-verify-leg");
+    expect(lease).toBeGreaterThanOrEqual(0);
+    expect(evs[lease]!.detail).toMatchObject({ by: "close-out", owner: { pid: expect.any(Number), host: expect.any(String), nonce: expect.any(String) } });
+    expect(evs.findIndex((e) => e.kind === "host-verify")).toBeGreaterThan(lease);
+    expect(evs.filter((e) => e.kind === "host-verify-leg")).toHaveLength(1);
+  });
 
-  test("the guard: no `worker_guard_s` → the job definition's `guards.max_wall_clock_seconds`", async () => {
-    const fx = await launchedSbx(HANG);
-    setGuards(fx, null, 1);
+  test("Story 38.1 (CAP-2): a tail leg ended on the guard with every verdict so far green is `inconclusive (guard)`: `partial`, a draft, Timed out", async () => {
+    const GUARDED = bunCmd("console.log('== lib suite: ok in 3s'); setTimeout(() => {}, 60000)");
+    const fx = await launchedSbx(GUARDED);
+    setGuards(fx, 50, { max_wall_clock_seconds: 50, host_verify_seconds: 1 });
     fx.answers.launch = { ok: true, run: { status: "finished" } };
     expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
-    expect(hv(fx)[0]!.detail).toMatchObject({ green: false, exit: null, guard: "guard: max_wall_clock_seconds (1s)" });
-    expect(fx.get().state).toBe("partial");
+    expect(hv(fx)[0]!.detail).toMatchObject({ green: false, guard: "guard: host_verify_seconds (1s)", verdicts: ["== lib suite: ok in 3s"], suite_durations: { "lib suite": 3 } });
+    const reason = "host verify inconclusive (guard): timed out (guard: host_verify_seconds (1s)) with every verdict so far green; unrun: conformance, supervisor, studio-web";
+    expect(fx.get()).toMatchObject({ state: "partial", reason });
+    const create = fx.gh.calls().find((c) => c.argv[1] === "create")!;
+    expect(create.argv).toContain("--draft");
+    expect(create.body).toContain("**Timed out:**");
+    expect(create.body).toContain("Durations: lib suite 3s");
+    expect(create.body).not.toContain("**Red:**");
+    expect(prCalls(fx).some((c) => c.argv[1] === "ready")).toBe(false);
   }, 30_000);
 
   /** The first sweep's close-out runs, then its transition and its `closed_out` record both fail (a crash's
