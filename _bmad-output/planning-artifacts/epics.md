@@ -3781,3 +3781,163 @@ So that the next retrospective audits true records and the owner's decided items
 **Given** `[limits] max_followup_reviews = 1` (`.bmad-loop/policy.toml:10`, one global figure; `routing.toml`'s band table with no field; `launch.py:221` `BUDGET_NOT_COMPARED`), Tim's R5 (TKSTUDIO-211: the cap 2 for band L only; DW-175) and DW-182's three parts
 **When** this story lands
 **Then** a per-band override (`[limits.by_band] L = { max_followup_reviews = 2 }`, or a column in `routing.toml`'s band table) is read by the engine's cap check (a base patch beside the others in `kb/bmad-base-patches.md` when the engine does not read it), `launch.py` compares it like the other band figures (`BUDGET_COMPARED`) and the loop's README names the policy; the 36-6 ask's v3 read reads `expand=values.transitions` wherever quoted (the 36-6 spec `:263`, 37-7's CAP-16) and `find_workflow_version` uses it; the setup's folder step hands the five folders to the owner's numbered steps when the children read is refused by scope (no unadopted folder created) and a `setup --verify-workflow` form (one global transition removed and restored on a scratch project key) exists behind its flag, the live call staying Tim's; the follow-up-review entries (DW-145, 152, 156, 158, 163, 181) stay `open (owner's decision …)` and the handoff carries one list of what stays Tim's (TKSTUDIO-220 to 224, the fourth sweep's `max_runs` once 38.3 lands, DW-178, DW-179, the pre-36.6 engagement jobs' rhythm, the TUA reachability proof, the attended engagement); nothing else is decided here; the contract names the band override (0.1.34, additive)
+
+## Epic 39: The Studio as a Place: the Front End the Owner Works In
+
+Tim's direction of 2026-11-07, given while Epic 38's first run was in flight: "change focus a bit to build out the web UI: animated studio, agents/sub-agents as characters, user messaging system, kanban, task progress, studio chat interface, model and effort settings … I want to start interacting with the studio in the way that a user normally would … put a front end on the studio so that we can start unifying inputs and outputs … I'd rather not have to continue to give instructions via the claude code app as my primary means of interaction." The brief and the UX notes are the design addendum `_bmad-output/planning-artifacts/design/studio-design-spec-2026-11-07-front-end/README.md` (§0 the words, §1 the base, §2 the gaps, §3 the shape, §4 the choices, §5 the owner's open questions, §6 what is out); it extends the design spec of 2026-10-09 (§6.3, §6.4, §6.9, §7.2 to §7.4) and overrides none of its rulings. What exists today: the studio web of Epics 29 to 32 (`apps/studio-web`: the office with one figure per role, the row board, the inbox and issue view over the sync-back's `inbox.json`, the engagement chat over `POST /chat/{id}`, the status screen, the sprite pipeline of our own pixels; `apps/supervisor/src/web.ts`, `office.ts`, `board.ts`, `inbox.ts`, `chat.ts`, `api.ts`), the queue's events and the engine's journal as the office's inputs, routing's model and effort in `routing.toml` / `routing.current.json` through `plugins/tk-studio/lib/pipeline.py` (AD-14). Rulings in force: D1 one repository; D5 PixiJS canvas for floor and characters, React DOM for text, desktop and iPad first; D6 our own pixels; D7 one account behind the session cookie; D9 the supervisor is the only writer (the web requests, the supervisor runs the studio's verb on the host and records a service event; the web never edits a file); D10 the tailnet; AD-11 the chat is the orchestrator's headless core and routes as the terminal does; AD-14 routing owns model and effort; the owner's 2026-11-05 rule that every pending state carries a human-readable label. The eight stories run in the order of the owner's use: addresses first (every notice can link into the page), the studio chat second (the owner stops needing the Claude Code app), then what there is to see (the kanban and the story, the run's timeline, the sessions and sub-agents as characters), then what there is to answer (messages both ways and the check-in model, DW-178 and DW-48), then the settings, then the phone fit and the records. The drive is Epic 38's: one story per `POST /jobs {project: tk-studio, job: run-epic-39}` on the sandbox tier (`claude-tk-studio`), the close-out's host leg running `tools/verify_host.py` (which runs `bun run verify` in `apps/studio-web` when it changed, its own gate), merge on green, the next story queued only after the landing's docs PR merges; `run-epic-39.json` carries the Epic 38 guards block until Story 38.1's own host-leg guard is on `main`, after which the planner drops it. The driver contract grows additively to 0.1.35 (the new routes `GET /stories/{id}`, `POST /stories/{id}/status`, `POST /chat`, `GET /chat`, `POST /engagements/{id}/checkin/{n}`, `GET`/`PUT /settings/routing`, the `office.session` delta and the snapshot's `sessions[]` and `studio` fields, the inbox item's `kind` and `route`, the notifier line's route); every new route is cookie + CSRF for the owner's browser and bearer for tools, beside the existing ones in `apps/supervisor/src/api.ts`. Sizing by band: 39.1 S, 39.2 L, 39.3 M, 39.4 M, 39.5 L, 39.6 L, 39.7 M, 39.8 M. Repository paths: `apps/studio-web` (`src/`, `assets/`, `public/sprites/`, `README.md` as the per-story record), `apps/supervisor/src` (`api.ts`, `office.ts`, `board.ts`, `inbox.ts`, `chat.ts`, `engagement.ts`, `approve.ts`, `hygiene.ts`, `delivery.ts`, `queue.ts`, `registry.ts`), `plugins/tk-studio/lib` (`pipeline.py`, `track.py`, `engage.py`, `plansync.py`), `plugins/tk-studio/jobs` (the shipped `studio-chat` job), `.bmad-loop/plugins/studio-pipeline` (the session hooks), `plugins/tk-studio/contracts/driver-contract.md`, `kb/`. Not taken here: a public mode (D10), a second account, voice, a separate native phone app, editing plan text in the web, the nightly hygiene pass (DW-179, an Epic 40 candidate), the game asset pipeline, any change to the engine's own loop, the owner's open Tasks TKSTUDIO-233 to 236 and the follow-up-review entries. The addendum's §5 questions (the characters' look, the chat's voice, a chime, the check-in defaults) are asked through this plan's PR and answered in the addendum before 39.2 and 39.5 run; a question still open when its story runs is decided by the story's default named there.
+
+### Story 39.1: The Web Has Addresses
+
+As the owner,
+I want every screen and every thing in the studio web to have a URL, and every notice the studio sends me to carry the one URL that answers it,
+So that a link from my phone or a chat reply opens the right page, and the back button works (addendum §3.3).
+
+**Acceptance Criteria:**
+
+**Given** the studio web (`apps/studio-web/src/App.tsx`, whose screen is a `localStorage` key today)
+**When** Story 39.1 lands
+**Then** the app has a router over history URLs under `/app` (the supervisor's SPA fallback in `apps/supervisor/src/web.ts:60-83` already serves them): `/app` redirects to `/app/office`; `/app/office/<project>`, `/app/board/<project>`, `/app/story/<ST-id>`, `/app/run/<run-id>`, `/app/inbox`, `/app/inbox/<KEY>`, `/app/chat`, `/app/chat/<engagement-id>`, `/app/checkin/<engagement-id>/<n>`, `/app/status`, `/app/settings` resolve to their screens (the ones not yet built render a named placeholder: "Not built yet: Story 39.N"); the nav sets the URL; back and forward switch screens; the remembered `tk-studio.web.screen` and `tk-studio.web.issue` keys are migrated once and no longer written; `src/screen.test.ts` pins the route table and the redirect.
+
+**Given** the notifier lines (`apps/supervisor/src/hygiene.ts` one line per terminal run; `approve.ts` and `delivery.ts` the cap and close-out lines; `plugins/tk-studio/lib/track.py block` the Jira block form)
+**When** a line is sent after this story
+**Then** it carries the route that answers it (a run's end → `/app/run/<id>`; a block → `/app/inbox/<KEY>`; a cap or close-out → `/app/chat/<engagement-id>`), rendered as an absolute URL from the supervisor's own origin (`TK_SUPERVISOR_TLS_NAME`, else the bind), and the Jira block comment ends with the same URL; a line with no route keeps today's PR or close-out URL; a unit test per sender pins the URL and the contract's notifier section names the field (0.1.35, additive).
+
+**Given** the home `GET /` (`api.ts`), which serves the built web's `index.html`
+**When** the owner opens it signed in
+**Then** it lands on `/app/office`; signed out it lands on the sign-in and returns to the requested route after; the no-JS page at `/status` stays as it is.
+
+### Story 39.2: The Studio Chat
+
+As the owner,
+I want to talk to the studio itself from the web and have it answer, streaming, and offer the action it would take as a button,
+So that I give the studio its instructions in the page and not in the Claude Code app (addendum §3.8; AD-11).
+
+**Acceptance Criteria:**
+
+**Given** the shipped jobs in `plugins/tk-studio/jobs/` and the `engagement-chat` pattern (`apps/supervisor/src/chat.ts`, `plugins/tk-studio/lib/engage.py reply`)
+**When** Story 39.2 lands
+**Then** a shipped one-shot job `studio-chat` exists (planner tier, host, `claude -p` with the plugin, `--output-format stream-json`): its session runs the `tk-studio-orchestrator` core headless (`orchestrate.py resolve` for the owner's role and working set; the council shell loaded as presentation and never a routing input), reads the owner's line and the chat so far from `_bmad-output/tracking/studio-chat.jsonl`, answers questions of state from the same reads the pages use (`GET /board`, `GET /runs/{id}`, `GET /office`, the ledger, the queue) and writes one reply record with `proposals[]` whose kinds are `queue {project, job}`, `answer {id, letter, note}`, `open {route}`, `engagement {title}`, `stop-after-story`, `open-studio` (the last two land in 39.6 and are refused by name until then); the job's `.json` names its description, the tier and `stop {max_runs: 1}`; `job.py validate` resolves it.
+
+**Given** the supervisor API (`api.ts`) and the chat SSE of Story 32.7
+**When** the owner posts a line
+**Then** `POST /chat {project, text}` (cookie + CSRF, or bearer) appends the line to `studio-chat.jsonl`, queues one `studio-chat` run (a second line while one runs queues behind it and the answer says so: "Queued behind the reply to '…'"), records a `chat-queued` service event and answers `{run_id, seq}`; `GET /chat?project=` returns the lines and replies as JSON, or, with `Accept: text/event-stream`, the same `event: chat` frames as the engagement chat plus `event: chat-delta` frames carrying the reply text as the session produces it (the worker tails the session's stream-json stdout; the delta carries text only); the record on disk is the whole reply once the run ends; the contract names both routes (0.1.35, additive); `api.test.ts` covers the post, the queueing, the delta frame and the refusal of a line over 4,000 characters by name.
+
+**Given** the Chat screen (`apps/studio-web/src/chat/*`)
+**When** `/app/chat` is opened
+**Then** it shows the studio conversation (the engagement chats stay at `/app/chat/<id>`), the owner's line, the streaming reply with a cursor, the pending label "Waiting for the planner's reply (about a minute)" with the queue position when queued behind another, and each proposal as a button whose press sends the typed request the supervisor already knows (`POST /jobs` for `queue`, `POST /inbox/{key}/reply` for `answer`, navigation for `open`, `POST /engagements` for `engagement`); a pressed proposal is recorded as the owner's line "pressed: …"; `src/chat/model.test.ts` pins the delta assembly and the proposal mapping; `apps/studio-web/README.md` records the story.
+
+**Given** the attended orchestrator in a terminal and the same words typed in the page
+**When** both resolve
+**Then** the routing payload (`orchestrate.py resolve`) is identical (AD-11), pinned by a test in `plugins/tk-studio/lib/tests` that runs the resolve through the job's entry and through the skill's documented command and compares the JSON.
+
+### Story 39.3: The Kanban and the Story
+
+As the owner,
+I want a board of columns per status with a card per story, and a page per story with its plan text, its Stage Log, its runs and its PR,
+So that I see where every story is and what each one cost without opening Jira or the repository (addendum §3.2 F-D).
+
+**Acceptance Criteria:**
+
+**Given** the plan store (`_bmad-output/planning-artifacts/plan/ST-*.md`, canonical statuses `draft, ready, in-progress, blocked, review, done, dropped`), the Stage Log tables in the story specs and `_bmad-output/tracking/stage-posts.json` (`plansync.py stage`, `stage-post`)
+**When** Story 39.3 lands
+**Then** `GET /stories/{id}?project=` (cookie or bearer) answers one story: its frontmatter (id, title, status, parent, band, `external.jira.key`), its plan text, its Stage Log rows (stage, start, stop, model, tokens, cost) read from the spec on the host, its runs (from the queue, with state, PR and cost), its findings and PR from `board.ts`'s composition; a missing story is a named 404; the composition is cached on file mtimes as `GET /board` is; the contract names the route (0.1.35, additive); `board.test.ts` or a new `stories.test.ts` covers the composition and the 404.
+
+**Given** the Board screen (`apps/studio-web/src/board/*`)
+**When** `/app/board/<project>` is opened
+**Then** it offers the kanban view (default) beside today's row view: one column per canonical status, a card per story with the epic badge, id and title, band, Jira key, PR number, cost and the current stage (from `office.progress`), "Needs you" marked; a card opens `/app/story/<id>`; a card dragged from `draft` to `ready` sends `POST /stories/{id}/status {status: "ready"}` and shows the hint "Requests plansync status ready; the loop owns every other column"; any other drag is refused in the page with the reason.
+
+**Given** `POST /stories/{id}/status` (cookie + CSRF, or bearer)
+**When** the body asks `ready` for a `draft` story
+**Then** the supervisor runs `plansync.py status` on the host for that id (the verb the loop's plan-status pass uses, `apps/supervisor/src/planstatus.ts`), records a `plan-status` service event with the actor `owner`, and answers the new frontmatter; any other transition is refused by name (`StoryStatusNotOwnerWritable`) with the column that owns it; a story whose plan lease is held (`plan-lease` events) is refused with the holder named; `api.test.ts` covers the accepted transition, both refusals and the lease case.
+
+**Given** the story page (`apps/studio-web/src/story/*`, new)
+**When** `/app/story/<id>` is opened
+**Then** it shows the plan text, the Stage Log table with a total line, the runs with links to `/app/run/<id>`, the PR and findings, the Jira key as a link, and the "Needs you" strip with the inbox item when one exists; pending reads say "Loading the story…"; `src/story/model.test.ts` pins the model.
+
+### Story 39.4: The Run's Timeline and the Progress in View
+
+As the owner,
+I want a run shown as a timeline from claim to close-out with its clock against its guard and its cost per stage, and the queue shown with what is queued, running and paused,
+So that I can tell at a glance whether a run is healthy and how long it has left (addendum §3.2 F-A).
+
+**Acceptance Criteria:**
+
+**Given** `GET /runs/{id}` (`api.ts:1249-1262`: the run row, its events, `cost_usd`) and the host-leg measures of Story 38.1 (`guard: host_verify_seconds`, the suite durations on the `host-verify` event)
+**When** Story 39.4 lands
+**Then** a run page at `/app/run/<id>` (`apps/studio-web/src/run/*`, new) draws the timeline from the run's events: `claimed`, `launched`, each engine session (`session-start/end` by role from the journal, carried on the snapshot's `sessions[]` once 39.5 lands and from the events until then), each review pass, the host leg with its per-suite durations when the event carries them, the close-out; the clock shows elapsed against the run's guard (`worker.guard_s`, and the leg's own guard during the leg) with the label "01:12:40 of 02:00:00"; the cost per stage comes from the Stage Log rows (`GET /stories/{id}`) when the story is known, else the run total; the events list sits below with `detail` folded; Cancel calls `POST /runs/{id}/cancel` and names its consequence first; a run that ended shows its final state and reason in words.
+
+**Given** the Status screen (`apps/studio-web/src/status/*`) and the office snapshot
+**When** opened after this story
+**Then** it lists the queue (queued, claimed, running, paused runs with their job, story, start and clock) above the counts, each a link to its run page, with Cancel and, for a paused run, the reason in words and the inbox item that resolves it; the office HUD shows the current stage ("review pass 2 of 2") from `office.progress`, which gains the `stage` field (`office.ts`, the contract 0.1.35, additive); `src/status/model.test.ts` and `office.test.ts` pin the new fields.
+
+### Story 39.5: Sessions and Sub-Agents as Characters
+
+As the owner,
+I want to see every live session and the sub-agents it spawns as characters in the office, each doing what it is doing, and to click one and see what it is up to,
+So that the office shows the studio as it works, not one still figure per role (addendum §3.4).
+
+**Acceptance Criteria:**
+
+**Given** the sandbox session's hook plugin `.bmad-loop/plugins/studio-pipeline` (which runs `meter_hook.py` today) and the engine journal
+**When** Story 39.5 lands
+**Then** the plugin registers `SubagentStart`, `SubagentStop` and `PreToolUse` hooks that append one JSON line per event to `.bmad-loop/runs/<engine-run-id>/agents.jsonl` (`{at, session_id, agent_id, parent, description, event, tool}`; `tool` is the tool's name only, never its input; the hook writes nothing else and exits 0 on any error so a session is never blocked by it); a unit test in the plugin's tests pins the line shape and the no-secret rule; the base patch, if the plugin's manifest needs one, is recorded in `kb/bmad-base-patches.md`.
+
+**Given** the office projection (`apps/supervisor/src/office.ts`, `OFFICE_MAP`) and its stream
+**When** a run is live
+**Then** the snapshot carries `sessions[]` (`{id, role, kind: engine|launch|host-verify|closeout, parent, name, state, story, run_id, started_at, cost_usd}`) built from the journal's `session-start/end`, the queue's `session`, `worker`, `host-verify-leg` and `closing-out` events and `agents.jsonl` (a sub-agent is a session with a `parent`); a session's state follows its latest `PreToolUse` tool (`Read|Grep|Glob → reading`, `Edit|Write → typing`, `Bash → running`, else `thinking`) with the grace-timer demotion of §7.3; the stream sends `office.session` deltas; the snapshot's `studio {state: open|closed, since}` reads the latest `studio-open`/`studio-closed` service event (written by 39.6; `open` when none exists); the contract names the fields (0.1.35, additive); `office.test.ts` pins the mapping from a fixture journal and `agents.jsonl`.
+
+**Given** the renderer and the office screen (`apps/studio-web/src/renderer/scene.ts`, `src/office/*`, `assets/`, `tools/sprites/export.py`)
+**When** the snapshot carries sessions
+**Then** each engine session is a character at its role's desk (a second concurrent session of a role at a second chair), each sub-agent a smaller character beside its parent with its description as a name tag, the launch, host-verify and close-out sessions at the orchestrator's desk; a character walks in from the door on start and out on stop (the one tween; off when the Settings toggle of 39.7 says so, and until then on); the sheet gains `session.<state>.<n>` and `subagent.<state>.<n>` frames as text grids exported by `export.py --check` byte-reproducibly (D6); clicking a desk or a character opens a side panel with its last twenty events, its story and stage, its cost so far and a link to `/app/run/<id>`; the closed state draws no character, dims the floor and says "The studio is closed since <time>; open it from the chat"; `src/office/model.test.ts` and `renderer/scene.test.ts` pin the placement and the frames; `apps/studio-web/README.md` records the story and the sheet's new regions.
+
+### Story 39.6: Messages Both Ways and the Check-In
+
+As the owner,
+I want one inbox that holds everything that waits on me or informs me, each item answerable in the page, and check-in points agreed at approval that ask me to continue or stop from a link,
+So that Jira is the record and the fallback, not the channel (addendum §3.5, §3.6; DW-178, DW-48).
+
+**Acceptance Criteria:**
+
+**Given** `GET /inbox` (`apps/supervisor/src/inbox.ts`) over the sync-back's `inbox.json`, the engagement questions of 32.3 and the notifier senders
+**When** Story 39.6 lands
+**Then** an inbox item carries `kind` (`decision | question | checkin | notice | message`) and `route`; `decision` items are the Jira-backed blocks as today (the sweep's and the operator's Tasks included), `question` items the engagement's open question sets, `checkin` items the reached check-ins, `notice` items the last fifty notifier lines (a run's end, a cap, a close-out, a pause) read from a new `_bmad-output/tracking/notices.jsonl` that the senders append to, `message` items the studio chat's lines and replies; the list is sorted "needs you" first, then time; the contract names the fields (0.1.35, additive); `inbox.test.ts` pins the merge and the order from fixtures.
+
+**Given** the engagement record and the approval step (`apps/supervisor/src/engagement.ts`, `approve.ts` runStep)
+**When** the owner approves an engagement
+**Then** the approval carries `checkins[]` (`{n, kind: milestone|budget|proof, when, what_to_show}`), proposed by the planner as one at the first landed story, one at half the quote band and one at the end, editable in the Approve card; a reached check-in (the story landed, the spend crossed, the proof recorded) holds the engagement's queueing after the running story (`engagement-checkin` service event), writes the `checkin` item with `what_to_show` rendered (the PR, the board slice at `/app/board/<project>`, the proof's record, the spend) and sends the notifier line with `/app/checkin/<id>/<n>`; `POST /engagements/{id}/checkin/{n} {decision: continue|stop, note}` (cookie + CSRF, or bearer) resumes the queueing or ends the engagement; `stop` records `engagement-stopped` and `studio-closed` service events (the office of 39.5 goes dark), sends "stopped at check-in n by the owner" and leaves the engagement `closed` with the note; `continue` from a Jira comment on the engagement's issue stays as the fallback (`approve.ts:63-65`) and is logged as such; the `ask` autonomy is expressed as check-ins at every story (its old pause path retired); `POST /chat`'s `stop-after-story` and `open-studio` proposals land here (`studio-open` service event); the contract names the route and the events; `approve.test.ts` and `api.test.ts` cover a reached milestone, a budget crossing, continue, stop and the fallback.
+
+**Given** the web (`apps/studio-web/src/inbox/*`, `src/checkin/*` new)
+**When** `/app/inbox` or `/app/checkin/<id>/<n>` is opened
+**Then** the inbox shows the kinds with their marks and each item's answer control in place (the option buttons and a note for a decision, the cards for a question, Continue / Stop for a check-in, Open for a notice, the chat for a message); the check-in page shows "Check-in n of N: <kind in words>", what there is to evaluate, the spend against the band, the two buttons with the consequence stated before the press ("Stop finishes the running story, then closes the studio; the notifier will say so") and the note field; the page reached from a notifier link works signed-out through the sign-in and back; `src/inbox/model.test.ts` and `src/checkin/model.test.ts` pin the models; DW-178 and DW-48 are resolved by this PR (`plansync.py ledger-resolve --pr`), the 32-6 spec's `ask` paragraph is amended with a dated note, and `apps/studio-web/README.md` records the story.
+
+### Story 39.7: Model and Effort in the Owner's Hands
+
+As the owner,
+I want to see and change which model and effort each leg uses, the bands and the default autonomy, from a settings page, and to see the route the next run will take,
+So that resource choices are mine to make in the page and recorded like every other change (addendum §3.7; AD-14).
+
+**Acceptance Criteria:**
+
+**Given** routing (`plugins/tk-studio/lib/pipeline.py`, the project's `.bmad-loop/routing.toml` `[defaults]`, the resolved `.bmad-loop/routing.current.json`, the shipped `customize.toml` `[pipeline.legs]`), the bands (`.tk-studio/budget-bands.yaml`) and the per-band follow-up cap of Story 38.7 (`[limits.by_band]`)
+**When** Story 39.7 lands
+**Then** `GET /settings/routing?project=` (cookie or bearer) answers the legs with their configured and resolved `{model, effort, advisor}` and their source (shipped default, project default), the bands with `usd_estimate` and cap, the default autonomy, the per-band cap and the list of model ids routing accepts; `PUT /settings/routing` (cookie + CSRF, or bearer) with any subset of those fields writes the project's `routing.toml` `[defaults]`, `budget-bands.yaml` and `policy.toml`'s `[limits.by_band]` through `pipeline.py` on the host (never by the supervisor's own hand), re-resolves `routing.current.json`, records a `settings-changed` service event carrying the diff and the actor `owner`, and answers the new resolved route; an unknown model id, an effort outside routing's set or a cap below one is refused by name (`SettingsValueRefused`) and nothing is written; a write while a run is live applies to the next run and the answer says so; the contract names the routes and the event (0.1.35, additive); `api.test.ts` and a `pipeline.py` test cover a model change, a band change, the refusals and the live-run note.
+
+**Given** the web (`apps/studio-web/src/settings/*`, new)
+**When** `/app/settings` is opened
+**Then** it shows the legs table with model and effort selects from the accepted lists, the bands, the default autonomy, the per-band cap, the presentation toggles (movement, sound off by default, HUD detail; kept in `localStorage`, never sent), a "Resolved route for the next run" preview after a save, the "Saved as service event settings-changed at <time>" line, the banner "A run is live: changes apply to the next run" when one is, and "Loading the settings…" while reading; `src/settings/model.test.ts` pins the model; `apps/studio-web/README.md` and `kb/execution-pipeline-model-routing.md` record the owner's write path.
+
+### Story 39.8: The Phone Fits and the Records Are Whole
+
+As the owner,
+I want the inbox, the chat, a check-in, the status and a story to be usable on my phone from a notifier link, and the epic's records to be complete,
+So that I can answer the studio from wherever I am, and the next epic starts from a true account (addendum §4 choice 5; D5).
+
+**Acceptance Criteria:**
+
+**Given** the text screens (`/app/inbox`, `/app/inbox/<KEY>`, `/app/chat`, `/app/checkin/<id>/<n>`, `/app/status`, `/app/story/<id>`, `/app/run/<id>`)
+**When** opened at a phone width (375 px and 390 px, portrait) after Story 39.8
+**Then** each lays out in one column with touch targets of at least 44 px, no horizontal scroll, the nav as a bottom bar, the answer controls reachable without zoom, and the office and the kanban show a notice "Best on a desktop or iPad; the office and the board are not laid out for a phone" with a link to the inbox; a vitest over the layout model and a documented manual check on a phone through the tailnet (recorded in the story spec's Consult Log) prove it; the notifier links open on the phone through the sign-in.
+
+**Given** the epic's records
+**When** this story lands
+**Then** `apps/studio-web/README.md` carries one section per story of this epic, the design spec README's §6.3 points to the addendum, the addendum's §5 questions read answered or carried with the owner's words and dates, `kb/studio-front-end-epic-39.md` records the routes, the item kinds, the check-in model, the session hooks and the settings write path with file:line citations, every `by Story 39.x` ledger status carries its PR number (38.7's rule), the driver contract reads 0.1.35 with one paragraph per addition in story order, the measurements ledger carries the eight stories' engine costs, and the handoff names what stays the owner's (TKSTUDIO-233 to 236 and anything the epic adds); nothing else is decided here.
