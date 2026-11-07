@@ -11,9 +11,12 @@ one reader/writer of run workspaces:
               with no instance file that names a shipped type uses that type
               directly; an instance file may extend a type (`type:`) with
               instance fields overriding, target keys overlaying, payload
-              shallow-merging.
+              shallow-merging, guards merging key-wise (instance keys win;
+              Story 38.1).
   validation  rejects a definition missing budget guards or stop conditions —
-              a job never runs away (AD-10). Definition files are tracked, so
+              a job never runs away (AD-10). `guards.host_verify_seconds`
+              (Story 38.1) bounds the host verify leg, never the job, so it
+              does not satisfy the at-least-one guard rule. Definition files are tracked, so
               they are AD-3-classified too: credential-shaped content or
               absolute machine paths refuse.
   run state   ~/.tk-studio/projects/<key>/runs/<run-id>/run.json — atomic
@@ -190,9 +193,12 @@ def _validate_guards(guards: object, problems: list[str]) -> None:
     unknown = set(guards) - set(GUARD_KEYS)
     if unknown:
         problems.append(f"guards has unknown field(s): {', '.join(sorted(unknown))}")
-    if not set(guards) & set(GUARD_KEYS):
+    # Story 38.1: the host leg's own guard bounds the leg, never the job (the
+    # after_stories precedent in _validate_stop)
+    job_guards = [k for k in GUARD_KEYS if k != "host_verify_seconds"]
+    if not set(guards) & set(job_guards):
         problems.append("guards must set at least one of "
-                        f"{'|'.join(GUARD_KEYS)} — a job never runs away (AD-10)")
+                        f"{'|'.join(job_guards)} — a job never runs away (AD-10)")
     for key in set(guards) & set(GUARD_KEYS):
         if not _positive(guards[key]):
             problems.append(f"guards.{key} must be a number > 0")
@@ -335,8 +341,9 @@ def load_types() -> dict:
 
 def resolve_instance(defn: dict, types: dict | None = None) -> tuple[dict, list[str]]:
     """Apply type extension: instance fields override the shipped type's,
-    target keys overlay, payload shallow-merges (instance wins); the merged
-    definition carries the instance's ``type`` (Story 34.8)."""
+    target keys overlay, payload shallow-merges (instance wins), guards merge
+    key-wise (instance keys win; Story 38.1); the merged definition carries
+    the instance's ``type`` (Story 34.8)."""
     if "type" not in defn:
         return defn, []
     types = load_types() if types is None else types
@@ -366,6 +373,11 @@ def resolve_instance(defn: dict, types: dict | None = None) -> tuple[dict, list[
                 else:
                     target[t_key] = t_value
             merged["target"] = target
+        elif (key == "guards" and isinstance(value, dict)
+              and isinstance(merged.get("guards"), dict)):
+            # Story 38.1: an instance's guards overlay the type's key-wise, so
+            # an instance naming one guard keeps the type's others
+            merged["guards"] = {**merged["guards"], **value}
         else:
             merged[key] = value
     return merged, []

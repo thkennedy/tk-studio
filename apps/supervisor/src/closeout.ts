@@ -117,7 +117,7 @@ import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import { load as loadYaml } from "js-yaml";
 import { notifier, sbxBin } from "./env";
 import { canonicalPr, isWithin, notify, NOTICE_MAX_BYTES, sendText, TRUNCATED_MARKER, type EndNotice } from "./hygiene";
-import { hostVerify, inconclusiveReason, isInconclusive, isRed, isSlice, legHistory, redReason, type HostVerifyResult, type LegHistoryEntry } from "./hostverify";
+import { hostVerify, inconclusiveReason, isInconclusive, isRed, isSlice, legGuard, legHistory, noteCloseOutLease, redReason, type HostVerifyResult, type LegHistoryEntry } from "./hostverify";
 import { engineRoot, isSweep, isTerminal, RunTerminal, selfOwner, servedRoot, STUDIO_END_RETRY_LIMIT, type EngineWhere, type Owner, type Queue, type QueueEvent, type QueueRun, type TerminalState } from "./queue";
 import { HOLD_TIMEOUT_S, parseEnginePid, sameStart, type HoldChild } from "./sandbox";
 import { lastJsonObject, runProcess, toVmPath, type RunResult } from "./server";
@@ -478,8 +478,10 @@ async function boundaryLeg(queue: Queue, run: QueueRun, deps: PausedDeps): Promi
   if (!verify) {
     killed = !!(await killedEngine(queue, run));
     if (!killed) {
-      const guardS = run.worker_guard_s ?? (Number(queue.definition(run)?.guards?.max_wall_clock_seconds) || 600);
-      verify = await hostVerify(run, guardS, deps, slice ? { slice } : {});
+      // Story 38.1 (CAP-1): the leg's own guard, never the worker's; the close-out's lease noted first (CAP-3).
+      const g = legGuard(queue.definition(run));
+      noteCloseOutLease(queue, run.run_id, deps.self ?? selfOwner());
+      verify = await hostVerify(run, g.seconds, deps, { ...(slice ? { slice } : {}), guardKey: g.key });
       queue.note(run.run_id, "host-verify", verify as Record<string, unknown>);
     }
   }

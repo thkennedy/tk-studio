@@ -15,8 +15,10 @@
  *             origin's tip, so a commit there fast-forwards it; a local branch not an ancestor of that tip (unpushed
  *             commits) is `VerifyFailed` naming it and `git log --oneline <tip>..<local>` (never moved); another
  *             worktree holding the branch is `VerifyFailed` naming that worktree's path (never removed here). Then `materialise`d as `prepareWorktree` does.
- *   the leg   `hostVerify` on a copy of the run naming the fresh worktree, under the sweep's guard: exactly as the
- *             close-out runs it (the command read at the run's `base_ref` in the checkout).
+ *   the leg   `hostVerify` on a copy of the run naming the fresh worktree, under the leg's own guard (Story 38.1:
+ *             `legGuard` — the job's `guards.host_verify_seconds`, else `max_wall_clock_seconds`, else 600; never the
+ *             worker's `worker_guard_s`): exactly as the close-out runs it (the command read at the run's `base_ref`
+ *             in the checkout).
  *   the proof Story 35.1 (DW-76: the re-run is a whole leg): on a slice run, under the close-out's own condition (Story
  *             35.3, `proofCommitDue`: a ran leg whose own playable step ran (exited 0 or 1) and whose store holds `report.json` and whose assets step is not
  *             red — green, a non-red `match` fault, or `skipped: no manifest` — on playable pass and fail alike), the
@@ -40,7 +42,9 @@
  *             was, `pr_ready` unset), red turns an open ready PR back to a draft (`gh pr ready <pr>
  *             --undo`, the event's `reason` is `redReason`), skipped flips nothing; Story 35.3: an inconclusive leg
  *             flips nothing either (never marked ready; the event's `reason` is `host verify inconclusive (playable): <reason>`,
- *             `inconclusiveReason`). Story 37.5 (B3): a sweep run's green holds a draft as a draft while its record names
+ *             `inconclusiveReason`; Story 38.1: a leg ended on the guard with every verdict so far green, `host verify
+ *             inconclusive (guard): timed out (guard: host_verify_seconds (<N>s)) with every verdict so far green; unrun: …`,
+ *             its body's `**Timed out:**`; the verb's exit 1 covers it). Story 37.5 (B3): a sweep run's green holds a draft as a draft while its record names
  *             a bundle `landed: false`, has no triage, or the cut tip is a `wip:` commit (`rerun.pr_ready: "held: <cause>"`,
  *             e.g. `held: b not landed`), unless the re-run carried `ready: true` (`POST /runs/{id}/verify` body
  *             `{ready: true}`): then it is marked ready and `rerun.ready_override: true`. A PR not open, or unreadable,
@@ -62,7 +66,7 @@ import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { dirname } from "node:path";
 import { workDir } from "./env";
 import { canonicalPr } from "./hygiene";
-import { hostVerify, inconclusiveReason, isInconclusive, isRed, isSlice, legHistory, legVerdict, redReason, type HostVerifyResult, type PrProof } from "./hostverify";
+import { hostVerify, inconclusiveReason, isInconclusive, isRed, isSlice, legGuard, legHistory, legVerdict, redReason, type HostVerifyResult, type PrProof } from "./hostverify";
 import { isTerminal, selfOwner, servedRoot, type Owner, type Queue, type QueueEvent, type QueueRun, type RunState } from "./queue";
 import { lastJsonObject, type RunResult } from "./server";
 import { isSweep, ledgerEmit, sweepCostText, summaryFromRecord } from "./sweep";
@@ -328,10 +332,11 @@ async function runLeg(
   let verify: HostVerifyResult;
   const rerun: HostLegRerun = { by: at.by, head: at.head, worktree: "kept", pr: null };
   try {
-    const guardS = run.worker_guard_s ?? (Number(queue.definition(run)?.guards?.max_wall_clock_seconds) || 600);
+    // Story 38.1 (CAP-1): the leg's own guard (`guards.host_verify_seconds`), never the worker's `worker_guard_s`.
+    const g = legGuard(queue.definition(run));
     // Story 34.8: a slice run's re-run gets the assets step too (the close-out's detection, from the resolved definition).
     const slice = isSlice(queue.definition(run));
-    verify = await hostVerify({ ...run, worktree: path }, guardS, deps, { slice });
+    verify = await hostVerify({ ...run, worktree: path }, g.seconds, deps, { slice, guardKey: g.key });
     // Story 35.1: a slice run's placed art and proof committed and pushed, before the body edit.
     const committed = slice ? await sliceCommit(run, path, at.branch, at.head, verify, rerun, deps) : { ok: true };
     rerun.pr = await runPr(run, queue.events(run.run_id), at.branch, deps);

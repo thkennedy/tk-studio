@@ -13,7 +13,7 @@ import { renderPage, type PageData } from "../src/page";
 import { Queue, STUDIO_END_RETRY_LIMIT, type Owner, type Probes } from "../src/queue";
 import { runProcess, toVmPath, type RunResult } from "../src/server";
 import { COPIED_RUNTIME, launchedCloseOutInput, prBody, storyLandedBeforeStop, sweepEngines } from "../src/worktree";
-import { fakeBin, fakeGh, fakeSbx, fakeStudioRoot, gitRepo, RUNTIME_GITIGNORE, testGit } from "./fakes";
+import { fakeBin, fakeGh, fakeSbx, fakeStudioRoot, gitRepo, LEG_GUARD_ROWS, RUNTIME_GITIGNORE, testGit } from "./fakes";
 import { tempDir } from "./tmp";
 
 const SB = "claude-p";
@@ -1544,9 +1544,10 @@ describe("Story 35.2: no relaunch across a story boundary while a graceful stop 
     expect(ev(fx.queue, fx.run.run_id, "story-boundary")).toHaveLength(1);
   });
 
-  /** A landed story under a stop, `verify.host` at the base when given, gh faked; `readies`: its `gh pr ready` calls. */
-  async function atBoundary(host?: string) {
-    const fx = await pausedRun({ verdict: "no-impact" });
+  /** A landed story under a stop, `verify.host` at the base when given, gh faked; `readies`: its `gh pr ready` calls.
+   * Story 38.1: `definition` replaces `LAUNCH` (a `LEG_GUARD_ROWS` row's `guards`). */
+  async function atBoundary(host?: string, definition?: Record<string, unknown>) {
+    const fx = await pausedRun({ verdict: "no-impact", ...(definition ? { definition } : {}) });
     writeFileSync(join(fx.runDir, "stop-request.json"), "{}");
     fx.queue.db.run("UPDATE runs SET base_ref = 'main' WHERE run_id = ?", [fx.run.run_id]);
     if (host) {
@@ -1598,6 +1599,39 @@ describe("Story 35.2: no relaunch across a story boundary while a graceful stop 
     expect(b.readies()).toEqual(["undo"]);
     expect(b.fx.get()).toMatchObject({ state: "partial", reason: `${end}; host verify inconclusive (playable): infrastructure: sbx` });
   }, 60_000);
+
+  // Story 38.1 (AC1): the boundary leg reads `legGuard`, never `worker_guard_s`: the one table's rows.
+  const HANG = bunCmd("console.error('hung here'); setTimeout(() => {}, 60000)");
+  for (const row of LEG_GUARD_ROWS) {
+    test(`Story 38.1: the boundary leg's guard — ${row.name} → \`${row.trip}\`, red, \`partial\``, async () => {
+      const b = await atBoundary(HANG, { ...LAUNCH, guards: row.guards });
+      b.fx.queue.db.run("UPDATE runs SET worker_guard_s = ? WHERE run_id = ?", [row.workerGuardS, b.fx.run.run_id]);
+      expect(await closeOutPaused(b.fx.queue, b.deps)).toEqual({ closed: [b.fx.run.run_id], awaiting: [] });
+      expect(verifies(b.fx).map((e) => e.detail)).toEqual([expect.objectContaining({ green: false, exit: null, guard: row.trip, stderr_tail: ["hung here"] })]);
+      expect(b.fx.get().state).toBe("partial");
+      expect(b.fx.get().reason).toContain(`${end}; host verify red: \`${HANG}\` timed out (${row.trip}); last lines: hung here`);
+    }, 30_000);
+  }
+
+  test("Story 38.1 (CAP-3): the boundary notes its `host-verify-leg` lease (`by: close-out`, this process) before the leg; its `host-verify` closes it", async () => {
+    const b = await atBoundary(bunCmd("console.log('ok')"));
+    expect(await closeOutPaused(b.fx.queue, b.deps)).toEqual({ closed: [b.fx.run.run_id], awaiting: [] });
+    const evs = b.fx.queue.events(b.fx.run.run_id);
+    const lease = evs.findIndex((e) => e.kind === "host-verify-leg");
+    expect(lease).toBeGreaterThanOrEqual(0);
+    expect(evs[lease]!.detail).toMatchObject({ by: "close-out", owner: { pid: expect.any(Number), host: expect.any(String), nonce: expect.any(String) } });
+    expect(evs.findIndex((e) => e.kind === "host-verify")).toBeGreaterThan(lease);
+  }, 60_000);
+
+  test("Story 38.1 (CAP-2): the boundary's leg ended on the guard with every verdict so far green: `partial` naming the guard and the unrun suites, a draft", async () => {
+    const b = await atBoundary(bunCmd("console.log('== lib suite: ok in 3s'); console.log('== conformance: ok in 9s'); setTimeout(() => {}, 60000)"),
+      { ...LAUNCH, guards: { max_wall_clock_seconds: 50, host_verify_seconds: 1 } });
+    expect(await closeOutPaused(b.fx.queue, b.deps)).toEqual({ closed: [b.fx.run.run_id], awaiting: [] });
+    expect(verifies(b.fx)[0]!.detail).toMatchObject({ green: false, guard: "guard: host_verify_seconds (1s)", suite_durations: { "lib suite": 3, conformance: 9 } });
+    expect(b.readies()).toEqual(["undo"]);
+    expect(b.fx.get()).toMatchObject({ state: "partial",
+      reason: `${end}; host verify inconclusive (guard): timed out (guard: host_verify_seconds (1s)) with every verdict so far green; unrun: supervisor, studio-web` });
+  }, 30_000);
 
   test("Story 36.3: a killed engine at the boundary runs no leg: the PR a draft, `partial` naming it", async () => {
     const b = await atBoundary(bunCmd("process.exit(3)"));

@@ -91,8 +91,8 @@ import { dirname, join, resolve } from "node:path";
 import { stopEngineMcp } from "./enginemcp";
 import { notifier, WorkDirMissing, workDir } from "./env";
 import { canonicalPr, isWithin, sendText } from "./hygiene";
-import { CONTACT_SHEET, FRAMES_DIR, hostVerify, inconclusiveReason, isInconclusive, isRed, isSlice, legHistory, legVerdict, prSection, redReason, type HostVerifyResult, type LegHistoryEntry, type PlayableJudge, type PlayableRoute, type PrProof } from "./hostverify";
-import { accountedCostOf, isTerminal, RunTerminal, servedRoot, type EngineWhere, type Queue, type QueueEvent, type QueueRun, type TerminalState } from "./queue";
+import { CONTACT_SHEET, FRAMES_DIR, hostVerify, inconclusiveReason, isInconclusive, isRed, isSlice, legGuard, legHistory, legVerdict, noteCloseOutLease, prSection, redReason, type HostVerifyResult, type LegHistoryEntry, type PlayableJudge, type PlayableRoute, type PrProof } from "./hostverify";
+import { accountedCostOf, isTerminal, RunTerminal, selfOwner, servedRoot, type EngineWhere, type Owner, type Queue, type QueueEvent, type QueueRun, type TerminalState } from "./queue";
 import { gh, originGhRepo, originRepo, runner, studioScript, uvRunner } from "./runners";
 import { releasePin, sameStart, vmLaunchStatus, type SandboxDeps } from "./sandbox";
 import { lastJsonObject, runJobVerb, runProcess, toVmPath, type RunResult, type Tier } from "./server";
@@ -1239,10 +1239,12 @@ export async function sweepEngines(queue: Queue, deps: WorktreeDeps = {}): Promi
         queue.note(run.run_id, "host-verify", verify as Record<string, unknown>);
       }
       if (!verify && notKilled) {
-        const guardS = run.worker_guard_s ?? (Number(queue.definition(run)?.guards?.max_wall_clock_seconds) || 600);
+        // Story 38.1 (CAP-1): the leg's own guard, never the worker's; the close-out's lease noted first (CAP-3).
+        const g = legGuard(queue.definition(run));
+        noteCloseOutLease(queue, run.run_id, (deps as { self?: Owner }).self ?? selfOwner());
         // Story 37.3 (DW-148): a paused slice run's leg is the code leg only: no assets verb writes into the tree the engine
         // resumes, and the slice proof stays with the final close-out (`!input.paused` in its commit guard).
-        verify = await hostVerify(run, guardS, deps, slice && !paused ? { slice } : {});
+        verify = await hostVerify(run, g.seconds, deps, { ...(slice && !paused ? { slice } : {}), guardKey: g.key });
         queue.note(run.run_id, "host-verify", verify as Record<string, unknown>);
       }
       // A resumed run (its `launched` written when the resolve child exited) or a relaunched one (its latest

@@ -8,6 +8,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import os
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -31,6 +32,7 @@ def load():
 
 
 vh = load()
+REAL_LIVE_LEGS = vh.live_legs  # Story 38.1: VerifyHostCase patches it; TestBesideLeg puts the real one back
 
 
 def fake_git(changed: dict[str, str], fail: bool = False):
@@ -87,19 +89,27 @@ class VerifyHostCase(unittest.TestCase):
         patcher = mock.patch.object(vh.time, "sleep", lambda s: None)
         patcher.start()
         self.addCleanup(patcher.stop)
+        # Story 38.1: no existing case reads the box's queue
+        patcher = mock.patch.object(vh, "live_legs", lambda env=None: ([], None))
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def fake_run_gate(self, name, cwd, argv):
         self.calls.append(("gate", name))
         return 0, f"{name} output\n", 3.0
 
-    def run_main(self, changed: dict[str, str], spawn=None, fail_git: bool = False) -> tuple[int, str]:
+    def run_main(self, changed: dict[str, str], spawn=None, fail_git: bool = False, env: dict[str, str] | None = None,
+                 argv: list[str] | None = None) -> tuple[int, str]:
         out = io.StringIO()
         with mock.patch.object(vh, "_git", fake_git(changed, fail_git)), \
                 mock.patch.object(vh, "run_gate", self.fake_run_gate), \
                 mock.patch.object(vh, "spawn", spawn or self.spawn_ok), \
                 mock.patch.dict(os.environ, {"TK_SUPERVISOR_NOTIFY": "telegram", "TK_SUPERVISOR_DB": "/x/q.db", "KEEP_ME": "1"}), \
                 redirect_stdout(out):
-            rc = vh.main([])
+            # Story 38.1: this suite runs inside the host leg too, whose env names TK_SUPERVISOR_HOST_LEG
+            os.environ.pop("TK_SUPERVISOR_HOST_LEG", None)
+            os.environ.update(env or {})
+            rc = vh.main(argv or [])
         return rc, out.getvalue()
 
     def spawn_ok(self, argv, cwd, env, timeout):
@@ -526,3 +536,142 @@ class TestDependencyInstall(VerifyHostCase):
         self.assertEqual(len(self.spawns()), 1)
         self.assertIn("== supervisor: bun install (node_modules absent) FAILED rc=1", out)
         self.assertIn("lockfile is frozen", out)
+
+
+class TestDurations(VerifyHostCase):
+    """Story 38.1 (AC2): one `== durations:` line, the suites that ran in run order, immediately before the verdict."""
+    CHANGED = {"apps/supervisor": "apps/supervisor/src/queue.ts\n", "apps/studio-web": "apps/studio-web/src/app.ts\n"}
+
+    def test_green_the_line_its_order_and_its_seconds_immediately_before_the_verdict(self):
+        rc, out = self.run_main(self.CHANGED)
+        self.assertEqual(rc, 0, out)
+        lines = out.splitlines()
+        self.assertEqual(lines[-1], "verify_host: ok (lib suite, conformance, supervisor, studio-web)")
+        # lib suite and conformance 3 s each (`fake_run_gate`), the supervisor 44 s from the clock, studio-web 3 s
+        self.assertEqual(lines[-2], "== durations: lib suite=3s, conformance=3s, supervisor=44s, studio-web=3s")
+        self.assertEqual(sum(1 for l in lines if l.startswith("== durations:")), 1)
+
+    def test_red_the_line_after_every_tail_and_before_the_failed_verdict(self):
+        def spawn(argv, cwd, env, timeout):
+            self.clock.now += 2
+            if argv[-1].endswith("queue.test.ts"):
+                return 1, "(fail) queue > EBUSY on rmdir\n" + bun_out(96, 1)
+            return 0, bun_out(10, 0) if argv[1] == "test" else ""
+        rc, out = self.run_main(self.CHANGED, spawn=spawn)
+        self.assertEqual(rc, 1)
+        lines = out.splitlines()
+        self.assertEqual(lines[-1], "verify_host: FAILED (supervisor)")
+        self.assertEqual(lines[-2], "== durations: lib suite=3s, conformance=3s, supervisor=6s, studio-web=3s")
+        tail_header = next(i for i, l in enumerate(lines) if l.startswith("== supervisor failed (rc=1)"))
+        self.assertLess(tail_header, len(lines) - 2)  # the line follows every failure tail
+
+    def test_a_skipped_supervisor_and_studio_web_are_absent(self):
+        rc, out = self.run_main({})
+        self.assertEqual(rc, 0)
+        lines = out.splitlines()
+        self.assertEqual(lines[-2], "== durations: lib suite=3s, conformance=3s")
+        self.assertEqual(lines[-1], "verify_host: ok (lib suite, conformance)")
+
+
+class TestBesideLeg(VerifyHostCase):
+    """Story 38.1 (AC3, hole 113): the script refuses to start beside a live host leg, read from `queue.db` read-only."""
+
+    def setUp(self):
+        super().setUp()
+        patcher = mock.patch.object(vh, "live_legs", REAL_LIVE_LEGS)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.db = self.root / "queue.db"
+        conn = sqlite3.connect(str(self.db))
+        try:
+            conn.execute("CREATE TABLE events (seq INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, at TEXT NOT NULL, "
+                         "kind TEXT NOT NULL, from_state TEXT, to_state TEXT, detail TEXT)")
+            conn.commit()
+        finally:
+            conn.close()
+
+    def event(self, run_id: str, kind: str, detail: str, at: str = "2026-11-07T20:00:00Z"):
+        conn = sqlite3.connect(str(self.db))
+        try:
+            conn.execute("INSERT INTO events (run_id, at, kind, from_state, to_state, detail) VALUES (?, ?, ?, 'running', 'running', ?)",
+                         (run_id, at, kind, detail))
+            conn.commit()
+        finally:
+            conn.close()
+
+    OWNER = '{"owner": {"pid": 4242, "host": "box", "nonce": "n1"}, "by": "close-out"}'
+
+    def test_a_live_lease_refuses_exit_2_naming_the_run_and_the_remedy_and_runs_no_gate(self):
+        self.event("q-run-epic-38-a", "host-verify-leg", self.OWNER)
+        rc, out = self.run_main({}, env={"TK_SUPERVISOR_DB": str(self.db)})
+        self.assertEqual(rc, 2)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(out.splitlines(), [
+            "verify_host: refused: a host leg is live on this box: queue run q-run-epic-38-a (by close-out, since 2026-11-07T20:00:00Z); "
+            "two gates on one box halve each other (hole 113): wait for its host-verify event (GET /runs/q-run-epic-38-a), "
+            "or pass --beside-leg to run anyway",
+        ])
+
+    def test_a_lease_closed_by_host_verify_or_released_runs(self):
+        self.event("q-a", "host-verify-leg", self.OWNER)
+        self.event("q-a", "host-verify", '{"green": true}')
+        self.event("q-b", "host-verify-leg", self.OWNER)
+        self.event("q-b", "host-verify-leg", '{"owner": null, "released": {"pid": 4242}}')
+        self.assertEqual(vh.live_legs({"TK_SUPERVISOR_DB": str(self.db)}), ([], None))
+        rc, out = self.run_main({}, env={"TK_SUPERVISOR_DB": str(self.db)})
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("refused", out)
+        self.assertEqual(self.calls, [("gate", "lib suite"), ("gate", "conformance")])
+
+    def test_beside_leg_runs_after_the_warning_line_first(self):
+        self.event("q-a", "host-verify-leg", '{"owner": {"pid": 1, "host": "box", "nonce": "n"}, "by": "api"}')
+        self.event("q-b", "host-verify-leg", self.OWNER)
+        rc, out = self.run_main({}, env={"TK_SUPERVISOR_DB": str(self.db)}, argv=["--beside-leg"])
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out.splitlines()[0], "verify_host: WARNING: --beside-leg: running beside the live host leg of queue run q-a, q-b; "
+                                              "both gates slow each other and the leg may run out its guard (hole 113)")
+        self.assertEqual(self.calls, [("gate", "lib suite"), ("gate", "conformance")])
+
+    def test_the_legs_own_run_never_reads_the_queue(self):
+        self.event("q-a", "host-verify-leg", self.OWNER)
+
+        def boom(*a, **k):
+            raise AssertionError("the queue was read")
+        with mock.patch.object(vh.sqlite3, "connect", boom):
+            rc, out = self.run_main({}, env={"TK_SUPERVISOR_DB": str(self.db), "TK_SUPERVISOR_HOST_LEG": "q-a"})
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("refused", out)
+        self.assertNotIn("WARNING", out)
+
+    def test_an_unreadable_queue_prints_one_line_then_the_gates_run(self):
+        garbage = self.root / "garbage.db"
+        garbage.write_bytes(b"this is not a sqlite database at all, just bytes" * 20)
+        rc, out = self.run_main({}, env={"TK_SUPERVISOR_DB": str(garbage)})
+        self.assertEqual(rc, 0, out)
+        first = out.splitlines()[0]
+        self.assertTrue(first.startswith(f"verify_host: the queue at {garbage} was not read ("), first)
+        self.assertTrue(first.endswith("); running without the beside-leg check"), first)
+        self.assertEqual(self.calls, [("gate", "lib suite"), ("gate", "conformance")])
+
+    def test_an_absent_queue_or_no_variable_is_silent(self):
+        rc, out = self.run_main({}, env={"TK_SUPERVISOR_DB": str(self.root / "no-such.db")})
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(out.splitlines()[0].startswith("== lib suite:"), out)
+        self.assertEqual(vh.live_legs({}), ([], None))
+
+    def test_the_uri_is_read_only_from_path_as_uri(self):
+        seen = []
+        real = sqlite3.connect
+
+        def spy(database, *a, **k):
+            seen.append((database, k.get("uri")))
+            return real(database, *a, **k)
+        with mock.patch.object(vh.sqlite3, "connect", spy):
+            vh.live_legs({"TK_SUPERVISOR_DB": str(self.db)})
+        self.assertEqual(seen, [(self.db.resolve().as_uri() + "?mode=ro", True)])
+
+    def test_help_names_beside_leg(self):
+        out = io.StringIO()
+        with redirect_stdout(out), self.assertRaises(SystemExit):
+            vh.main(["--help"])
+        self.assertIn("--beside-leg", out.getvalue())
