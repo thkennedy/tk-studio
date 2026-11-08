@@ -511,6 +511,19 @@ export interface QueueRun {
 
 /** Story 35.7: the shipped job type whose runs are deferred-work sweeps. */
 export const SWEEP_JOB_TYPE = "run-sweep";
+
+/** Story 38.3 (B1): the note that frees a held engine's lock and pin (`worktree.ts releaseHeldEngines`). */
+export const ENGINE_RELEASED = "engine-released";
+
+/** Story 38.3 (B1): the engine run id a terminal run still holds its lock and pin for: the latest `ended` event's
+ * `detail.engine_held.engine_run_id`, with no later `engine-released` note naming it; else undefined. */
+export function heldEngine(events: readonly QueueEvent[]): string | undefined {
+  const at = events.findLastIndex((e) => e.kind === "ended");
+  const held = at >= 0 ? (events[at]!.detail as Record<string, any> | null)?.engine_held : undefined;
+  const eid = held && typeof held === "object" && typeof held.engine_run_id === "string" && held.engine_run_id ? held.engine_run_id as string : undefined;
+  if (!eid) return undefined;
+  return events.slice(at + 1).some((e) => e.kind === ENGINE_RELEASED && e.detail?.engine_run_id === eid) ? undefined : eid;
+}
 /** A run is a sweep when its resolved definition's `type` or `id` is `run-sweep`. */
 export const isSweep = (defn: Record<string, any> | null | undefined): boolean =>
   !!defn && (defn.type === SWEEP_JOB_TYPE || defn.id === SWEEP_JOB_TYPE);
@@ -1905,12 +1918,15 @@ export class Queue {
   }
 
   /** The engine's life ended and the close-out ran: the one `ended` event (the PR URL or "no
-   * changes" in `detail`), the engine run id kept on the run, and the checkout lock it held released. */
-  endEngine(runId: string, state: TerminalState, reason: string | null | undefined, opts: { detail?: Record<string, unknown>; stop?: StopDetail } = {}): QueueRun {
+   * changes" in `detail`), the engine run id kept on the run, and the checkout lock it held released.
+   * Story 38.3 (B1): `holdEngine` (a sweep's unanswered stop, its engine perhaps still running) keeps the lock as that
+   * engine's instead (`handToEngine`, `detail.lock = {handed_to_engine}`), until `releaseEngineLock`. */
+  endEngine(runId: string, state: TerminalState, reason: string | null | undefined, opts: { detail?: Record<string, unknown>; stop?: StopDetail; holdEngine?: string } = {}): QueueRun {
     return this.db.transaction(() => {
       const run = this.must(runId);
       if (isTerminal(run.state)) throw new RunTerminal(runId, run.state);
-      this.writeEnd(run, state, reason, { kind: "ended", ...opts, keepEngine: true });
+      const { holdEngine, ...rest } = opts;
+      this.writeEnd(run, state, reason, { kind: "ended", ...rest, ...(holdEngine ? { engineRunId: holdEngine } : { keepEngine: true }) });
       return this.must(runId);
     }).immediate();
   }

@@ -38,7 +38,14 @@
  *              `max_bundles` (`sweep-bundles-truncated {dropped}`) or skipped (`sweep-bundle-skipped {name}`) is
  *              `not landed — dropped by max_bundles` / `not landed — skipped by the engine`, still counted in n.
  *   PR body    `## Sweep` before `## Host verify` (`sweepSection`): one line per bundle, `### Blocked`, `### Human
- *              decisions` (skipped unattended; `bmad-loop decisions` answers them).
+ *              decisions` (skipped unattended; `bmad-loop decisions` answers them). Story 38.3 (DW-165): then `## Stage
+ *              Log` (`sweepStageLogText`): `plansync.py stage --from-run --run-dir <engine run dir> --worktree <served>`
+ *              (read only, `engineStageRowsOf`) answers each bundle key's engine passes as story-doc rows (stage, pass,
+ *              started, ended, session_id, model, effort, tokens_in, tokens_out, cost_usd, outcome); `withStageRows` puts
+ *              them on each bundle as `stage_rows` (the record carries them, so a re-run rebuilds), rendered per bundle as
+ *              `### <name>[ (cycle N)] (<dw ids>)` and the table, `no engine pass recorded` for a bundle with none, or
+ *              `Stage Log not read: <error>` (`stage_error`) when the verb failed. A bundle has no Jira issue: no Jira row.
+ *              `sweepCloseOutSummary` (summary, cost, rows) is the one summary every close-out site takes.
  *   end        `sweepEndState`: every bundle landed (or none triaged) and the host leg green or skipped → `complete`;
  *              some landed and some not, or the leg red or inconclusive → `partial`; no triage, or bundles and none
  *              landed → `blocked` (no triage because the engine journaled `sweep-nothing-open`: the reason says the
@@ -53,11 +60,21 @@
  *              `engineEndStatus` reads as the supervisor's own stop; on that path an `engine-stop {stopped: true}` note is
  *              written once, only for a stop that answered `stopped`, so the next tick's `stopped` end is the supervisor's own
  *              stop: its WIP committed, its end not penalised; a later tick whose probe still answers `unknown` ends the run
- *              `blocked`, with no second stop: asked once more, then the `blocked` end), and the deadline's clock starts at the
- *              earlier of that note and the first `engine-stop` error note; a `running` probe never resets it; whenever no stop
+ *              `blocked`, with no second stop: asked once more, then the `blocked` end); whenever no stop
  *              was left unanswered (no `engine-stop` note carrying `error`: never paused nor asked to stop, the probe path's
  *              unanswered stop writing none and ending the run on that tick, or a stop that answered `stopped`) the
- *              line names the probe ("the status probe answered `unknown` for 30 min"). Story 36.2 (DW-118): after the `blocked` rules and the host
+ *              line names the probe ("the status probe answered `unknown` for 30 min"). Story 38.3 (B1), superseding 37.5's
+ *              "a `running` probe never resets it": the deadline runs from the first note of the latest non-`running`
+ *              streak (`sweepStreak`: an `engine-probe` `unknown` note — an older one with no `phase` too — or an
+ *              `engine-stop` carrying `error`, after the latest `engine-probe {engine_run_id, phase: "running"}`); a sweep's
+ *              `running` probe writes that note only while a streak is open, so it resets the clock and a healthy engine
+ *              writes nothing per tick. The `unknown` note and the paused branch's `error` note are written once per
+ *              streak; `answered` and `asked` read that streak. An unanswered stop's `blocked` end (no stop answered
+ *              `stopped` in the streak) holds the lock and the pin: `endEngine {holdEngine}` keeps the checkout lock as the
+ *              engine's (`handed_to_engine`), `ended.detail.engine_held {engine_run_id}`, no pin release, the line ending
+ *              "lock and pin held until a stop is confirmed or the engine exits"; `worktree.ts releaseHeldEngines` frees
+ *              them on a later tick once the probe answers `ended` or a stop answers `stopped` (`engine-released
+ *              {engine_run_id, by: "exit" | "stop"}`), never on `unknown` (fail closed). Story 36.2 (DW-118): after the `blocked` rules and the host
  *              leg's verdict, an engine that ended other than `finished` caps the end at `partial` (`engine ended
  *              '<status>' after <n>/<m> bundles`), even with every bundle landed; that paused-sweep stop is not
  *              penalised, on the tick of the stop or a later one (`engineEndStatus`: a `stopped` status with an `engine-stop` note
@@ -78,9 +95,15 @@
  *              lease. Story 37.5 (B4): the wait is bounded, `SWEEP_LEDGER_WAIT_MS` from the waiting record's `at` (a changed
  *              `pending` set is a new record and a new clock), checked before that skip: past it one record `{…, waiting:
  *              false, settled: true, ended: "wait", pending}` and one notifier line through the `notify` callback
- *              `planstatus.mergePass` injects (the record's `notify` outcome), never again; a missing id stays `pending`.
- *              The settled run is never flipped again on its own, so the line carries the manual remedy (`uv run
- *              plugins/tk-studio/lib/plansync.py ledger-resolve --directory <root> --pr <pr> --ids <pending>`). Story 37.5
+ *              `planstatus.mergePass` injects (the record's `notify` outcome), never again.
+ *              The settled run is never flipped again on its own, so the line carries the manual remedy. Story 38.3 (B4):
+ *              the remedy is one builder's (`ledgerResolveCommand`, rendered by `ledgerRemedyText`): `uv run --no-project
+ *              python "<studio root>/plugins/tk-studio/lib/plansync.py" ledger-resolve --directory "<root>" --pr <pr> --ids
+ *              <ids>`, runnable from any cwd, the path joined natively (never `toVmPath`); and a missing id is refused by the
+ *              verb (`LedgerMissingId`), never `pending`. Story 38.3 (B2): a non-retryable refusal (a duplicate heading, a
+ *              missing id) is never a silent settle: one record `{pr, ids, resolved, pending, ok: false, settled: true,
+ *              ended: "refused", reason, error}` and one notifier line naming the refusal and the remedy, its outcome
+ *              patched as `notify`. The CLOSED skip and the `PLAN_RETRY_LIMIT` give-up stay silent. Story 37.5
  *              (DW-144): a terminal sweep's unlanded triage emit is retried first, under the same lease (the note re-read
  *              under it, the lease released settled), so two overlapping passes never both emit; an `emitting` note's
  *              retry counts into `ledger_errors` (its marker `{ledger: "emitting", ledger_errors: n + 1}` patched
@@ -93,13 +116,14 @@
  */
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { pluginRoot, StudioRootMissing } from "./env";
 import { inconclusiveReason, legVerdict, redReason, type HostVerifyResult } from "./hostverify";
 import { DEFERRED_REL, PLAN_RETRY_LIMIT, runPr } from "./planseams";
 import type { PlanStatusDeps } from "./planstatus";
 import { isSweep, isTerminal, selfOwner, servedRoot, SWEEP_JOB_TYPE, type Queue, type QueueEvent, type QueueRun, type TerminalState } from "./queue";
 import { projectKeyOf, studioRunDir } from "./sandbox";
 import { gh, stopEngine, stopEngineAt, studioScript, uvRunner } from "./runners";
-import { lastJsonObject, type RunResult } from "./server";
+import { lastJsonObject, type RunResult, type WorkerCommand } from "./server";
 import type { WorktreeDeps } from "./worktree";
 
 type Env = Record<string, string | undefined>;
@@ -111,7 +135,8 @@ export const SWEEP_TRIAGE = "sweep-triage";
 export const SWEEP_ENGINE_STOP = "engine-stop";
 /** Story 36.3 (DW-121): how long a paused sweep's stop may go unanswered before the run ends `blocked`. */
 export const SWEEP_STOP_DEADLINE_MS = 30 * 60_000;
-/** Story 37.5 (B5): a sweep's first `unknown` status probe, noted once per engine run (starts the deadline's clock). */
+/** Story 37.5 (B5): a sweep's first `unknown` status probe, noted once per engine run (starts the deadline's clock).
+ * Story 38.3 (B1): once per streak, and `{phase: "running"}` once when a `running` probe closes an open streak. */
 export const SWEEP_ENGINE_PROBE = "engine-probe";
 /** Story 37.5 (B4): how long a merged sweep's ledger pass waits on an unchanged `pending` set before it ends the wait. */
 export const SWEEP_LEDGER_WAIT_MS = 60 * 60_000;
@@ -273,7 +298,12 @@ export type BundleOutcome = {
   name: string; dw_ids: string[]; cycle: number; key: string; landed: boolean; why?: string;
   /** Story 36.2: the bundle's priced cost (null: neither source, `not metered`) and its source; unset: never priced. */
   cost_usd?: number | null; source?: string;
+  /** Story 38.3 (DW-165): the bundle's engine passes as Stage Log rows (column → cell, the verb's column order); unset:
+   * never read. */
+  stage_rows?: StageRow[];
 };
+/** Story 38.3 (DW-165): one Stage Log row (`plansync.py stage --from-run`), its cells keyed by column, in column order. */
+export type StageRow = Record<string, string>;
 /** A sweep's close-out view: the triage (undefined: none was ever written; every cycle's, merged) and each bundle's
  * outcome. `nothing_open`: no triage because the engine journaled `sweep-nothing-open`. Story 36.2: `engine_cost_usd`
  * the priced bundles' sum (Story 37.5: and the priced triage); `engine_cost_error` why the engine could not be priced. */
@@ -281,6 +311,8 @@ export type SweepSummary = {
   triage?: Triage; bundles: BundleOutcome[]; triage_error?: string; nothing_open?: boolean; engine_cost_usd?: number; engine_cost_error?: string;
   /** Story 37.5 (DW-136): the engine's own triage sessions priced (null: `not metered`; unset: the run has none, or never priced). */
   triage_cost_usd?: number | null;
+  /** Story 38.3 (DW-165): why the bundles' Stage Log rows could not be read (`Stage Log not read: <error>`). */
+  stage_error?: string;
 };
 
 /** The engine's task key of a cycle's bundle (`sweep.py _bundle_key`). */
@@ -444,12 +476,14 @@ export function sweepRecord(s: SweepSummary): Record<string, unknown> {
   return {
     notice: sweepNotice(s), triage: !!s.triage,
     bundles: s.bundles.map((b) => ({ name: b.name, dw_ids: b.dw_ids, ...(b.cycle > 1 ? { cycle: b.cycle } : {}), landed: b.landed, ...(b.why ? { why: b.why } : {}),
-      ...(b.cost_usd !== undefined ? { cost_usd: b.cost_usd } : {}), ...(b.source ? { source: b.source } : {}) })),
+      ...(b.cost_usd !== undefined ? { cost_usd: b.cost_usd } : {}), ...(b.source ? { source: b.source } : {}),
+      ...(b.stage_rows ? { stage_rows: b.stage_rows } : {}) })),
     already_resolved: s.triage?.already_resolved ?? [],
     ...(s.triage ? { blocked: s.triage.blocked, decisions: s.triage.decisions, skip: s.triage.skip } : {}),
     ...(s.engine_cost_usd !== undefined ? { engine_cost_usd: s.engine_cost_usd } : {}),
     ...(s.triage_cost_usd !== undefined ? { triage_cost_usd: s.triage_cost_usd } : {}),
     ...(s.engine_cost_error ? { engine_cost_error: s.engine_cost_error } : {}),
+    ...(s.stage_error ? { stage_error: s.stage_error } : {}),
   };
 }
 
@@ -465,12 +499,14 @@ export function summaryFromRecord(events: readonly QueueEvent[]): SweepSummary |
     return {
       name, dw_ids: ids(b.dw_ids), cycle, key: bundleKey(name, cycle), landed: b.landed === true, ...(typeof b.why === "string" ? { why: b.why } : {}),
       ...(finite(b.cost_usd) || b.cost_usd === null ? { cost_usd: b.cost_usd } : {}), ...(typeof b.source === "string" ? { source: b.source } : {}),
+      ...(Array.isArray(b.stage_rows) ? { stage_rows: stageRows(b.stage_rows) } : {}),
     };
   });
   const cost = {
     ...(finite(rec.engine_cost_usd) ? { engine_cost_usd: rec.engine_cost_usd } : {}),
     ...(finite(rec.triage_cost_usd) || rec.triage_cost_usd === null ? { triage_cost_usd: rec.triage_cost_usd as number | null } : {}),
     ...(typeof rec.engine_cost_error === "string" ? { engine_cost_error: rec.engine_cost_error } : {}),
+    ...(typeof rec.stage_error === "string" ? { stage_error: rec.stage_error } : {}),
   };
   const note = events.findLast((e) => e.kind === SWEEP_TRIAGE);
   if (rec.triage !== true) {
@@ -565,26 +601,112 @@ export function sweepCostText(s: SweepSummary, workerUsd: number | undefined): s
   return [head, ...(lines.length ? ["", ...lines] : [])].join("\n");
 }
 
+// ------------------------------------------------------------ Story 38.3 (DW-165): the bundles' Stage Log rows
+
+/** Rows as recorded: each an object of string cells (anything else dropped), its keys' order kept. */
+const stageRows = (v: unknown): StageRow[] =>
+  objects(v).map((row) => Object.fromEntries(Object.entries(row).filter((kv): kv is [string, string] => typeof kv[1] === "string")));
+
+/** `plansync.py stage --from-run`'s answer: the Stage Log columns and each bundle key's rows, or why there are none. */
+export type EngineStageRows = { columns: string[]; bundles: { key: string; rows: StageRow[] }[]; error?: string };
+
+/** Story 38.3 (DW-165): the engine run's bundles' passes as Stage Log rows (`plansync.py stage --from-run`, read only),
+ * read from the host while the run dir is there (the `engineCostOf` shape). Each row's cells keyed by the verb's
+ * `columns`, in that order. A failure is the answer's `error`: it never blocks the close-out. Never throws. */
+export async function engineStageRowsOf(run: Pick<QueueRun, "worktree" | "prefix" | "engine_run_id">, deps: WorktreeDeps = {}): Promise<EngineStageRows> {
+  try {
+    const served = servedRoot(run), eid = run.engine_run_id;
+    if (!served || !eid) return { columns: [], bundles: [], error: "no engine run recorded" };
+    const dir = engineRunDir(served, eid);
+    if (!existsSync(dir)) return { columns: [], bundles: [], error: "the engine's run dir is gone" };
+    const r = await uvRunner(deps)(served, studioScript(deps, "lib", "plansync.py"), ["stage", "--from-run", "--run-dir", dir, "--worktree", served], 120);
+    const o = lastJsonObject(r.stdout) as Record<string, unknown> | null;
+    if (r.exit !== 0 || o?.ok !== true) return { columns: [], bundles: [], error: clip(String(o?.error ?? `plansync.py stage --from-run exit ${r.exit}: ${r.stderr || r.stdout}`)) };
+    const columns = Array.isArray(o.columns) ? o.columns.filter((c): c is string => typeof c === "string") : [];
+    const bundles = objects(o.bundles).map((b) => ({
+      key: str(b.key),
+      rows: objects(b.rows).map((row) => Object.fromEntries(columns.map((c) => [c, typeof row[c] === "string" && row[c] ? row[c] as string : "—"]))),
+    }));
+    return { columns, bundles };
+  } catch (e) { return { columns: [], bundles: [], error: `plansync.py stage --from-run: ${clip(message(e))}` }; }
+}
+
+/** The summary with each bundle's Stage Log rows on it (by its key; one the verb did not name has none), or the
+ * verb's failure as `stage_error`. */
+export function withStageRows(s: SweepSummary, rows: EngineStageRows): SweepSummary {
+  if (rows.error) return { ...s, stage_error: rows.error };
+  const byKey = new Map(rows.bundles.map((b) => [b.key, b.rows]));
+  return { ...s, bundles: s.bundles.map((b) => ({ ...b, stage_rows: byKey.get(b.key) ?? [] })) };
+}
+
+/** Story 38.3: the close-out's summary at every site (the live close-out, the late one, a cancel's): the triage and each
+ * bundle's outcome, the engine priced (`engineCostOf`) and its bundles' Stage Log rows (`engineStageRowsOf`), all read
+ * before the worktree goes. `paused`: the engine's paused detail. */
+export async function sweepCloseOutSummary(
+  queue: Queue, run: Pick<QueueRun, "run_id" | "worktree" | "prefix" | "engine_run_id">, deps: WorktreeDeps = {}, paused?: Record<string, unknown>,
+): Promise<SweepSummary> {
+  const priced = withEngineCost(sweepSummary(queue, run, paused), await engineCostOf(run, deps));
+  return withStageRows(priced, await engineStageRowsOf(run, deps));
+}
+
+/** Story 38.3 (DW-165): the PR body's `## Stage Log` (after `## Sweep`, before `## Host verify`): per bundle `### <name>[
+ * (cycle N)] (<dw ids>)` and the story-doc table (the header from the rows' columns), `no engine pass recorded` for a
+ * bundle with none, `Stage Log not read: <error>` when the verb failed; undefined when the summary carries neither rows
+ * nor an error (never read: an older record). The triage sessions are not a bundle's and get no table. */
+export function sweepStageLogText(s: SweepSummary): string[] | undefined {
+  if (s.stage_error) return ["## Stage Log", "", `Stage Log not read: ${s.stage_error}`];
+  if (!s.bundles.some((b) => b.stage_rows !== undefined)) return undefined;
+  const out = ["## Stage Log"];
+  for (const b of s.bundles) {
+    out.push("", `### ${b.name}${b.cycle > 1 ? ` (cycle ${b.cycle})` : ""} (${b.dw_ids.join(", ")})`, "");
+    const rows = b.stage_rows ?? [];
+    if (!rows.length) { out.push("no engine pass recorded"); continue; }
+    const cols = Object.keys(rows[0]!);
+    out.push(`| ${cols.join(" | ")} |`, `|${cols.map(() => "---").join("|")}|`, ...rows.map((r) => `| ${cols.map((c) => r[c] ?? "—").join(" | ")} |`));
+  }
+  return out;
+}
+
 /** A paused sweep's engine stopped (the hard stop, `stopEngine`). */
 export const stopSweepEngine = (run: Pick<QueueRun, "worktree" | "prefix" | "engine_run_id" | "tier" | "sandbox">, deps: WorktreeDeps = {}): Promise<string> =>
   stopEngine(run, deps);
 
-/** Story 36.3 (DW-121): is this engine's unanswered stop past `SWEEP_STOP_DEADLINE_MS`? The clock starts at the first
- * `engine-stop` note carrying `error` (a `{stopped: true}` note is a stop that succeeded; no new event, so a supervisor
- * restart keeps it). Story 37.5 (B5): or at this engine run's `engine-probe` note (its first `unknown` probe), whichever
- * is earlier. */
+/** Story 38.3 (B1): a `running` probe's note (`engine-probe {phase: "running"}`): it closes a streak. */
+const runningNote = (e: QueueEvent) => e.kind === SWEEP_ENGINE_PROBE && e.detail?.phase === "running";
+/** Story 38.3 (B1): a non-`running` note: an `engine-probe` that is not `running` (an older one with no `phase` too) or an
+ * `engine-stop` carrying `error`. */
+const streakNote = (e: QueueEvent) =>
+  (e.kind === SWEEP_ENGINE_PROBE && e.detail?.phase !== "running") || (e.kind === SWEEP_ENGINE_STOP && e.detail?.error !== undefined);
+
+/** Story 38.3 (B1): this engine run's `engine-probe` and `engine-stop` notes after its latest `running` note (all of them
+ * when none): the latest streak, which the deadline, `answered` and `asked` read. */
+export function sweepStreak(events: readonly QueueEvent[], engineRunId: string | null | undefined): QueueEvent[] {
+  const mine = events.filter((e) => (e.kind === SWEEP_ENGINE_PROBE || e.kind === SWEEP_ENGINE_STOP) && e.detail?.engine_run_id === engineRunId);
+  return mine.slice(mine.findLastIndex(runningNote) + 1);
+}
+
+/** Story 36.3 (DW-121): is this engine's unanswered stop past `SWEEP_STOP_DEADLINE_MS`? Story 38.3 (B1): the clock runs
+ * from the first note of the latest non-`running` streak (`sweepStreak`: an `engine-probe` `unknown` note or an
+ * `engine-stop` carrying `error`, after the latest `engine-probe {phase: "running"}`); a `running` probe resets it. A
+ * `{stopped: true}` note is a stop that succeeded and starts nothing; no new event, so a supervisor restart keeps it. */
 export function sweepStopPastDeadline(events: readonly QueueEvent[], engineRunId: string | null | undefined, now: number): boolean {
-  const first = events.find((e) => ((e.kind === SWEEP_ENGINE_STOP && e.detail?.error !== undefined) || e.kind === SWEEP_ENGINE_PROBE) && e.detail?.engine_run_id === engineRunId);
+  const first = sweepStreak(events, engineRunId).find(streakNote);
   return !!first && now - Date.parse(first.at) > SWEEP_STOP_DEADLINE_MS;
 }
 
-/** Story 37.5 (B5): a sweep's `unknown` status probe noted once per engine run (`engine-probe`), its own kind that never
- * stands in for an `engine-stop` note. Never throws. */
-export function noteEngineProbe(queue: Queue, run: Pick<QueueRun, "run_id" | "engine_run_id">, error: unknown): void {
+/** Story 37.5 (B5): a sweep's status probe noted (`engine-probe`), its own kind that never stands in for an `engine-stop`
+ * note. Story 38.3 (B1): per streak — `unknown` once per streak (`{phase: "unknown", error}`), `running` only while a
+ * streak is open (`{phase: "running"}`, which closes it), so a healthy engine writes nothing per tick. Never throws. */
+export function noteEngineProbe(queue: Queue, run: Pick<QueueRun, "run_id" | "engine_run_id">, phase: "running" | "unknown", error?: unknown): void {
   try {
-    if (queue.events(run.run_id).some((e) => e.kind === SWEEP_ENGINE_PROBE && e.detail?.engine_run_id === run.engine_run_id)) return;
+    const streak = sweepStreak(queue.events(run.run_id), run.engine_run_id);
+    if (phase === "running") {
+      if (streak.some(streakNote)) queue.note(run.run_id, SWEEP_ENGINE_PROBE, { engine_run_id: run.engine_run_id, phase: "running" });
+      return;
+    }
+    if (streak.some((e) => e.kind === SWEEP_ENGINE_PROBE)) return;
     queue.note(run.run_id, SWEEP_ENGINE_PROBE, { engine_run_id: run.engine_run_id, phase: "unknown", error: typeof error === "string" ? error : "unknown" });
-  } catch { /* a busy queue: noted on the next unknown probe */ }
+  } catch { /* a busy queue: noted on the next probe */ }
 }
 
 // ------------------------------------------------------------ the ledger pass
@@ -613,6 +735,36 @@ const ledgerSettled = (events: readonly QueueEvent[]) => events.some((e) => e.ki
 /** Story 37.5 (B4): one line through the notifier, its outcome for the record (`planstatus.mergePass` injects it). */
 export type LedgerNotify = (text: string) => Promise<Record<string, unknown>>;
 
+/** Story 38.3 (B4): the one ledger remedy, `uv run --no-project python <pluginRoot(env)>/lib/plansync.py ledger-resolve
+ * --directory <root> --pr <pr> --ids <ids>` (task-planning.md §3's form: runnable from any cwd). The script path is a
+ * host path joined natively (never `toVmPath`: the verb runs on the host). Throws `StudioRootMissing` when
+ * `TK_STUDIO_ROOT` is unset; with `placeholders` (the text form) the path reads `<studio-root>/plugins/tk-studio/lib/
+ * plansync.py` instead. Rendered by `ledgerRemedyText`, run by its test. */
+export function ledgerResolveCommand(root: string, pr: string, ids: readonly string[], env: Env = process.env, opts: { placeholders?: boolean } = {}): WorkerCommand {
+  let script: string;
+  try { script = join(pluginRoot(env), "lib", "plansync.py"); }
+  catch (e) {
+    if (!opts.placeholders || !(e instanceof StudioRootMissing)) throw e;
+    script = join("<studio-root>", "plugins", "tk-studio", "lib", "plansync.py");
+  }
+  return { bin: "uv", argv: ["run", "--no-project", "python", script, "ledger-resolve", "--directory", root, "--pr", pr, "--ids", ids.join(",")] };
+}
+
+/** Story 38.3 (B4): the remedy as one line, the script path and the `--directory` value double-quoted. */
+export function ledgerRemedyText(cmd: WorkerCommand): string {
+  const dir = cmd.argv.indexOf("--directory");
+  return [cmd.bin, ...cmd.argv.map((a, i) => (i === 3 || (dir >= 0 && i === dir + 1) ? `"${a}"` : a))].join(" ");
+}
+
+/** Story 37.5 (B4), Story 38.3 (B2): one line through the injected notifier (none: `skipped`), its outcome patched on the
+ * record `rec` as `notify`. Never throws. */
+async function notifyLedgerEnd(queue: Queue, rec: QueueEvent | undefined, notify: LedgerNotify | undefined, line: string): Promise<void> {
+  let outcome: Record<string, unknown>;
+  try { outcome = notify ? await notify(line) : { ok: false, skipped: "no notifier injected" }; }
+  catch (e) { outcome = { ok: false, error: clip(message(e)) }; }
+  if (rec) { try { queue.patchEventDetail(rec.seq, { notify: outcome }); } catch { /* the record stands */ } }
+}
+
 /** Story 37.5 (B4): the bounded wait's end (see the header): one `ended: "wait"` record under the lease, then one
  * notifier line, its outcome patched on the record. Never throws. */
 async function endLedgerWait(queue: Queue, run: QueueRun, last: QueueEvent, deps: PlanStatusDeps, notify: LedgerNotify | undefined): Promise<boolean> {
@@ -626,12 +778,9 @@ async function endLedgerWait(queue: Queue, run: QueueRun, last: QueueEvent, deps
     settle = true;
     const rec = queue.events(run.run_id).findLast((e) => e.kind === LEDGER_RESOLVE && e.detail?.ended === "wait");
     // the run is settled: nothing flips these automatically again, so the line carries the manual remedy
-    const remedy = `uv run plugins/tk-studio/lib/plansync.py ledger-resolve --directory "${run.root}" --pr ${String(last.detail?.pr ?? "<pr>")} --ids ${pending.map(String).join(",")}`;
+    const remedy = ledgerRemedyText(ledgerResolveCommand(run.root, String(last.detail?.pr ?? "<pr>"), pending.map(String), deps.env ?? process.env, { placeholders: true }));
     const line = `sweep ${run.run_id}: the ledger pass stopped waiting after ${SWEEP_LEDGER_WAIT_MS / 60_000} min on ${pending.length} id(s) the owner ledger never flipped: ${pending.map(String).join(", ")}; once the owner checkout has pulled, flip them by hand: ${remedy}`;
-    let outcome: Record<string, unknown>;
-    try { outcome = notify ? await notify(line) : { ok: false, skipped: "no notifier injected" }; }
-    catch (e) { outcome = { ok: false, error: clip(message(e)) }; }
-    if (rec) { try { queue.patchEventDetail(rec.seq, { notify: outcome }); } catch { /* the record stands */ } }
+    await notifyLedgerEnd(queue, rec, notify, line);
     return true;
   } finally {
     try { queue.releasePlanPhase(run.run_id, LEDGER_LEASE, self, settle); } catch { /* a dead owner's lease is re-taken */ }
@@ -693,7 +842,7 @@ export async function ledgerPass(queue: Queue, deps: PlanStatusDeps = {}, notify
         if (ledgerSettled(now)) { settle = true; continue; }
         const base = { pr, ids };
         let detail: Record<string, unknown>;
-        let retry: string | undefined;
+        let retry: string | undefined, refused: string | undefined;
         if (state === "CLOSED") detail = { ...base, resolved: [], pending: [], ok: false, settled: true, skipped: true, reason: "pr closed unmerged" };
         else if (!ids.length) detail = { ...base, resolved: [], pending: [], ok: true, settled: true, reason: "no landed bundle or already-resolved entry to flip" };
         else {
@@ -715,7 +864,12 @@ export async function ledgerPass(queue: Queue, deps: PlanStatusDeps = {}, notify
             detail = { ...base, resolved, pending, ok, ...(!ok ? { error: clip(String(o.error ?? o.reason ?? "refused")) } : {}) };
             if (!ok && o.retryable === true) retry = String(detail.error);
             else if (ok && pending.length) { detail.waiting = true; detail.fingerprint = fingerprint; } // the owner checkout has not pulled: a wait, never a retry
-            else detail.settled = true; // done, or a refusal: never retried
+            else if (!ok) {
+              // Story 38.3 (B2): a refusal (a duplicate heading, a missing id) is never retried and never settles silently:
+              // `ended: "refused"` and one notifier line below, carrying the remedy
+              refused = String(detail.error);
+              detail = { ...base, resolved, pending, ok: false, settled: true, ended: "refused", reason: refused, error: refused };
+            } else detail.settled = true; // done: never retried
           }
         }
         if (retry !== undefined) {
@@ -728,13 +882,21 @@ export async function ledgerPass(queue: Queue, deps: PlanStatusDeps = {}, notify
         const last = now.findLast((e) => e.kind === LEDGER_RESOLVE);
         const seen = waiting && last?.detail?.waiting === true && JSON.stringify(last.detail.pending) === JSON.stringify(detail.pending);
         settle = waiting;
+        let noted = false;
         try {
           // the one record while it lasts, moved on to the ledger just read
           if (seen) queue.patchEventDetail(last!.seq, { fingerprint: detail.fingerprint });
           else queue.note(run.run_id, LEDGER_RESOLVE, detail);
           settle = waiting || detail.settled === true;
+          noted = !seen;
         }
         catch { /* a busy queue: the next tick */ }
+        if (refused !== undefined && noted) {
+          // Story 38.3 (B2): noted first, then the line (inside the pass's own lease), its outcome patched on that record
+          const rec = queue.events(run.run_id).findLast((e) => e.kind === LEDGER_RESOLVE && e.detail?.ended === "refused");
+          const remedy = ledgerRemedyText(ledgerResolveCommand(run.root, pr, ids, deps.env ?? process.env, { placeholders: true }));
+          await notifyLedgerEnd(queue, rec, notify, `sweep ${run.run_id}: the ledger pass was refused and flipped nothing: ${refused}; fix the owner ledger (a duplicate heading: renumber one; a missing id: use its entry's current id), then flip by hand: ${remedy}`);
+        }
         out.push(run.run_id);
       } finally {
         try { queue.releasePlanPhase(run.run_id, LEDGER_LEASE, self, settle); } catch { /* a dead owner's lease is re-taken */ }

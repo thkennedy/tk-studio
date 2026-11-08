@@ -127,7 +127,7 @@ import {
 } from "./queue";
 import { rerunHostLeg, VerifyRefused, type HostLegStarted } from "./hostleg";
 import { redSuites } from "./hostverify";
-import { emitTriage, engineCostOf, engineJobRun, isSweep, recordTriage, sweepRecord, sweepSummary, withEngineCost, type SweepSummary } from "./sweep";
+import { emitTriage, engineJobRun, isSweep, recordTriage, sweepCloseOutSummary, sweepRecord, type SweepSummary } from "./sweep";
 import { armStop, closeOutPaused, enginePidKnown, launchedSinceMove, resumePaused, rhythmOf, runDirOf, runsStories, stopArmed, type PausedDeps, type ResumeAnswer, type ResumeDeps as EngineResumeDeps } from "./closeout";
 import { readJournal } from "./office";
 import { runEngineStop } from "./runners";
@@ -1253,7 +1253,7 @@ async function cancelQueueRun(
     if (isSweep(queue.definition(current)) && !skip && !pendingCloseOut(queue.events(runId))) {
       recordTriage(queue, current, deps.worktree?.env);
       await emitTriage(queue, current, deps.worktree);
-      sweep = withEngineCost(sweepSummary(queue, current), await engineCostOf(current, deps.worktree));
+      sweep = await sweepCloseOutSummary(queue, current, deps.worktree); // Story 38.3: and the bundles' Stage Log rows
     }
     const input = { ...launchedCloseOutInput(queue.events(runId), current, { workerOnly: !!sweep }), engineRunId: current.engine_run_id ?? engine?.id ?? null, ...(sweep ? { sweep } : {}) };
     Object.assign(detail, await closeOutNow(queue, runId, input, deps.worktree, skip));

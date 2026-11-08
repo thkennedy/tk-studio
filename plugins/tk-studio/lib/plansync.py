@@ -64,6 +64,7 @@ CLI:
   uv run plansync.py stage --append --story KEY --row-json JSON
   uv run plansync.py stage --from-pass --run-dir D --story KEY [--role R]
                            [--phase P] --worktree W
+  uv run plansync.py stage --from-run --run-dir D --worktree W
   uv run plansync.py stage-post --directory ROOT --id ST-NNN [--story KEY]
                                 [--dry-run]
   uv run plansync.py ledger-resolve --directory ROOT --pr OWNER/REPO#N
@@ -77,7 +78,11 @@ tokens_out, cost_usd, outcome; elapsed never stored): the operator's
 `--start`/`--stop`, the supervisor's `--append`, the engine hook's
 `--from-pass` (one row per pass from state.json, the journal and the
 transcript's usage lines, plus one per consult subagent). A row written
-before the spec exists waits in `<spec_folder>/stages/<key>.jsonl`.
+before the spec exists waits in `<spec_folder>/stages/<key>.jsonl`. Story
+38.3 (DW-165): `--from-run` reads a sweep's engine run, read only: each
+bundle key's sessions as rows by the `--from-pass` row logic, answered as
+`{columns, bundles: [{key, rows}]}` for the sweep PR body's `## Stage Log`
+(a bundle has no spec and no Jira issue); it writes nothing.
 `stage-post` mirrors the rows onto the story's Jira issue as a start and a
 finish comment and a worklog, recorded in
 `_bmad-output/tracking/stage-posts.json`. Both end in the status block.
@@ -128,8 +133,13 @@ entry whose `status:` is the engine's `done <date>` is rewritten to
 `resolved <date> by <owner/repo>#N (sweep bundle dw-<name>; <the engine's
 resolution, clipped>)` — the one line, every other byte kept, one atomic
 write. An entry already `resolved … by <owner/repo>#N` (or closed any other
-way) is `unchanged`; a still-`open` or absent one is `pending` (the owner
-checkout has not pulled the merge yet: asked again). `ok` is true on every
+way) is `unchanged`; a still-`open` one is `pending` (the owner
+checkout has not pulled the merge yet: asked again). Story 38.3 (B4): an id
+with no `### DW-N:` heading is refused by name before any write, a dry run
+too (`LedgerMissingId: DW-9[, DW-12] not in the ledger (the counter's next
+id: DW-n)`, n by `deferred mint`'s rule; `(the counter unreadable: <error>)`
+when it cannot be read; `blocked`, exit 2, no `retryable`), never `pending`.
+`ok` is true on every
 answer but a refusal (no ledger, a malformed `--pr` or id); the result
 names `resolved[]`, `pending[]`, `unchanged[]` and ends with the AD-11
 status block (`partial` while anything is pending).
@@ -2985,73 +2995,131 @@ def _session_outcome(session: dict):
     return status
 
 
+def _session_row(worktree: Path, run_dir: Path, task_key: str,
+                 sessions: list[dict], i: int, recorded: dict[str, str],
+                 gates: set[str], prices: dict | None,
+                 cache: dict) -> dict | None:
+    """The i-th session's Stage Log row, as its own pass would have written
+    it (Story 37.3; Story 38.3 extracted it for `stage --from-run`): its
+    stage by the evidence on record, its pass the count of its stage's
+    sessions so far, its own transcript and journal span (the k-th
+    `session-start` of the task id for its k-th session record), tokens from
+    the transcript else its state.json `usage`, cost by `meter.price` else
+    `meter._session_usd`, outcome `_session_outcome`. None when it has no
+    start stamp. `cache` holds the routing, read once."""
+    import meter
+    session = sessions[i]
+    sid = session.get("session_id")
+    stage = _session_stage(session, task_key, recorded, gates)
+    number = sum(1 for s in sessions[:i + 1]
+                 if _session_stage(s, task_key, recorded, gates) == stage)
+    task_id = session["task_id"]
+    transcript, copy_dir = _session_transcript(run_dir, task_key, session)
+    records = _read_jsonl_file(transcript) if transcript else []
+    # the run dir's subagents copy is shared by the task's sessions: read
+    # it only when no other session shares this task id
+    shared = sum(1 for s in sessions if s["task_id"] == task_id) > 1
+    sub_copy = None if shared else copy_dir / "subagents"
+    helpers = [sub for sub in _subagent_transcripts(transcript, sub_copy)
+               if not _first_user_text(_read_jsonl_file(sub)).lstrip()
+               .startswith(CONSULT_MARKER)]
+    # the k-th journal span of the task id is its k-th session record's
+    ordinal = sum(1 for s in sessions[:i] if s["task_id"] == task_id)
+    spans = _journal_spans(run_dir, task_id)
+    start_ts, end_ts = spans[ordinal] if ordinal < len(spans) else (None, None)
+    first, last = _transcript_span(records)
+    started = start_ts if start_ts is not None else first
+    ended = end_ts if end_ts is not None else last
+    if started is None:
+        return None
+    paths = ([transcript] if transcript else []) + helpers
+    tokens_in, tokens_out, seen_model, metered = _usage_totals(paths)
+    cost = _usage_cost(paths, prices) if metered else None
+    usage = session.get("usage") if isinstance(session.get("usage"), dict) else None
+    if not metered and usage:
+        tokens_in = sum(int(usage.get(k) or 0) for k in (
+            "input_tokens", "cache_read_tokens", "cache_creation_tokens"))
+        tokens_out = int(usage.get("output_tokens") or 0)
+        metered = True
+        if prices is not None:
+            if "routing" not in cache:
+                cache["routing"] = meter._route_file(Path(worktree) / ROUTING_CURRENT_REL) or {}
+            try:
+                cost = meter._session_usd(task_key, session, prices, cache["routing"])
+            except meter.MeterError:
+                cost = None
+    return stage_row({
+        "stage": stage, "pass": number, "started": started, "ended": ended,
+        "session_id": sid, "model": session.get("model") or seen_model,
+        "effort": _routing_effort(worktree, stage),
+        "tokens_in": tokens_in if metered else None,
+        "tokens_out": tokens_out if metered else None,
+        "cost_usd": cost, "outcome": _session_outcome(session)})
+
+
 def _backfill_rows(worktree: Path, run_dir: Path, task_key: str,
                    sessions: list[dict], doc: "_StageDoc",
                    recorded: dict[str, str], gates: set[str],
                    prices: dict | None) -> list[dict]:
     """Story 37.3 (DW-148): one row per earlier session (all but the
     current) whose session id no Stage Log row names, as its own pass would
-    have written it; a session with no id or no start stamp is skipped.
-    A retry shares its task id, so each backfilled session reads only its
-    own transcript (`_session_transcript`) and its own journal span — the
-    k-th `session-start` of the task id for its k-th session record, else
-    its transcript's span; never the task's last (the current pass's)."""
-    import meter
+    have written it (`_session_row`); a session with no id or no start
+    stamp is skipped. A retry shares its task id, so each backfilled
+    session reads only its own transcript (`_session_transcript`) and its
+    own journal span — never the task's last (the current pass's)."""
     on_record = {r["session_id"] for r in doc.rows()}
     current_id = sessions[-1].get("session_id")
-    routing = None
+    cache: dict = {}
     rows = []
     for i, session in enumerate(sessions[:-1]):
         sid = session.get("session_id")
         if not isinstance(sid, str) or not sid or sid in on_record or sid == current_id:
             continue
-        stage = _session_stage(session, task_key, recorded, gates)
-        number = sum(1 for s in sessions[:i + 1]
-                     if _session_stage(s, task_key, recorded, gates) == stage)
-        task_id = session["task_id"]
-        transcript, copy_dir = _session_transcript(run_dir, task_key, session)
-        records = _read_jsonl_file(transcript) if transcript else []
-        # the run dir's subagents copy is shared by the task's sessions: read
-        # it only when no other session shares this task id
-        shared = sum(1 for s in sessions if s["task_id"] == task_id) > 1
-        sub_copy = None if shared else copy_dir / "subagents"
-        helpers = [sub for sub in _subagent_transcripts(transcript, sub_copy)
-                   if not _first_user_text(_read_jsonl_file(sub)).lstrip()
-                   .startswith(CONSULT_MARKER)]
-        # the k-th journal span of the task id is its k-th session record's
-        ordinal = sum(1 for s in sessions[:i] if s["task_id"] == task_id)
-        spans = _journal_spans(run_dir, task_id)
-        start_ts, end_ts = spans[ordinal] if ordinal < len(spans) else (None, None)
-        first, last = _transcript_span(records)
-        started = start_ts if start_ts is not None else first
-        ended = end_ts if end_ts is not None else last
-        if started is None:
+        row = _session_row(worktree, run_dir, task_key, sessions, i, recorded,
+                           gates, prices, cache)
+        if row is None:
             continue
-        paths = ([transcript] if transcript else []) + helpers
-        tokens_in, tokens_out, seen_model, metered = _usage_totals(paths)
-        cost = _usage_cost(paths, prices) if metered else None
-        usage = session.get("usage") if isinstance(session.get("usage"), dict) else None
-        if not metered and usage:
-            tokens_in = sum(int(usage.get(k) or 0) for k in (
-                "input_tokens", "cache_read_tokens", "cache_creation_tokens"))
-            tokens_out = int(usage.get("output_tokens") or 0)
-            metered = True
-            if prices is not None:
-                if routing is None:
-                    routing = meter._route_file(Path(worktree) / ROUTING_CURRENT_REL) or {}
-                try:
-                    cost = meter._session_usd(task_key, session, prices, routing)
-                except meter.MeterError:
-                    cost = None
-        rows.append(stage_row({
-            "stage": stage, "pass": number, "started": started, "ended": ended,
-            "session_id": sid, "model": session.get("model") or seen_model,
-            "effort": _routing_effort(worktree, stage),
-            "tokens_in": tokens_in if metered else None,
-            "tokens_out": tokens_out if metered else None,
-            "cost_usd": cost, "outcome": _session_outcome(session)}))
+        rows.append(row)
         on_record.add(sid)
     return rows
+
+
+def run_stage_rows(worktree: Path, run_dir: Path,
+                   prices_path: Path | None = None) -> dict:
+    """`stage --from-run` (Story 38.3, DW-165): a sweep's bundles' engine
+    passes as Stage Log rows, read only — a bundle has no spec and no Jira
+    issue, so the supervisor renders them into the sweep PR body's `## Stage
+    Log`. Every bundle key (`meter._bundle_keys`: the triages', then any
+    other `dw*-` task) gets `{key, rows}`, one row per session in state.json
+    order by `_session_row` (no rows on record, gates from the journal, pass
+    numbering per stage). Answers `{ok, columns, bundles, written: []}`;
+    never writes a doc or a buffer. An unreadable state.json is refused."""
+    import meter
+    worktree, run_dir = Path(worktree), Path(run_dir)
+    state = _read_json_file(run_dir / "state.json")
+    if state is None:
+        raise PlanSyncError(f"stage --from-run: {run_dir / 'state.json'} "
+                            f"is unreadable")
+    tasks = state.get("tasks") if isinstance(state.get("tasks"), dict) else {}
+    gates = _journal_gate_tasks(run_dir)
+    prices = _load_prices(prices_path)
+    cache: dict = {}
+    bundles = []
+    for key in meter._bundle_keys(run_dir, tasks):
+        task = tasks.get(key) if isinstance(tasks.get(key), dict) else {}
+        sessions = [s for s in task.get("sessions") or []
+                    if isinstance(s, dict) and isinstance(s.get("task_id"), str)]
+        task_key = task.get("story_key") if isinstance(task.get("story_key"), str) else key
+        rows = []
+        for i in range(len(sessions)):
+            row = _session_row(worktree, run_dir, task_key, sessions, i, {},
+                               gates, prices, cache)
+            if row is not None:
+                rows.append(row)
+        bundles.append({"key": key, "rows": rows})
+    result = {"ok": True, "columns": list(STAGE_COLUMNS), "bundles": bundles,
+              "written": []}
+    return _finish_stage(result, "complete", None)
 
 
 def stage_from_pass(worktree: Path, run_dir: Path, story: str,
@@ -3490,15 +3558,19 @@ def ledger_resolve(project_root: Path, pr: str, ids: list[str], date: str | None
     resolved: list[str] = []
     pending: list[str] = []
     unchanged: list[str] = []
+    missing: list[str] = []
     edits: list[tuple[int, int, str]] = []
     spans = _ledger_spans(text)
     for dw in dict.fromkeys(ids):
         span = spans.get(dw)
-        body = text[span[0]:span[1]] if span else ""
-        status_m = _DW_STATUS_RE.search(body) if span else None
+        if not span:
+            missing.append(dw)  # Story 38.3 (B4): refused by name below, never `pending`
+            continue
+        body = text[span[0]:span[1]]
+        status_m = _DW_STATUS_RE.search(body)
         value = status_m.group(1).strip() if status_m else ""
         first = value.split()[0] if value else ""
-        if not span or first == "open":
+        if first == "open":
             pending.append(dw)
             continue
         if first != "done":
@@ -3510,6 +3582,14 @@ def ledger_resolve(project_root: Path, pr: str, ids: list[str], date: str | None
         line = "status: " + resolved_status(when, ref, res_m.group(1).strip() if res_m else "")
         edits.append((span[0] + status_m.start(), span[0] + status_m.end(), line))
         resolved.append(dw)
+    if missing:
+        # before any write (a dry run refuses the same): the counter's next id says where the ledger stands
+        try:
+            tail = f"(the counter's next id: DW-{_deferred_next(root, text, load_counter(root))})"
+        except Exception as exc:  # a counter that cannot be read still names the missing ids
+            tail = f"(the counter unreadable: {exc})"
+        raise dwledger.LedgerMissingId(
+            f"LedgerMissingId: {', '.join(missing)} not in the ledger {tail}")
     for start, end, line in sorted(edits, reverse=True):
         text = text[:start] + line + text[end:]
     rel = LEDGER_REL.as_posix()
@@ -3527,6 +3607,21 @@ def ledger_resolve(project_root: Path, pr: str, ids: list[str], date: str | None
 DEFERRED_KEY = "deferred-work"
 
 
+def _deferred_next(root: Path, text: str, counter: dict) -> int:
+    """The ledger's next id (`deferred mint`'s rule, shared with `ledger-resolve`'s
+    `LedgerMissingId`): `max(next.deferred-work, highest DW-N in the text + 1)`,
+    the text's alone when the counter has no key yet. A bad key is refused."""
+    above = dwledger.highest_id(text) + 1
+    nxt = counter["next"]
+    if DEFERRED_KEY not in nxt:
+        return above
+    current = nxt[DEFERRED_KEY]
+    if isinstance(current, bool) or not isinstance(current, int) or current < 1:
+        raise PlanSyncError(f"{counter_path(root)}: next.{DEFERRED_KEY} must be an int >= 1, "
+                            f"got {current!r}")
+    return max(current, above)  # ids are never reused: a counter behind the ledger skips them
+
+
 def mint_deferred(project_root: Path, count: int = 1, *, dry_run: bool = False) -> dict:
     """The ledger's one id source (see the module docstring)."""
     root = Path(project_root)
@@ -3539,14 +3634,7 @@ def mint_deferred(project_root: Path, count: int = 1, *, dry_run: bool = False) 
     dwledger.parse_ledger(text)  # a duplicate heading refuses before anything is written
     counter = load_counter(root)
     nxt = counter["next"]
-    above = dwledger.highest_id(text) + 1
-    start = above
-    if DEFERRED_KEY in nxt:
-        current = nxt[DEFERRED_KEY]
-        if isinstance(current, bool) or not isinstance(current, int) or current < 1:
-            raise PlanSyncError(f"{counter_path(root)}: next.{DEFERRED_KEY} must be an int >= 1, "
-                                f"got {current!r}")
-        start = max(current, above)  # ids are never reused: a counter behind the ledger skips them
+    start = _deferred_next(root, text, counter)
     ids = [f"DW-{n}" for n in range(start, start + count)]
     following = start + count
     written: list[str] = []
@@ -3611,7 +3699,7 @@ def main(argv: list[str] | None = None) -> int:
     sbk.add_argument("--dry-run", action="store_true")
     stg = sub.add_parser("stage")
     mode = stg.add_mutually_exclusive_group(required=True)
-    for flag in ("--start", "--stop", "--append", "--from-pass"):
+    for flag in ("--start", "--stop", "--append", "--from-pass", "--from-run"):
         mode.add_argument(flag, action="store_true")
     stg.add_argument("--directory", default=None,
                      help="project root (default: --worktree, else the cwd)")
@@ -3712,7 +3800,7 @@ def _ledger_resolve_main(args) -> int:
     ids = [i.strip() for i in (args.ids or "").split(",") if i.strip()]
     try:
         result = ledger_resolve(root, args.pr, ids, date=args.date, dry_run=args.dry_run)
-    except (PlanSyncError, dwledger.LedgerDuplicateId) as exc:
+    except (PlanSyncError, dwledger.LedgerDuplicateId, dwledger.LedgerMissingId) as exc:
         result = _finish_stage({"written": []}, "blocked", str(exc))
         result["error"] = str(exc)
     except Exception as exc:  # never a traceback: the caller retries
@@ -3736,7 +3824,7 @@ def _deferred_main(args) -> int:
         except ValueError:
             raise PlanSyncError(f"deferred mint: --count must be an int >= 1: {args.count!r}") from None
         result = mint_deferred(root, count, dry_run=args.dry_run)
-    except (PlanSyncError, dwledger.LedgerDuplicateId) as exc:
+    except (PlanSyncError, dwledger.LedgerDuplicateId, dwledger.LedgerMissingId) as exc:
         result = _finish_stage({"written": []}, "blocked", str(exc))
         result["error"] = str(exc)
     except Exception as exc:  # never a traceback
@@ -3750,8 +3838,8 @@ def _deferred_main(args) -> int:
 
 
 def _stage_main(args) -> int:
-    """`stage --start|--stop|--append|--from-pass`: every path ends in the
-    JSON status block (AD-11); a refusal exits 2."""
+    """`stage --start|--stop|--append|--from-pass|--from-run`: every path
+    ends in the JSON status block (AD-11); a refusal exits 2."""
     base = args.directory or args.worktree or "."
     root = configlib.find_project_root(Path(base))
     try:
@@ -3767,6 +3855,11 @@ def _stage_main(args) -> int:
                                      repo_root=(Path(args.repo_root)
                                                 if args.repo_root else None),
                                      dry_run=args.dry_run)
+        elif args.from_run:
+            if not args.run_dir:
+                raise PlanSyncError("stage --from-run needs --run-dir")
+            result = run_stage_rows(Path(args.worktree) if args.worktree else root,
+                                    Path(args.run_dir))
         elif args.append:
             if not args.row_json:
                 raise PlanSyncError("stage --append needs --row-json")

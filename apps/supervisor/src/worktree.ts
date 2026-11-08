@@ -101,11 +101,11 @@ import { stopEngineMcp } from "./enginemcp";
 import { notifier, WorkDirMissing, workDir } from "./env";
 import { canonicalPr, isWithin, sendText } from "./hygiene";
 import { CONTACT_SHEET, FRAMES_DIR, hostVerify, inconclusiveReason, isInconclusive, isRed, isSlice, legGuard, legHistory, legVerdict, noteCloseOutLease, prSection, redReason, type HostVerifyResult, type LegHistoryEntry, type PlayableJudge, type PlayableRoute, type PrProof } from "./hostverify";
-import { accountedCostOf, isTerminal, RunTerminal, selfOwner, servedRoot, type EngineWhere, type Owner, type Queue, type QueueEvent, type QueueRun, type TerminalState } from "./queue";
+import { accountedCostOf, ENGINE_RELEASED, heldEngine, isTerminal, RunTerminal, selfOwner, servedRoot, type EngineWhere, type Owner, type Queue, type QueueEvent, type QueueRun, type TerminalState } from "./queue";
 import { gh, originGhRepo, originRepo, runner, studioScript, uvRunner } from "./runners";
 import { releasePin, sameStart, vmLaunchStatus, type SandboxDeps } from "./sandbox";
 import { lastJsonObject, runJobVerb, runProcess, toVmPath, type RunResult, type Tier } from "./server";
-import { emitTriage, engineCostOf, engineEndStatus, engineJobRun, isSweep, noteEngineProbe, recordTriage, stopSweepEngine, SWEEP_ENGINE_STOP, sweepStopPastDeadline, sweepCostText, sweepEndState, sweepNotice, sweepRecord, sweepSection, sweepSummary, sweepTotalCost, withEngineCost, type SweepSummary } from "./sweep";
+import { emitTriage, engineEndStatus, engineJobRun, isSweep, noteEngineProbe, recordTriage, stopSweepEngine, SWEEP_ENGINE_STOP, sweepCloseOutSummary, sweepStageLogText, sweepStopPastDeadline, sweepStreak, sweepCostText, sweepEndState, sweepNotice, sweepRecord, sweepSection, sweepSummary, sweepTotalCost, type SweepSummary } from "./sweep";
 
 type Env = Record<string, string | undefined>;
 /** An argv-only spawner (never a shell). `env`: variables added to the child's environment. */
@@ -464,6 +464,8 @@ export function prBody(input: { statusBlock?: unknown; engineRunId?: string | nu
     input.costText ?? (input.sweep ? sweepCostText(input.sweep, input.costUsd) : undefined) ?? (input.costUsd === undefined ? "not metered" : `$${input.costUsd.toFixed(4)} (total_cost_usd)`),
     // Story 35.7: a sweep run's bundles, blocked entries and human decisions, before `## Host verify`.
     ...(input.sweep ? ["", ...sweepSection(input.sweep)] : []),
+    // Story 38.3 (DW-165): the bundles' engine passes as Stage Log rows, after `## Sweep`.
+    ...(input.sweep && sweepStageLogText(input.sweep) ? ["", ...sweepStageLogText(input.sweep)!] : []),
     ...(input.verify ? ["", ...prSection(input.verify, input.proof, input.legs)] : []),
   ].join("\n");
 }
@@ -976,7 +978,9 @@ export function recordedVerify(events: readonly QueueEvent[]): HostVerifyResult 
  * `paused` (the `paused` event's detail) or `ended` (the end and its detail). */
 export type PendingTransition =
   | { phase: "paused"; detail: Record<string, unknown> }
-  | { phase: "ended"; state: TerminalState; reason: string | null; detail: Record<string, unknown>; stop?: any };
+  | { phase: "ended"; state: TerminalState; reason: string | null; detail: Record<string, unknown>; stop?: any;
+      /** Story 38.3 (B1): the engine run whose unanswered stop holds the lock and the pin (`endEngine`'s `holdEngine`). */
+      holdEngine?: string };
 
 /** A non-terminal run's close-out that already ran but whose transition was not written (the latest
  * `closed_out` with `pending`, after any `paused`): completed from the record, never closed out again. */
@@ -989,7 +993,7 @@ export function pendingCloseOut(events: readonly QueueEvent[]): PendingTransitio
 /** Write a close-out's state transition: `paused` (`markPaused`) or the engine's end (`endEngine`). */
 export function applyTransition(queue: Queue, runId: string, t: PendingTransition): void {
   if (t.phase === "paused") queue.markPaused(runId, t.detail);
-  else queue.endEngine(runId, t.state, t.reason, { detail: t.detail, ...(t.stop ? { stop: t.stop } : {}) });
+  else queue.endEngine(runId, t.state, t.reason, { detail: t.detail, ...(t.stop ? { stop: t.stop } : {}), ...(t.holdEngine ? { holdEngine: t.holdEngine } : {}) });
 }
 
 /** The close-out as an event's detail: `pr` (the URL) or `no_changes`, and the `closeout` record. */
@@ -1391,6 +1395,54 @@ export async function killedEngine(queue: Queue, r: QueueRun): Promise<Record<st
   } catch { return undefined; }
 }
 
+/** The `lock-released` reasons of a held engine freed by its exit or a confirmed stop (read back to finish a half-done release). */
+const ENGINE_EXITED = "its engine exited", STOP_CONFIRMED = "its engine's stop was confirmed";
+
+/** Story 38.3 (B1): each terminal sweep run whose unanswered stop holds its lock and pin (`heldEngine`), probed once
+ * per `sweepEngines` tick on its kept worktree (tier-aware; a worktree that is gone counts as `ended`): `ended` →
+ * the lock released (`releaseEngineLock`), then the pin (`release`), then `engine-released {engine_run_id, by: "exit",
+ * engine}`; `running`/`paused` → one `stopSweepEngine`, whose `stopped` releases the same way with `by: "stop"`;
+ * `unknown` → nothing (fail closed, as `launchStatusProbe`; no timer releases it). A release left half-done (its lock
+ * released on an earlier tick, this pass's `lock-released` after the `ended`, and no engine lock held by the run, but no
+ * `engine-released` written) is finished first, never probed again: the pin (idempotent) and the note, `by` read from
+ * that `lock-released`'s `why`, `resumed: true`. Answers the runs it released. Never throws. */
+export async function releaseHeldEngines(queue: Queue, deps: WorktreeDeps = {}): Promise<string[]> {
+  const out: string[] = [];
+  let runs: QueueRun[];
+  try { runs = queue.runs().filter((r) => isTerminal(r.state)); } catch { return out; }
+  for (const r of runs) {
+    try {
+      const events = queue.events(r.run_id);
+      const eid = heldEngine(events);
+      if (!eid || !isSweep(queue.definition(r))) continue;
+      // A release whose lock went on an earlier tick: the pin that release may have stopped answers the probe `unknown`
+      // for good, so it is finished from the record, never probed again.
+      const endAt = events.findLastIndex((e) => e.kind === "ended");
+      const freed = events.slice(endAt + 1).findLast((e) => e.kind === "lock-released" && (e.detail?.why === ENGINE_EXITED || e.detail?.why === STOP_CONFIRMED));
+      const lock = queue.lock(r);
+      if (freed && !(lock?.run_id === r.run_id && lock.kind === "engine")) {
+        await release(queue, r.run_id, deps);
+        queue.note(r.run_id, ENGINE_RELEASED, { engine_run_id: eid, by: freed.detail?.why === STOP_CONFIRMED ? "stop" : "exit", resumed: true });
+        out.push(r.run_id);
+        continue;
+      }
+      const served = servedRoot(r);
+      const st: EnginePhase = served && existsSync(r.worktree!) ? await engineStatus(served, eid, deps, { tier: r.tier, sandbox: r.sandbox })
+        : { phase: "ended", detail: { run_id: eid, status: "unknown", gone: "its worktree is gone: no engine can run there" } };
+      let by: "exit" | "stop";
+      if (st.phase === "ended") by = "exit";
+      else if (st.phase === "unknown") continue;
+      else if (await stopSweepEngine({ ...r, engine_run_id: eid }, deps) === "stopped") by = "stop";
+      else continue;
+      queue.releaseEngineLock(r.run_id, by === "exit" ? ENGINE_EXITED : STOP_CONFIRMED);
+      await release(queue, r.run_id, deps);
+      queue.note(r.run_id, ENGINE_RELEASED, { engine_run_id: eid, by, engine: st.detail });
+      out.push(r.run_id);
+    } catch { /* the next tick asks again */ }
+  }
+  return out;
+}
+
 /** One line through the notifier, its outcome for the record. Never throws. */
 async function notifyText(deps: WorktreeDeps, text: string): Promise<Record<string, unknown>> {
   try {
@@ -1405,6 +1457,8 @@ async function notifyText(deps: WorktreeDeps, text: string): Promise<Record<stri
  * closed out. Never throws. */
 export async function sweepEngines(queue: Queue, deps: WorktreeDeps = {}): Promise<string[]> {
   const done: string[] = [];
+  // Story 38.3 (B1): first, a held engine's lock and pin freed once its stop is confirmed or it exits.
+  await releaseHeldEngines(queue, deps);
   let runs: QueueRun[];
   try { runs = queue.awaitingEngine(); } catch { return done; }
   for (const r of runs) {
@@ -1428,7 +1482,7 @@ export async function sweepEngines(queue: Queue, deps: WorktreeDeps = {}): Promi
         if (isSweep(queue.definition(r))) {
           recordTriage(queue, r, deps.env);
           await emitTriage(queue, r, deps);
-          lateSweep = withEngineCost(sweepSummary(queue, r), await engineCostOf(r, deps));
+          lateSweep = await sweepCloseOutSummary(queue, r, deps);
           // The engine's own end, read while its run dir is there: only a terminal status caps the end. Its worktree
           // gone, or an engine that never wrote one (a cancel's, still `running` on disk): not known, so no cap.
           const late = r.engine_run_id && existsSync(r.worktree!) ? await engineStatus(servedRoot(r)!, r.engine_run_id, deps, { tier: r.tier, sandbox: r.sandbox }) : undefined;
@@ -1456,7 +1510,8 @@ export async function sweepEngines(queue: Queue, deps: WorktreeDeps = {}): Promi
         if (!run) continue;
         taken = true;
         applyTransition(queue, run.run_id, pending);
-        if (pending.phase === "ended") await release(queue, run.run_id, deps);
+        // Story 38.3 (B1): a held end keeps its pin until `releaseHeldEngines` frees it.
+        if (pending.phase === "ended" && !pending.holdEngine) await release(queue, run.run_id, deps);
         done.push(run.run_id);
         continue;
       }
@@ -1479,13 +1534,15 @@ export async function sweepEngines(queue: Queue, deps: WorktreeDeps = {}): Promi
         else {
           // Story 36.3 (DW-121): a sweep whose status probe fails once its stop went unanswered would never reach the paused
           // branch below, so its deadline is read here too: asked once more, then the `blocked` end. `running` is never ended.
-          // Story 37.5 (B5): the first `unknown` probe notes `engine-probe` once per engine run, so a probe that answers
-          // `unknown` from the start starts the deadline's clock too (its own kind, never standing in for an `engine-stop` note).
-          if (sweep && st.phase === "unknown") noteEngineProbe(queue, r, st.detail.error);
+          // Story 37.5 (B5): the first `unknown` probe notes `engine-probe`, so a probe that answers `unknown` from the start
+          // starts the deadline's clock too (its own kind, never standing in for an `engine-stop` note). Story 38.3 (B1): once
+          // per streak; a `running` probe notes `{phase: "running"}` only while a streak is open, which resets the clock.
+          if (sweep) noteEngineProbe(queue, r, st.phase, st.phase === "unknown" ? st.detail.error : undefined);
           if (!sweep || st.phase !== "unknown" || !sweepStopPastDeadline(queue.events(r.run_id), r.engine_run_id, (deps.clockMs ?? Date.now)())) continue;
           // Asked once more, then the `blocked` end: a stop that already answered `stopped` on an earlier tick, the probe
           // still answering `unknown`, ends the run `blocked` on this tick, with no second stop.
-          const answered = queue.events(r.run_id).some((e) => e.kind === SWEEP_ENGINE_STOP && e.detail?.engine_run_id === r.engine_run_id && e.detail?.stopped === true);
+          // Story 38.3 (B1): a stop answered in the latest streak only.
+          const answered = sweepStreak(queue.events(r.run_id), r.engine_run_id).some((e) => e.kind === SWEEP_ENGINE_STOP && e.detail?.stopped === true);
           if (!answered) engineStop = await stopSweepEngine(r, deps);
           if (!answered && engineStop === "stopped") {
             // A stop that answered `stopped` is noted once, so the next tick's `stopped` status is known for the
@@ -1505,8 +1562,13 @@ export async function sweepEngines(queue: Queue, deps: WorktreeDeps = {}): Promi
         engineStop = await stopSweepEngine(r, deps);
         // Story 36.2: one note per engine run, a stop that answered `stopped` too: a later tick's `stopped` status is known
         // for the supervisor's own stop (`engineEndStatus`) if this tick's close-out never finishes.
-        // Story 36.3: a first `error` note after a `stopped` one too: it alone starts the deadline's clock.
-        if (!queue.events(r.run_id).some((e) => e.kind === SWEEP_ENGINE_STOP && e.detail?.engine_run_id === r.engine_run_id && (engineStop === "stopped" || e.detail?.error !== undefined))) {
+        // Story 36.3: a first `error` note after a `stopped` one too: it alone starts the deadline's clock. Story 38.3 (B1): the
+        // first `error` note of the latest streak (after the latest `running` note), so a new streak gets its own.
+        const stopEvents = queue.events(r.run_id);
+        const stopNoted = engineStop === "stopped"
+          ? stopEvents.some((e) => e.kind === SWEEP_ENGINE_STOP && e.detail?.engine_run_id === r.engine_run_id)
+          : sweepStreak(stopEvents, r.engine_run_id).some((e) => e.kind === SWEEP_ENGINE_STOP && e.detail?.error !== undefined);
+        if (!stopNoted) {
           queue.note(r.run_id, SWEEP_ENGINE_STOP, { engine_run_id: r.engine_run_id, ...(engineStop === "stopped" ? { stopped: true } : { error: engineStop }), engine: st.detail });
         }
         if (engineStop !== "stopped") {
@@ -1590,7 +1652,8 @@ export async function sweepEngines(queue: Queue, deps: WorktreeDeps = {}): Promi
       const legs = verify ? legHistory(queue.events(run.run_id)) : [];
       // Story 35.7: the sweep's summary (the triage, each bundle landed or not), read before the worktree goes.
       // Story 36.2: and the engine priced per bundle, its run dir still there.
-      const summary = sweep ? withEngineCost(sweepSummary(queue, run, st.phase === "paused" ? st.detail : undefined), await engineCostOf(run, deps)) : undefined;
+      // Story 38.3 (DW-165): and the bundles' engine passes as Stage Log rows.
+      const summary = sweep ? await sweepCloseOutSummary(queue, run, deps, st.phase === "paused" ? st.detail : undefined) : undefined;
       // Story 36.3 (DW-64): a kill with no recorded leg (the leg a kill skips) stays a draft; so does a sweep's WIP or unanswered stop.
       const forceDraft = (!notKilled && !verify) || !!wip?.committed || !!wip?.error || stopUnanswered;
       const c = await closeOut(run, { paused: paused || haltPause, ...input, engineRunId: run.engine_run_id, ...(existingPr ? { existingPr } : {}), ...(verify ? { verify } : {}), ...(slice ? { slice } : {}), ...(legs.length ? { legs } : {}), ...(summary ? { sweep: summary } : {}), ...(forceDraft ? { killed: true } : {}), ...(wip?.error || stopUnanswered ? { keepWorktree: true } : {}) }, deps);
@@ -1628,14 +1691,21 @@ export async function sweepEngines(queue: Queue, deps: WorktreeDeps = {}): Promi
         const wipNote = wip?.committed ? `WIP committed on ${runBranch(run.run_id)}: ${wip.message ?? "wip"}` : wip?.error ? `WIP not committed, worktree kept: ${wip.error}` : undefined;
         if (wipNote) { reason = `${reason ? `${reason}; ` : ""}${wipNote}`; if (state === "complete") state = "partial"; }
         let notifyLine: Record<string, unknown> | undefined;
+        let holdEngine: string | undefined;
         if (stopUnanswered) {
           // Story 37.5 (B5): the line names the probe whenever no stop was left unanswered (no `engine-stop` note carrying
           // `error`): never paused nor asked to stop (the clock is the `engine-probe` note's, and this tick's unanswered stop
-          // is not noted), or a stop that answered `stopped` while the probe still answered `unknown`.
-          const asked = events.some((e) => e.kind === SWEEP_ENGINE_STOP && e.detail?.engine_run_id === run.engine_run_id && e.detail?.error !== undefined);
+          // is not noted), or a stop that answered `stopped` while the probe still answered `unknown`. Story 38.3 (B1): read
+          // in the latest streak; with no stop answered `stopped` in it the engine may still run, so the end holds the lock
+          // and the pin (`holdEngine`) until `releaseHeldEngines` sees a stop confirmed or the engine's own exit.
+          const streak = sweepStreak(events, run.engine_run_id);
+          const asked = streak.some((e) => e.kind === SWEEP_ENGINE_STOP && e.detail?.error !== undefined);
+          const confirmed = streak.some((e) => e.kind === SWEEP_ENGINE_STOP && e.detail?.stopped === true);
+          holdEngine = !confirmed && run.engine_run_id ? run.engine_run_id : undefined;
+          const tail = holdEngine ? "lock and pin held until a stop is confirmed or the engine exits" : "lock and pin released";
           const line = asked
-            ? `paused sweep ${run.run_id}: stop unanswered for 30 min — ended blocked, lock and pin released`
-            : `sweep ${run.run_id}: the status probe answered \`unknown\` for 30 min — ended blocked, lock and pin released`;
+            ? `paused sweep ${run.run_id}: stop unanswered for 30 min — ended blocked, ${tail}`
+            : `sweep ${run.run_id}: the status probe answered \`unknown\` for 30 min — ended blocked, ${tail}`;
           state = "blocked";
           reason = `${line}${wipNote ? `; ${wipNote}` : ""}`;
           notifyLine = await notifyText(deps, line);
@@ -1648,7 +1718,8 @@ export async function sweepEngines(queue: Queue, deps: WorktreeDeps = {}): Promi
           typeof judgeCost === "number" && Number.isFinite(judgeCost) && judgeCost >= 0 ? judgeCost : undefined);
         next = { phase: "ended", state, reason, detail: { ...(end.detail ?? {}), engine: st.detail, ...closeOutDetail(c), finish,
           ...(summary ? { sweep: sweepRecord(summary) } : {}), ...(summary?.engine_cost_usd !== undefined ? { engine_cost_usd: summary.engine_cost_usd } : {}),
-          ...(engineStop ? { engine_stop: engineStop } : {}), ...(wip?.committed || wip?.error ? { wip } : {}), ...(notifyLine ? { notify: notifyLine } : {}) }, ...(end.stop ? { stop: end.stop } : {}) };
+          ...(engineStop ? { engine_stop: engineStop } : {}), ...(wip?.committed || wip?.error ? { wip } : {}), ...(notifyLine ? { notify: notifyLine } : {}),
+          ...(holdEngine ? { engine_held: { engine_run_id: holdEngine } } : {}) }, ...(end.stop ? { stop: end.stop } : {}), ...(holdEngine ? { holdEngine } : {}) };
       }
       try { applyTransition(queue, run.run_id, next); }
       catch (e) {
@@ -1677,8 +1748,9 @@ export async function sweepEngines(queue: Queue, deps: WorktreeDeps = {}): Promi
         try { queue.note(run.run_id, "closed_out", { ...closeOutDetail(c), pending: next }); } catch { /* still busy: the next sweep probes again */ }
         throw e;
       }
-      // The deferred `ended` releases the pin; a `paused` run keeps it (with its worktree and lock).
-      if (next.phase === "ended") await release(queue, run.run_id, deps);
+      // The deferred `ended` releases the pin; a `paused` run keeps it (with its worktree and lock). Story 38.3 (B1): a held
+      // end keeps both until `releaseHeldEngines` frees them.
+      if (next.phase === "ended" && !next.holdEngine) await release(queue, run.run_id, deps);
       done.push(run.run_id);
     } catch {
       // The next sweep probes it again: a run this sweep took is let go of first.

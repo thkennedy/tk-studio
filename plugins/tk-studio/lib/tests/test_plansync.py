@@ -938,16 +938,56 @@ class LedgerResolveTests(PlanSyncTestCase):
         self.assertEqual(again["written"], [])
         self.assertEqual(path.read_bytes(), before)
 
-    def test_an_open_or_absent_entry_is_pending_and_ok(self):
+    def test_an_open_entry_is_pending_and_an_absent_one_refused(self):
+        # Story 38.3 (B4): `pending` keeps open entries only; an absent id is `LedgerMissingId`
         path = self._ledger()
         before = path.read_bytes()
-        code, out = self._cli("--pr", "thkennedy/tk-studio#300", "--ids", "DW-2,DW-9",
+        code, out = self._cli("--pr", "thkennedy/tk-studio#300", "--ids", "DW-2",
                               "--date", "2026-10-30")
         self.assertEqual(code, 0)
         self.assertTrue(out["ok"])
-        self.assertEqual(out["pending"], ["DW-2", "DW-9"])
+        self.assertEqual(out["pending"], ["DW-2"])
         self.assertEqual(out["status"], "partial")
         self.assertEqual(path.read_bytes(), before)
+        code, out = self._cli("--pr", "thkennedy/tk-studio#300", "--ids", "DW-2,DW-9",
+                              "--date", "2026-10-30")
+        self.assertEqual(code, 2)
+        self.assertNotIn("pending", out)
+        self.assertEqual(out["reason"], "LedgerMissingId: DW-9 not in the ledger (the counter's next id: DW-5)")
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_a_missing_id_is_refused_by_name_with_the_counter_and_nothing_written(self):
+        # Story 38.3 (B4): a done entry beside the missing ones is not flipped either (the refusal comes first)
+        path = self._ledger()
+        before = path.read_bytes()
+        counter = plansync.counter_path(self.root)
+        counter.parent.mkdir(parents=True, exist_ok=True)
+        counter.write_text("counter_version: 1\nnext:\n  epic: 38\n  story: 168\n  task: 1\n"
+                           "  deferred-work: 166\n", encoding="utf-8", newline="\n")
+        code, out = self._cli("--pr", "thkennedy/tk-studio#300", "--ids", "DW-1,DW-9,DW-12")
+        self.assertEqual(code, 2)
+        self.assertFalse(out["ok"])  # the refusal's shape, as LedgerDuplicateId's
+        self.assertEqual(out["status"], "blocked")
+        msg = "LedgerMissingId: DW-9, DW-12 not in the ledger (the counter's next id: DW-166)"
+        self.assertEqual(out["reason"], msg)
+        self.assertEqual(out["error"], msg)
+        self.assertNotIn("retryable", out)
+        self.assertEqual(list(out)[-4:], ["status", "intent", "artifacts", "reason"])
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_a_missing_id_refuses_a_dry_run_too_and_names_an_unreadable_counter(self):
+        path = self._ledger()
+        before = path.read_bytes()
+        counter = plansync.counter_path(self.root)
+        counter.parent.mkdir(parents=True, exist_ok=True)
+        counter.write_text("counter_version: 7\n", encoding="utf-8", newline="\n")
+        code, out = self._cli("--pr", "thkennedy/tk-studio#300", "--ids", "DW-1,DW-9", "--dry-run")
+        self.assertEqual(code, 2)
+        self.assertTrue(out["reason"].startswith("LedgerMissingId: DW-9 not in the ledger (the counter unreadable: "),
+                        out["reason"])
+        self.assertEqual(path.read_bytes(), before)
+        with self.assertRaises(dwledger.LedgerMissingId):
+            plansync.ledger_resolve(self.root, "thkennedy/tk-studio#300", ["DW-9"], dry_run=True)
 
     def test_the_date_flag_wins_and_the_rest_of_the_ledger_is_kept(self):
         path = self._ledger()
@@ -1019,6 +1059,76 @@ class LedgerResolveTests(PlanSyncTestCase):
         self.assertNotIn("retryable", out)
         self.assertEqual(list(out)[-4:], ["status", "intent", "artifacts", "reason"])
         self.assertEqual(path.read_bytes(), before)
+
+
+class StageFromRunTests(PlanSyncTestCase):
+    """Story 38.3 (DW-165): `plansync.py stage --from-run` answers a sweep's
+    bundles' engine passes as Stage Log rows, read only."""
+
+    MODEL = "claude-opus-5-5"
+
+    def _run(self) -> Path:
+        run_dir = self.root / ".bmad-loop" / "runs" / "E1"
+        run_dir.mkdir(parents=True)
+        (run_dir / "triage.json").write_text(json.dumps({"bundles": [
+            {"name": "a", "dw_ids": ["DW-1"]}, {"name": "b", "dw_ids": ["DW-2"]}]}), encoding="utf-8")
+        (self.root / ".bmad-loop" / "routing.current.json").write_text(json.dumps({
+            "implementer": {"model": self.MODEL, "effort": "medium"},
+            "reviewers": {"model": self.MODEL, "effort": "high"}}), encoding="utf-8")
+        usage = {"input_tokens": 1000, "output_tokens": 200, "cache_read_tokens": 0, "cache_creation_tokens": 0}
+        tasks, journal = {}, []
+        for n, key in enumerate(("dw-a", "dw-b")):
+            sessions = []
+            for k, label in enumerate(("dev", "review")):
+                task_id = f"{key}-{label}-1"
+                sessions.append({"task_id": task_id, "role": label, "status": "completed",
+                                 "model": self.MODEL, "session_id": f"s-{key}-{label}", "usage": usage})
+                t0 = 1793000000 + n * 1000 + k * 100
+                journal.append({"ts": t0, "kind": "session-start", "task_id": task_id})
+                journal.append({"ts": t0 + 60, "kind": "session-end", "task_id": task_id})
+            tasks[key] = {"story_key": key, "sessions": sessions}
+        tasks["sweep-triage"] = {"sessions": [{"task_id": "sweep-triage-1", "status": "completed"}]}
+        (run_dir / "state.json").write_text(json.dumps({"tasks": tasks}), encoding="utf-8")
+        (run_dir / "journal.jsonl").write_text("".join(json.dumps(j) + "\n" for j in journal), encoding="utf-8")
+        return run_dir
+
+    def _cli(self, *args: str) -> tuple[int, dict]:
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = plansync.main(["stage", "--from-run", *args])
+        return code, json.loads(out.getvalue())
+
+    def test_each_bundle_answers_one_row_per_session_and_nothing_is_written(self):
+        run_dir = self._run()
+        before = sorted(p.relative_to(self.root).as_posix() for p in self.root.rglob("*"))
+        code, out = self._cli("--run-dir", str(run_dir), "--worktree", str(self.root))
+        self.assertEqual(code, 0, out)
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["columns"], list(plansync.STAGE_COLUMNS))
+        self.assertEqual(out["written"], [])
+        self.assertEqual(list(out)[-4:], ["status", "intent", "artifacts", "reason"])
+        self.assertEqual([b["key"] for b in out["bundles"]], ["dw-a", "dw-b"])  # the triage's sessions get none
+        for b in out["bundles"]:
+            rows = b["rows"]
+            self.assertEqual([(r["stage"], r["pass"], r["session_id"]) for r in rows],
+                             [("dev", "1", f"s-{b['key']}-dev"), ("review", "1", f"s-{b['key']}-review")])
+            self.assertEqual([r["effort"] for r in rows], ["medium", "high"])
+            # no transcript: the state.json `usage` fallback, priced by `meter._session_usd`
+            self.assertEqual([(r["tokens_in"], r["tokens_out"]) for r in rows], [("1000", "200")] * 2)
+            self.assertTrue(all(r["cost_usd"] != plansync.NO_VALUE for r in rows), rows)
+            self.assertEqual({r["outcome"] for r in rows}, {"completed"})
+            self.assertTrue(all(r["started"].endswith("Z") and r["ended"].endswith("Z") for r in rows))
+        after = sorted(p.relative_to(self.root).as_posix() for p in self.root.rglob("*"))
+        self.assertEqual(after, before)
+
+    def test_an_unreadable_state_is_refused(self):
+        run_dir = self._run()
+        (run_dir / "state.json").write_text("{not json", encoding="utf-8")
+        code, out = self._cli("--run-dir", str(run_dir), "--worktree", str(self.root))
+        self.assertEqual(code, 2)
+        self.assertEqual(out["status"], "blocked")
+        self.assertIn("stage --from-run", out["reason"])
+        self.assertNotIn("retryable", out)
 
 
 class DeferredMintTests(PlanSyncTestCase):

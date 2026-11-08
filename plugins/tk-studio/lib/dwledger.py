@@ -5,6 +5,9 @@ into its `### DW-N:` entries and refuses a duplicate heading by name
 (`LedgerDuplicateId: DW-N at lines a and b`), so a doubled id goes red at the
 gate, never a silent first-wins. `plansync.py ledger-resolve` and `deferred
 mint`, the `launch.py sweep` preflight and `tests/test_dwledger.py` read it.
+Story 38.3 (B4): `LedgerMissingId` is `ledger-resolve`'s refusal of an id with
+no `### DW-N:` heading (`LedgerMissingId: DW-9[, DW-12] not in the ledger (the
+counter's next id: DW-n)`), raised before any write, never read as `pending`.
 
 The marker helpers keep the header's one comment line the upstream engine reads:
 its `next_seq` is one past the highest `DW-N` anywhere in the ledger text, so the
@@ -29,6 +32,11 @@ _TITLE_RE = re.compile(r"\A# [^\n]*(?:\n+|\Z)")
 
 class LedgerDuplicateId(Refusal):
     """Two `### DW-N:` headings: the message names the id and both lines."""
+
+
+class LedgerMissingId(Refusal):
+    """Story 38.3 (B4): a named id with no `### DW-N:` heading: the message
+    names the ids and the counter's next id (`plansync.py ledger-resolve`)."""
 
 
 class Entry(NamedTuple):

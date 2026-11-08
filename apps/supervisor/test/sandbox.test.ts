@@ -396,6 +396,23 @@ describe("Story 33.3: the pin restarts a running, logged-out sandbox once", () =
     expect(await sandboxHolders(q, SB, run.run_id, ["running", "paused", "external"])).toEqual([ended.run.run_id]);
   });
 
+  test("Story 38.3: an ended sweep whose unanswered stop holds its engine holds the sandbox for another run's release, until `engine-released`", async () => {
+    const q = newQueue();
+    const held = await sbxRun(q, { job: "held-job" });
+    launched(q, held.run.run_id);
+    q.endEngine(held.run.run_id, "blocked", "stop unanswered", { detail: { engine_held: { engine_run_id: ENGINE } }, holdEngine: ENGINE });
+    expect(q.lock(held.root)).toMatchObject({ kind: "engine", run_id: held.run.run_id, engine_run_id: ENGINE });
+    const other = await sbxRun(q, { job: "other-job" });
+    q.end(other.run.run_id, "complete", null);
+    expect(await sandboxHolders(q, SB, other.run.run_id)).toEqual([held.run.run_id]);
+    const { out, calls } = await during(() => releasePin(q, other.run.run_id, deps));
+    expect(out).toBe("kept");
+    expect(calls.filter((a) => a[0] === "stop")).toEqual([]);
+    expect(await sandboxHolders(q, SB, held.run.run_id)).toEqual([]); // its own release (after the engine is gone) is not held by itself
+    q.note(held.run.run_id, "engine-released", { engine_run_id: ENGINE, by: "exit" });
+    expect(await sandboxHolders(q, SB, other.run.run_id)).toEqual([]);
+  });
+
   test("A queued holder does not block the restart (the gated run is queued too)", async () => {
     sbx.answer({ ls: { [SB]: "running" }, auth: ["out", "in"] });
     const q = newQueue();
