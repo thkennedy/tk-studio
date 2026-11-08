@@ -266,6 +266,11 @@ DRIFT: the B1 pin test's dependent also carries a `Blocked by: KEY-1` comment �
 | dev | 1 | 2026-11-08T15:18:21Z | 2026-11-08T16:35:15Z | fbc9af42-8bb6-4920-be3b-6c9447f9ff82 | claude-opus-5-5 | medium | 51854037 | 232715 | 22.6198 | completed |
 | review | 1 | 2026-11-08T16:35:16Z | 2026-11-08T16:54:26Z | 89ac179d-8be3-4e6d-a221-a52ca86a7c83 | claude-opus-5-5 | medium | 8847379 | 72717 | 5.7013 | completed |
 | gate | 1 | 2026-11-08T16:54:26Z | 2026-11-08T16:57:36Z | 8c126a6c-dad4-4379-97e3-36d0d049062a | claude-opus-5-5 | medium | 2850047 | 14767 | 1.7282 | completed |
+| host-leg | 1 | 2026-11-08T16:58:27Z | 2026-11-08T18:00:41Z | — | — | — | — | — | — | red |
+| close-out | 1 | 2026-11-08T18:00:41Z | 2026-11-08T18:00:49Z | — | — | — | — | — | — | draft PR |
+| re-run | 1 | 2026-11-08T18:06:06Z | 2026-11-08T19:15:56Z | — | — | — | — | — | — | red |
+| re-run | 2 | 2026-11-08T19:17:27Z | 2026-11-08T20:21:26Z | — | — | — | — | — | — | green |
+| merge | — | 2026-11-08T20:22:06Z | 2026-11-08T20:22:06Z | — | — | — | — | — | — | merged |
 
 ## Verification
 
