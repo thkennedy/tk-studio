@@ -202,6 +202,9 @@ Test-only, `apps/supervisor/test/sweep.test.ts`; no story, contract or src devia
 | dev | 1 | 2026-11-08T03:40:45Z | 2026-11-08T04:41:18Z | 83cd2f4c-c89e-4e89-a876-21b4b023c563 | claude-opus-5-5 | medium | 31448675 | 201853 | 15.5290 | completed |
 | review | 1 | 2026-11-08T04:41:19Z | 2026-11-08T04:55:13Z | 3eaded6c-a202-4ac2-8c3a-4f2764d021a9 | claude-opus-5-5 | medium | 5932217 | 58600 | 4.5587 | completed |
 | gate | 1 | 2026-11-08T04:55:14Z | 2026-11-08T04:59:00Z | a5d19b8b-7d55-4ddf-bf49-a894fb6de0eb | claude-opus-5-5 | medium | 3892153 | 20515 | 2.1959 | completed |
+| host-leg | 1 | 2026-11-08T04:59:56Z | 2026-11-08T06:09:53Z | — | — | — | — | — | — | green |
+| close-out | 1 | 2026-11-08T06:09:53Z | 2026-11-08T06:10:00Z | — | — | — | — | — | — | PR |
+| merge | — | 2026-11-08T06:11:26Z | 2026-11-08T06:11:26Z | — | — | — | — | — | — | merged |
 
 
 ## Auto Run Result
