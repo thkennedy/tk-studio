@@ -13,13 +13,15 @@
  *   spawn    argv only, through the `CAPTURE` wrapper spawned by `runProcess` (`windowsHide`, never
  *            `detached` on win32, the tree killed on timeout), the worker's env (`buildWorkerEnv`) with
  *            `TK_SUPERVISOR_HOST_LEG=<run id>` (Story 38.1: `tools/verify_host.py` skips its beside-leg check for the
- *            leg's own run), under the leg's own guard (`legGuard`); both streams go to files, so a timeout keeps
+ *            leg's own run) and `TK_VERIFY_BESIDE_LEG=1` (DW-195: its gates' `bun test` children pass test/preload.ts's
+ *            beside-leg refusal), under the leg's own guard (`legGuard`); both streams go to files, so a timeout keeps
  *            their tails.
  *   guard    Story 38.1 (DW-174): every caller of the leg (the close-out's boundary and sweep-tail legs, the re-run)
  *            reads `legGuard(queue.definition(run))`: the job's `guards.host_verify_seconds`, else (a definition
  *            snapshot taken before 38.1) `guards.max_wall_clock_seconds`, else 600 — never the worker's
  *            `worker_guard_s`. Every step's trip reads `guard: <key> (<N>s)`. The close-out legs note a
- *            `host-verify-leg {owner, by: "close-out"}` lease first (closed by the leg's `host-verify`). A ran leg
+ *            `host-verify-leg {owner, by: "close-out", guard_s, deadline}` lease first (closed by the leg's
+ *            `host-verify`; DW-184: stale past its `deadline`, the lease plus one guard). A ran leg
  *            records `suite_durations` (`suiteDurations`: the last `== durations:` line, else the gate-level
  *            `ok|FAILED … in Ns` lines). A host step ended on the guard after at least one gate-level suite verdict,
  *            none red, is `inconclusive (guard)` (`guardInconclusive`, Story 35.3's shape): `partial`, the reason
@@ -132,6 +134,7 @@ import { load as loadYaml } from "js-yaml";
 import { buildWorkerEnv, invokeSkill, lastJsonObject, runProcess, type RunResult, type Spawner } from "./server";
 import { selfOwner, servedRoot, type Owner, type Queue, type QueueEvent, type QueueRun } from "./queue";
 import { pluginRoot, studioHome } from "./env";
+import { leaseClock } from "./liveleg";
 import { showAtBase } from "./gitshow";
 import { resolveRoute } from "./route";
 import { pinSandbox, studioRunDir } from "./sandbox";
@@ -234,11 +237,14 @@ export function legGuard(defn: Record<string, any> | null | undefined): { second
 }
 
 /** Story 38.1 (CAP-3): the close-out's lease, noted before a close-out leg (boundary or sweep tail): `host-verify-leg
- * {owner: {pid, host, nonce, start?}, by: "close-out"}`, closed by the leg's own `host-verify` (as `takeVerifyLeg`'s
- * is) — the queue record of "a run in its close-out" that `tools/verify_host.py` refuses to start beside. */
-export function noteCloseOutLease(queue: Pick<Queue, "note">, runId: string, self: Owner = selfOwner()): void {
+ * {owner: {pid, host, nonce, start?}, by: "close-out", guard_s, deadline}`, closed by the leg's own `host-verify` (as
+ * `takeVerifyLeg`'s is) — the queue record of "a run in its close-out" that `tools/verify_host.py` and test/preload.ts
+ * refuse to start beside. DW-184: `guard_s` is the leg's guard (`legGuard(...).seconds`) and `deadline` the ISO time
+ * one guard after the lease, past which the lease is stale (a crashed serve's lease no longer refuses). */
+export function noteCloseOutLease(queue: Pick<Queue, "note">, runId: string, guardS: number, self: Owner = selfOwner()): void {
   queue.note(runId, "host-verify-leg", {
     owner: { pid: self.pid, host: self.host, nonce: self.nonce, ...(self.start ? { start: self.start } : {}) }, by: "close-out",
+    ...leaseClock(guardS),
   });
 }
 
@@ -582,6 +588,9 @@ export async function hostVerify(
   const env = buildWorkerEnv(deps.env ?? process.env);
   // Story 38.1 (CAP-3): the leg's own `tools/verify_host.py` never refuses itself beside its own lease.
   env.TK_SUPERVISOR_HOST_LEG = run.run_id ?? "host-leg";
+  // DW-195 (hole 118): its gates' `bun test` children pass test/preload.ts's beside-leg refusal (verify_host.py strips
+  // only `TK_SUPERVISOR_*` from them, so this one reaches them).
+  env.TK_VERIFY_BESIDE_LEG = "1";
   // Hole 46: on the Windows host the console's `bash` is the WindowsApps WSL launcher, so a `verify.host`
   // that says `bash …` (and the lib suite's own bash-driven tests) ran inside WSL against Windows paths. Git's
   // own `usr\bin` (Git Bash, not on PATH by default) goes first when it is there.

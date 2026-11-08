@@ -11,8 +11,21 @@
 //
 // Per-suite `beforeAll` hooks that clear the same variables stay as they are: they also cover the
 // backup, work and sign-in variables, and restoring an absent value is a no-op.
+//
+// DW-195 (hole 118): a hand `bun test` beside a live host leg (a run's latest `host-verify-leg` lease in the queue at
+// TK_SUPERVISOR_DB with an owner, no later `host-verify`, and no deadline or one still ahead: src/liveleg.ts, the rule
+// `tools/verify_host.py` reads) slows the leg's bounded bun drives into a read hang: it is refused first, exit 2,
+// naming the run, unless TK_VERIFY_BESIDE_LEG=1 (the leg's env and `verify_host.py --beside-leg` set it). No queue is
+// no check; an unreadable one writes one stderr note; the leg's own run (TK_SUPERVISOR_HOST_LEG set) never reads it.
 import { afterAll, setDefaultTimeout } from "bun:test";
+import { besideLegRefusal } from "../src/liveleg";
 import { cleanupTemp } from "./tmp";
+
+const refusal = besideLegRefusal(process.env, Date.now());
+if (refusal !== null) {
+  process.stderr.write(`${refusal}\n`);
+  process.exit(2);
+}
 
 export const NOTIFIER_VARS = [
   "TK_SUPERVISOR_NOTIFY", "TK_SUPERVISOR_NTFY_URL", "TK_SUPERVISOR_TELEGRAM_TOKEN", "TK_SUPERVISOR_TELEGRAM_CHAT",

@@ -1531,10 +1531,10 @@ describe("Story 38.1: the leg's own guard, its measure and `inconclusive (guard)
     expect(isRed(v)).toBe(true); // no suite verdict printed: red
   }, 20_000);
 
-  test("the leg's env carries `TK_SUPERVISOR_HOST_LEG=<run id>` (verify_host.py's own run skips its beside-leg check)", async () => {
-    const fx = project(hostKey(bunCmd("console.log('leg=' + process.env.TK_SUPERVISOR_HOST_LEG)")));
-    const v = await hostVerify({ ...fx.run, run_id: "q-38-1" }, 60) as HostVerifyRan;
-    expect(v.stdout_tail).toEqual(["leg=q-38-1"]);
+  test("the leg's env carries `TK_SUPERVISOR_HOST_LEG=<run id>` (verify_host.py's own run skips its beside-leg check) and `TK_VERIFY_BESIDE_LEG=1` (DW-195: its bun children pass the preload)", async () => {
+    const fx = project(hostKey(bunCmd("console.log('leg=' + process.env.TK_SUPERVISOR_HOST_LEG + ' beside=' + process.env.TK_VERIFY_BESIDE_LEG)")));
+    const v = await hostVerify({ ...fx.run, run_id: "q-38-1" }, 60, { env: { ...process.env, TK_VERIFY_BESIDE_LEG: undefined } }) as HostVerifyRan;
+    expect(v.stdout_tail).toEqual(["leg=q-38-1 beside=1"]);
   });
 
   test("suiteDurations: the last `== durations:` line; else the gate-level `ok|FAILED … in Ns` lines before the first tail header; else none", () => {

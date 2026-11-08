@@ -164,7 +164,8 @@ describe("AC1: the leg — cut, run, record, remove, flip", () => {
     expect(fx.queue.events(fx.id).filter((e) => e.kind === "ended")).toEqual([fx.endedBefore!]);
     expect(hostVerifyOf(fx.queue.events(fx.id))).toBe("green");
     // The lease: taken (`by: api`), closed by the result; a second re-run takes it again.
-    expect(fx.queue.events(fx.id).filter((e) => e.kind === "host-verify-leg").map((e) => e.detail)).toEqual([{ owner: me, by: "api" }]);
+    // DW-184: it records the leg's guard (`legGuard`: 600 for a definition with none) and its deadline.
+    expect(fx.queue.events(fx.id).filter((e) => e.kind === "host-verify-leg").map((e) => e.detail)).toEqual([{ owner: me, by: "api", guard_s: 600, deadline: expect.any(String) }]);
     expect(fx.queue.takeVerifyLeg(fx.id, other, "cli")).toBe(true);
   }, 60_000);
 
@@ -1105,6 +1106,16 @@ describe("Story 38.1: the re-run's own guard, its measure and `inconclusive (gua
       expect(fx.hostVerifies().at(-1)!.detail).toMatchObject({ guard: row.trip });
     }, 30_000);
   }
+
+  test("DW-184: the re-run's lease records `guard_s` (the leg's `legGuard` seconds) and its ISO `deadline`, the lease plus one guard", async () => {
+    const fx = await fixture({ definition: { ...DEFN, guards: { max_wall_clock_seconds: 50, host_verify_seconds: 7 } }, config: scriptConfig("console.log('ok')"), workerGuardS: 50 });
+    await (await rerunHostLeg(fx.queue, fx.id, { by: "api" }, fx.deps)).done;
+    const ev = fx.queue.events(fx.id).find((e) => e.kind === "host-verify-leg")!;
+    expect(ev.detail).toMatchObject({ by: "api", guard_s: 7 });
+    const deadline = ev.detail!.deadline as string;
+    expect(new Date(deadline).toISOString()).toBe(deadline);
+    expect(Math.abs(Date.parse(deadline) - (Date.parse(ev.at) + 7000))).toBeLessThan(1000);
+  }, 30_000);
 
   test("AC2: a re-run ended on the guard with every verdict so far green — `inconclusive (guard)`: no flip, the body Timed out, `suite_durations` recorded, the verb's exit 1", async () => {
     const fx = await fixture({

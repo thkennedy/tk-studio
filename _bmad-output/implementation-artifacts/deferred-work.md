@@ -1,6 +1,6 @@
 # Deferred Work
 
-<!-- deferred-work counter: last minted DW-195; mint through plansync.py deferred mint -->
+<!-- deferred-work counter: last minted DW-197; mint through plansync.py deferred mint -->
 
 ### DW-124: Contract §4 `submit` admitted a full job definition but the CLI/skill surface was id-only
 origin: migrated from legacy ledger ("Deferred from: code review of feat/tk-studio-connector (2026-08-06)"), 2026-10-29
@@ -1564,7 +1564,8 @@ source_spec: `38-1-the-host-legs-own-guard-and-its-measure-spec.md`
 location: tools/verify_host.py:398-449
 severity: medium
 reason: live_legs treats any latest host-verify-leg with a non-null owner and no later host-verify as live (tools/verify_host.py:398-418); the lease records no guard or deadline (apps/supervisor/src/hostverify.ts:238-242); no pid probe by design (plan Settled shape 7: os.kill on win32 is TerminateProcess). Meets deferral (a): the refusal is behaviour AC3 names. A re-run of the leg (takeVerifyLeg takes over a dead owner) or --beside-leg clears it today. Raised by both review layers.
-status: open
+status: done 2026-11-08
+resolution: resolved by sweep bundle dw-host-leg-live-lease-guards
 
 ### DW-185: On the Windows host a guard's tree kill (taskkill /F /T) may kill a gate's child before verify_host.py itself, letting it print "== <suite>: FAILED rc=1" so a guard-cut leg reads red instead of inconc
 origin: spec-deferred 7d0b593c83a5
@@ -1652,4 +1653,21 @@ source_spec: `handoff-phase1-loop-2026-10-09.md` 2026-11-08 day-9a update; Story
 location: apps/supervisor/test/preload.ts (bunfig's `[test] preload`: the one hook every `bun test` in apps/supervisor runs); tools/verify_host.py (the beside-a-live-leg check: the lease the close-out notes, `legGuard`/`noteCloseOutLease`); plugins/tk-studio/lib/_budget.py (the drives' bounds); kb/agent-pc-setup-runbook.md (the fixes table's hole-118 row)
 severity: low
 reason: A red leg costs 62 to 70 minutes and a second POST; the one guard built (38.1's) covers `verify_host.py` alone, so an operator sizing a fix by hand beside the leg contends the drives whose bounds assume a quiet box and reads a hang that is not one. Fix to make: the supervisor suite's preload (or a `bun test` wrapper the runbook names) reads the same live-leg signal `verify_host.py` reads and refuses (exit 2 naming the run) unless `TK_VERIFY_BESIDE_LEG=1` — the leg's own `bun test` children carry that variable; the runbook's rule: hand checks before the POST, never during. The rule itself is recorded in the handoff and the runbook now.
+status: done 2026-11-08
+resolution: resolved by sweep bundle dw-host-leg-live-lease-guards
+
+### DW-196: A re-run's lease deadline starts at takeVerifyLeg, before the cut and materialise, so the leg's host step can outlive the deadline by the cut time and both guards stop refusing in that tail.
+origin: spec-deferred 794305febb82
+source_spec: `spec-dw-184-dw-195-host-leg-live-lease-guards.md`
+location: apps/supervisor/src/hostleg.ts:285
+severity: low
+reason: hostleg.ts rerunHostLeg takes the lease (with guard_s) before git fetch / worktree add / materialise; runLeg's host step then gets a fresh guardS. The intent fixes the deadline as lease started-at plus host_verify_seconds, so a margin or a re-noted lease is a follow-up decision (deferral (a): the refusal behaviour the criteria name).
+status: open
+
+### DW-197: A close-out lease's deadline is one leg guard after the lease, but hostVerify runs up to four steps (host, assets, engine, playable) each under the full guard, so a multi-step leg can outlive its dead
+origin: spec-deferred 357b9811d58e
+source_spec: `spec-dw-184-dw-195-host-leg-live-lease-guards.md`
+location: apps/supervisor/src/hostverify.ts:244
+severity: low
+reason: leaseClock(guardS) at apps/supervisor/src/liveleg.ts:33-35 is written by noteCloseOutLease (hostverify.ts:244-249) before hostVerify; steps at hostverify.ts:607/618/640/650 each get guardS. The intent fixes the deadline as lease start plus one leg guard; the later steps (assets, engine, playable) run past it by design, so a whole-leg deadline is a follow-up decision (deferral (a); consult 2026-11-08T21:47:05Z). The host step, which carries the bun drives hole 118 names, lies inside the first guard window.
 status: open

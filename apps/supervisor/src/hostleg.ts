@@ -282,7 +282,8 @@ export async function rerunHostLeg(queue: Queue, runId: string, opts: { by: "api
   const branch = runBranch(run.run_id);
   const head = await remoteTip(run, branch, deps);
   const self = deps.self ?? selfOwner();
-  if (!queue.takeVerifyLeg(runId, self, opts.by)) {
+  // DW-184: the lease records the leg's guard and its deadline (the leg reads the same guard, `runLeg`).
+  if (!queue.takeVerifyLeg(runId, self, opts.by, legGuard(queue.definition(run)).seconds)) {
     throw new VerifyRefused("VerifyRunning", `a host-leg re-run of queue run '${runId}' is already running`);
   }
   const path = `${run.worktree}.verify`;

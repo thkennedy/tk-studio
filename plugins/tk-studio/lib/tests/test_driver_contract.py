@@ -3824,6 +3824,34 @@ class DriverContractTestCase(unittest.TestCase):
                        "No verb, field, route or version changes."):
             self.assertIn(phrase, note)
 
+    def test_0_1_34_dw_184_dw_195_the_lease_deadline_and_the_test_refusal(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.34**", header)
+        self.assertNotIn("**0.1.35**", header)
+        flat = " ".join(self.text.split())
+        title = "**0.1.34 (DW-184, DW-195, additive).**"
+        self.assertEqual(flat.count(title), 1)
+        self.assertLess(flat.index("**0.1.34 (DW-27, DW-128, DW-129, clarification).**"), flat.index(title))
+        self.assertIn("by: \"close-out\"}` (DW-184: plus `guard_s` and `deadline`)", flat)
+        self.assertIn("no later `host-verify` (DW-184: and no `deadline`, or one still ahead)", flat)
+        note = flat[flat.index(title):]
+        note = note[:note.index("## 8. Conformance")]
+        subs = ("**The lease:**", "**The live-leg rule:**", "**The test refusal:**", "**The serve process:**")
+        self.assertEqual([note.index(s) for s in subs], sorted(note.index(s) for s in subs))
+        for phrase in ("hole 118", "`guard_s`", "`legGuard(...).seconds`", "the lease's start plus `guard_s` seconds",
+                       "`noteCloseOutLease`", "`takeVerifyLeg`",
+                       "either no `deadline` (a lease written before DW-184: live, as before) or a `deadline` still ahead",
+                       "an unparsable `deadline` reads as none", "a lease without one is never treated as stale",
+                       "A lease past its deadline is stale", "`apps/supervisor/src/liveleg.ts`", "no owner pid is probed",
+                       "`bun test: refused: a host leg is live on this box: queue run <id> (by <by>, since <at>)[; …]; "
+                       "a hand test beside the leg slows its bounded drives (hole 118): wait for its host-verify event "
+                       "(GET /runs/<id>), or set TK_VERIFY_BESIDE_LEG=1 to run anyway`",
+                       "unless `TK_VERIFY_BESIDE_LEG=1`", "`TK_SUPERVISOR_HOST_LEG` set) never reads it",
+                       "carries `TK_VERIFY_BESIDE_LEG=1`", "`verify_host.py --beside-leg` sets it",
+                       "no verb, route or version changes."):
+            self.assertIn(phrase, note)
+
     def test_0_1_34_dw_51_a_reapproval_drops_the_superseded_cycles_issues(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))

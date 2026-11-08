@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import json
 import os
 import sqlite3
 import stat
@@ -16,6 +17,7 @@ import tempfile
 import time
 import unittest
 from contextlib import redirect_stdout
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -669,6 +671,92 @@ class TestBesideLeg(VerifyHostCase):
         with mock.patch.object(vh.sqlite3, "connect", spy):
             vh.live_legs({"TK_SUPERVISOR_DB": str(self.db)})
         self.assertEqual(seen, [(self.db.resolve().as_uri() + "?mode=ro", True)])
+
+    # DW-184: the lease's deadline (the lease plus one guard); a lease past it is stale, one without it stays live.
+    def lease(self, deadline) -> str:
+        return json.dumps({"owner": {"pid": 4242, "host": "box", "nonce": "n1"}, "by": "close-out", "guard_s": 600,
+                           "deadline": deadline})
+
+    def test_a_lease_past_its_deadline_is_stale_and_the_gates_run(self):
+        past = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat().replace("+00:00", "Z")
+        self.event("q-a", "host-verify-leg", self.lease(past))
+        self.assertEqual(vh.live_legs({"TK_SUPERVISOR_DB": str(self.db)}), ([], None))
+        rc, out = self.run_main({}, env={"TK_SUPERVISOR_DB": str(self.db)})
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("refused", out)
+        self.assertEqual(self.calls, [("gate", "lib suite"), ("gate", "conformance")])
+
+    def test_a_lease_with_its_deadline_ahead_refuses_with_the_current_wording(self):
+        ahead = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+        self.event("q-a", "host-verify-leg", self.lease(ahead))
+        rc, out = self.run_main({}, env={"TK_SUPERVISOR_DB": str(self.db)})
+        self.assertEqual(rc, 2)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(out.splitlines(), [
+            "verify_host: refused: a host leg is live on this box: queue run q-a (by close-out, since 2026-11-07T20:00:00Z); "
+            "two gates on one box halve each other (hole 113): wait for its host-verify event (GET /runs/q-a), "
+            "or pass --beside-leg to run anyway",
+        ])
+
+    def test_the_deadline_is_compared_with_now(self):
+        self.event("q-a", "host-verify-leg", self.lease("2026-11-08T12:00:00.000Z"))
+        env = {"TK_SUPERVISOR_DB": str(self.db)}
+        before = datetime(2026, 11, 8, 11, 59, 59, tzinfo=timezone.utc)
+        after = datetime(2026, 11, 8, 12, 0, 0, tzinfo=timezone.utc)
+        self.assertEqual(vh.live_legs(env, now=before), ([("q-a", "close-out", "2026-11-07T20:00:00Z")], None))
+        self.assertEqual(vh.live_legs(env, now=after), ([], None))
+
+    def test_a_lease_without_a_deadline_or_with_an_unparsable_one_stays_live(self):
+        self.event("q-a", "host-verify-leg", self.OWNER)  # written before DW-184
+        self.event("q-b", "host-verify-leg", self.lease("garbage"))
+        self.event("q-c", "host-verify-leg", self.lease(12345))
+        far = datetime(2100, 1, 1, tzinfo=timezone.utc)
+        legs, error = vh.live_legs({"TK_SUPERVISOR_DB": str(self.db)}, now=far)
+        self.assertIsNone(error)
+        self.assertEqual([run_id for run_id, _, _ in legs], ["q-a", "q-b", "q-c"])
+        rc, _ = self.run_main({}, env={"TK_SUPERVISOR_DB": str(self.db)})
+        self.assertEqual(rc, 2)
+
+    def test_only_a_strict_zoned_extended_deadline_is_read_the_same_rule_as_liveleg_ts(self):
+        # src/liveleg.ts DEADLINE_RE: a zoneless, padded or basic-format deadline is no deadline (live); an offset is
+        # honoured.
+        self.event("q-zoneless", "host-verify-leg", self.lease("2026-11-08T12:00:00"))
+        self.event("q-padded", "host-verify-leg", self.lease(" 2026-11-08T12:00:00Z "))
+        self.event("q-basic", "host-verify-leg", self.lease("20261108T120000Z"))
+        self.event("q-offset", "host-verify-leg", self.lease("2026-11-08T14:00:00+02:00"))
+        env = {"TK_SUPERVISOR_DB": str(self.db)}
+        before = datetime(2026, 11, 8, 11, 59, 59, tzinfo=timezone.utc)
+        after = datetime(2026, 11, 8, 12, 0, 0, tzinfo=timezone.utc)
+        legs, error = vh.live_legs(env, now=before)
+        self.assertIsNone(error)
+        self.assertEqual([run_id for run_id, _, _ in legs], ["q-zoneless", "q-padded", "q-basic", "q-offset"])
+        legs, error = vh.live_legs(env, now=after)
+        self.assertIsNone(error)
+        self.assertEqual([run_id for run_id, _, _ in legs], ["q-zoneless", "q-padded", "q-basic"])
+        self.assertEqual(vh.lease_deadline({"deadline": "2026-11-08T14:00:00+02:00"}), after)
+        self.assertEqual(vh.lease_deadline({"deadline": "2026-11-08T07:00:00.5-05:00"}),
+                         datetime(2026, 11, 8, 12, 0, 0, 500000, tzinfo=timezone.utc))
+        for bad in ("2026-02-30T12:00:00Z", "2026-11-08T24:00:00Z", "2026-11-08T12:00:00+24:00",
+                    "2026-11-08T12:00:00z", "2026-11-08 12:00:00Z"):
+            self.assertIsNone(vh.lease_deadline({"deadline": bad}), bad)
+
+    def test_beside_leg_sets_tk_verify_beside_leg_for_the_gates_children(self):
+        self.event("q-a", "host-verify-leg", self.OWNER)
+        env: dict[str, str] = {}
+        self.assertIsNone(vh.beside_leg_check(True, env))
+        self.assertEqual(env, {"TK_VERIFY_BESIDE_LEG": "1"})
+        env = {}
+        self.assertIsNone(vh.beside_leg_check(False, env))
+        self.assertNotIn("TK_VERIFY_BESIDE_LEG", env)
+        with mock.patch.dict(os.environ, {}):
+            os.environ.pop("TK_VERIFY_BESIDE_LEG", None)
+            rc, out = self.run_main(self.CHANGED, env={"TK_SUPERVISOR_DB": str(self.db)}, argv=["--beside-leg"])
+            self.assertEqual(rc, 0, out)
+            spawned = [c[3] for c in self.spawns()]
+            self.assertTrue(spawned)
+            self.assertTrue(all(e.get("TK_VERIFY_BESIDE_LEG") == "1" for e in spawned), spawned)
+
+    CHANGED = {"apps/supervisor": "apps/supervisor/src/queue.ts\n"}
 
     def test_help_names_beside_leg(self):
         out = io.StringIO()

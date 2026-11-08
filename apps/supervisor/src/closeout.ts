@@ -481,7 +481,7 @@ async function boundaryLeg(queue: Queue, run: QueueRun, deps: PausedDeps): Promi
     if (!killed) {
       // Story 38.1 (CAP-1): the leg's own guard, never the worker's; the close-out's lease noted first (CAP-3).
       const g = legGuard(queue.definition(run));
-      noteCloseOutLease(queue, run.run_id, deps.self ?? selfOwner());
+      noteCloseOutLease(queue, run.run_id, g.seconds, deps.self ?? selfOwner());
       verify = await hostVerify(run, g.seconds, deps, { ...(slice ? { slice } : {}), guardKey: g.key });
       queue.note(run.run_id, "host-verify", { ...verify, ...(head ? { code_head: head } : {}) } as Record<string, unknown>);
     }
@@ -1072,7 +1072,7 @@ export async function pausedLegs(queue: Queue, deps: PausedDeps = {}): Promise<s
       // A clean tree whose head already has a ran leg (an earlier pause's): the pause's close-out reused it, never a second.
       if (legForHead(held, head)) continue;
       const g = legGuard(queue.definition(run));
-      noteCloseOutLease(queue, run.run_id, self);
+      noteCloseOutLease(queue, run.run_id, g.seconds, self);
       // The code leg only: no assets verb writes into the tree the engine resumes (a slice's proof stays with its end).
       const verify = await hostVerify(run, g.seconds, deps, { guardKey: g.key });
       const pr = priorPr(held);
