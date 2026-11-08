@@ -48,6 +48,10 @@ jobs:
   # run-epic-38 (2026-11-06): Epic 38, loop hygiene 5, planned from the EP-37 retrospective on Tim's go;
   # place tk-studio/run-epic-38 {tier: sbx} in the supervisor's per-job config before the first POST (hole 90).
   - run-epic-38
+  # run-epic-39 (2026-11-07): Epic 39, the studio front end, planned on Tim's direction of 2026-11-07;
+  # place tk-studio/run-epic-39 {tier: sbx} in the supervisor's per-job config before the first POST (hole 90),
+  # and POST only after Epic 38 has landed.
+  - run-epic-39
 
 # Role-keyed working sets (AD-17) — recorded only on explicit
 # confirmation via tk-studio-onboard; one entry per role.
