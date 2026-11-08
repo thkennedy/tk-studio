@@ -57,6 +57,10 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(str(caught.exception), "LedgerDuplicateId: DW-2 at lines 9 and 16")
         self.assertIsInstance(caught.exception, _core.Refusal)
 
+    def test_the_missing_id_refusal_is_a_refusal(self):
+        # Story 38.3 (B4): `ledger-resolve`'s refusal of an id with no heading
+        self.assertTrue(issubclass(dwledger.LedgerMissingId, _core.Refusal))
+
     def test_an_id_in_body_text_is_no_heading(self):
         self.assertEqual(len(dwledger.parse_ledger(DOC + "\nsee DW-1: again\n#### DW-1: nope\n")), 3)
 

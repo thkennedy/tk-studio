@@ -3549,6 +3549,66 @@ class DriverContractTestCase(unittest.TestCase):
                        if line.startswith("| Story / rulings"))
         self.assertRegex(stories, r"Story 38\.1, Story 38\.2(, Story 38\.\d+)* \(Epic 38\)")
 
+    def test_0_1_34_story_38_3_the_sweeps_path_cleared(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.34**", header)
+        self.assertNotIn("**0.1.35**", header)
+        self.assertEqual(header.count("0.1.34 (Story 38.3, additive)"), 1)
+        self.assertLess(header.index("0.1.34 (Story 38.2, additive)"),
+                        header.index("0.1.34 (Story 38.3, additive)"))
+        clause = " ".join(header[header.index("0.1.34 (Story 38.3, additive)"):].split())
+        for phrase in ("the sweep's path cleared",
+                       "measured from the first note of the latest non-`running` streak",
+                       "(`engine-probe {phase: \"running\"}` resets it)",
+                       "holding the lock and the pin until a stop is confirmed or the engine exits (`engine_held`, `engine-released`)",
+                       "`{ok: false, settled: true, ended: \"refused\", reason}` with one notifier line",
+                       "`LedgerMissingId` (exit 2, the id and the counter)",
+                       "the remedy's absolute verb path and `--directory`",
+                       "rows in the sweep PR body's `## Stage Log` (`plansync.py stage --from-run`)", "— additive) |"):
+            self.assertIn(phrase, clause)
+        flat = " ".join(self.text.split())
+        self.assertEqual(flat.count("**0.1.34 (Story 38.3, additive).**"), 1)
+        self.assertLess(flat.index("**0.1.34 (Story 38.2, additive).**"), flat.index("**0.1.34 (Story 38.3, additive).**"))
+        note = flat[flat.index("**0.1.34 (Story 38.3, additive).**"):]
+        note = note[:note.index("## 8. Conformance")]
+        for sub in ("**The deadline's streak (B1):**", "**The held end:**", "**The refused pass (B2):**",
+                    "**The missing id (B4):**", "**The remedy:**", "**The bundle's rows (DW-165):**", "**The serve process:**"):
+            self.assertIn(sub, note)
+        self.assertLess(note.index("**The deadline's streak (B1):**"), note.index("**The serve process:**"))
+        for phrase in ("`engine-probe {engine_run_id, phase: \"running\"}`",
+                       "an older `engine-probe` with no `phase` reads as non-`running`",
+                       "a `running` probe resets the clock and a healthy engine writes nothing per tick",
+                       "supersedes by statement 37.5's \"a `running` probe never resets it\"",
+                       "`endEngine {holdEngine: <engine_run_id>}`", "`ended.detail.engine_held {engine_run_id}`",
+                       "lock and pin held until a stop is confirmed or the engine exits",
+                       "`engine-released {engine_run_id, by: \"exit\", engine}`", "with `by: \"stop\"`",
+                       "is finished on a later tick without a probe",
+                       "`engine-released {engine_run_id, by, resumed: true}`",
+                       "`by` read back from the `lock-released` reason, with no `engine` field",
+                       "`unknown` releases nothing (fail closed; no timer releases it)",
+                       "supersedes by statement 37.5's \"lock and pin released\" on an unanswered stop",
+                       "`ledger-resolve {pr, ids, resolved, pending, ok: false, settled: true, ended: \"refused\", reason, error}`",
+                       "the ledger pass was refused and flipped nothing: <reason>; fix the owner ledger (a duplicate heading: "
+                       "renumber one; a missing id: use its entry's current id), then flip by hand: <remedy>",
+                       "The CLOSED skip and the `PLAN_RETRY_LIMIT` give-up stay silent.",
+                       "``LedgerMissingId: DW-9[, DW-12] not in the ledger (the counter's next id: DW-<n>)``",
+                       "``(the counter unreadable: <error>)``", "`pending` keeps only `open` entries.",
+                       "supersedes by statement 37.5's \"A missing id stays `pending` (no `missing[]`)\" and 0.1.30's "
+                       "\"a still-`open` one `pending`\"",
+                       "`uv run --no-project python \"<studio root>/plugins/tk-studio/lib/plansync.py\" ledger-resolve "
+                       "--directory \"<run root>\" --pr <pr> --ids <ids>`", "never `toVmPath`",
+                       "supersedes by statement 37.5's relative `uv run plugins/tk-studio/lib/plansync.py …` remedy",
+                       "`plansync.py stage --from-run --run-dir D --worktree W`",
+                       "`{ok: true, columns, bundles: [{key, rows}], written: []}`",
+                       "renders `## Stage Log` after `## Sweep` and before `## Host verify`",
+                       "`no engine pass recorded`", "`Stage Log not read: <error>`", "no Jira row is owed",
+                       "`sweep.ts`, `worktree.ts`, `queue.ts`, `sandbox.ts` and `cli.ts` run in serve"):
+            self.assertIn(phrase, note)
+        stories = next(line for line in self.text.splitlines()
+                       if line.startswith("| Story / rulings"))
+        self.assertRegex(stories, r"Story 38\.1, Story 38\.2, Story 38\.3(, Story 38\.\d+)* \(Epic 38\)")
+
     def test_story_35_7_the_skill_sweep_waits_540_s_inside_the_bash_cap(self):
         # the skill's one sweep call must print its block inside the Bash tool's 600 s cap
         skill = (PLUGIN_ROOT / "skills" / "tk-studio-launch" / "SKILL.md").read_text(encoding="utf-8")

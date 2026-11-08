@@ -51,7 +51,7 @@ import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { ENGINE_MCP_START, ENGINE_MCP_STOP } from "./enginemcp-kinds";
 import { sbxBin, studioHome } from "./env";
 import {
-  checkoutKey, isTerminal, parseStatGroup, probeRecordedWorker, processStartTime, servedRoot, workerMayRun, type Queue, type QueueRun, type WorkerKill,
+  checkoutKey, heldEngine, isTerminal, parseStatGroup, probeRecordedWorker, processStartTime, servedRoot, workerMayRun, type Queue, type QueueRun, type WorkerKill,
 } from "./queue";
 import { maxLoginPreflight, readProjectConfig, runProcess, toVmPath, type RunResult, type Spawner } from "./server";
 
@@ -167,7 +167,9 @@ export const SANDBOX_HOLDING_STATES = ["queued", "running", "paused", "external"
  * answers what it did. */
 /** The runs that hold sandbox `sb` besides `runId`: every other run recording it in one of `states`, plus every ended
  * run recording it whose engine is still alive after its kill (`runId`'s own included — DW-3). Story 33.3: extracted
- * from `releasePin` (its rule unchanged) so the pin's restart refuses to stop a sandbox a live run holds. */
+ * from `releasePin` (its rule unchanged) so the pin's restart refuses to stop a sandbox a live run holds. Story 38.3
+ * (B1): and every other ended run whose engine is held (`heldEngine`: an unanswered stop's `blocked` end, until its
+ * `engine-released`), so another run's release never stops the sandbox under it. */
 export async function sandboxHolders(
   queue: Queue, sb: string, runId: string, states: readonly string[] = SANDBOX_HOLDING_STATES,
 ): Promise<string[]> {
@@ -175,7 +177,7 @@ export async function sandboxHolders(
   const holders = sameSandbox.filter((r) => r.run_id !== runId && states.includes(r.state)).map((r) => r.run_id);
   // An ended run whose kill left its engine alive still holds the sandbox while that pid runs.
   for (const r of sameSandbox.filter((x) => isTerminal(x.state))) {
-    if (await queue.engineAliveAfterKill(r)) holders.push(r.run_id);
+    if ((r.run_id !== runId && heldEngine(queue.events(r.run_id))) || await queue.engineAliveAfterKill(r)) holders.push(r.run_id);
   }
   return holders;
 }

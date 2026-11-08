@@ -1393,7 +1393,7 @@ source_spec: `36-2-the-sweeps-records-are-whole-spec.md` (:187, :365)
 location: plugins/tk-studio/lib/plansync.py stage-post; apps/supervisor/src/sweep.ts
 severity: low
 reason: DW-131 closed on the priced close-out (the runbook's hole-102 row: "A bundle still has no Jira story, so the stage log posts no row for it"), and its stage-log half was left with no open entry because 36.2's AC1 did not name it. A bundle's spend reaches `## Metered cost` and the `job-run` line, but no Stage Log row or Jira worklog.
-status: open
+status: resolved 2026-11-08 by Story 38.3 (a sweep bundle's engine passes are Stage Log rows in the sweep PR body's ## Stage Log; the Jira half not owed: a bundle has no issue)
 
 ### DW-166: DW-64's remainder has no entry: the late terminal close-out, `closeOutNow` and `cancel`.
 origin: retrospective C8 (`_bmad-output/specs/spec-epic-36/RETROSPECTIVE.md`:77)

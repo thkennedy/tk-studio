@@ -2,7 +2,7 @@
 // line, the three-way end, a paused sweep closed out (never relaunched), and the ledger pass after the merge.
 // Pinned against a real throwaway repository (a bare `origin`), the fake `gh` and an injected studio-script runner.
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { DEFERRED_REL, jobRunCosts, spendByEpic } from "../src/board";
@@ -11,14 +11,14 @@ import { closeOutPaused } from "../src/closeout";
 import { endNotice, noticeText } from "../src/hygiene";
 import { runCost } from "../src/inbox";
 import { mergePass, PLAN_RETRY_LIMIT } from "../src/planstatus";
-import { Queue, type QueueEvent } from "../src/queue";
+import { ENGINE_RELEASED, heldEngine, Queue, type QueueEvent } from "../src/queue";
 import { engineStopArgv } from "../src/runners";
 import { runProcess, toVmPath, type RunResult } from "../src/server";
 import {
-  emitTriage, engineCostOf, isSweep, stopEngine, SWEEP_ENGINE_PROBE, SWEEP_LEDGER_WAIT_MS, SWEEP_STOP_DEADLINE_MS, sweepRecord, sweepStopPastDeadline, LEDGER_LEASE, LEDGER_RESOLVE, ledgerFingerprint, ledgerPass, recordTriage, summaryFromRecord, SWEEP_ENGINE_STOP, SWEEP_JOB_TYPE, SWEEP_TRIAGE, sweepCostText,
+  emitTriage, engineCostOf, isSweep, ledgerRemedyText, ledgerResolveCommand, stopEngine, sweepStageLogText, SWEEP_ENGINE_PROBE, SWEEP_LEDGER_WAIT_MS, SWEEP_STOP_DEADLINE_MS, sweepRecord, sweepStopPastDeadline, LEDGER_LEASE, LEDGER_RESOLVE, ledgerFingerprint, ledgerPass, recordTriage, summaryFromRecord, SWEEP_ENGINE_STOP, SWEEP_JOB_TYPE, SWEEP_TRIAGE, sweepCostText,
   sweepEndState, sweepSection, sweepTotalCost, withEngineCost, type SweepSummary,
 } from "../src/sweep";
-import { launchedCloseOutInput, prBody, prepareWorktree, sweepEngines, wipMessage, type WorktreeDeps } from "../src/worktree";
+import { launchedCloseOutInput, prBody, prepareWorktree, releaseHeldEngines, sweepEngines, wipMessage, type WorktreeDeps } from "../src/worktree";
 import { fakeGh, gitRepo, testGit } from "./fakes";
 import { tempDir } from "./tmp";
 
@@ -37,8 +37,11 @@ const TRIAGE = {
 };
 
 /** A launched `run-sweep` run in its own worktree (engine `E1`), the studio-script runner recording every call.
- * `prefix`: the project lies below its git top-level (`<checkout>/<prefix>`, served at `<worktree>/<prefix>`). */
-async function sweepFixture(opts: { prefix?: string } = {}) {
+ * `prefix`: the project lies below its git top-level (`<checkout>/<prefix>`, served at `<worktree>/<prefix>`).
+ * Story 38.3: `sandbox` places the run on the sbx tier, pinned to that sandbox: the engine's status and stop go through
+ * the fake `sbx` runner (`exec <sb> uv run …/launch.py status|stop`, answered from `answers`), which records every argv
+ * (`sbxCalls`: the pin's release is `["stop", <sb>]`), and the release's engine MCP stop is recorded (`mcpStops`). */
+async function sweepFixture(opts: { prefix?: string; sandbox?: string } = {}) {
   const repo = gitRepo(opts.prefix ? { [`${opts.prefix}.keep`]: "" } : {});
   const root = opts.prefix ? join(repo.checkout, opts.prefix) : repo.checkout;
   const gh = fakeGh();
@@ -56,10 +59,24 @@ async function sweepFixture(opts: { prefix?: string } = {}) {
     price: { exit: 2, stdout: JSON.stringify({ ok: false, error: "no price table here" }), stderr: "" } as RunResult,
     /** Story 36.2: `ledger.py emit`'s answer. */
     emit: { exit: 0, stdout: JSON.stringify({ ok: true }), stderr: "" } as RunResult,
+    /** Story 38.3: `plansync.py stage --from-run`'s answer (default: refused, the body says the Stage Log was not read). */
+    stageRows: { exit: 2, stdout: JSON.stringify({ ok: false, error: "no stage rows here" }), stderr: "" } as RunResult,
   };
   const env = { ...process.env, TK_SUPERVISOR_WORK: work, GH_BIN: gh.bin, TK_STUDIO_ROOT: "/studio-root", TK_STUDIO_HOME: home };
+  const sbxCalls: string[][] = [];
+  const mcpStops: string[] = [];
+  const sbxLaunch = (args: string[]) => args[0] === "exec" && args[2] === "uv" && args[3] === "run" && /\/launch\.py$/.test(args[4] ?? "") ? args[5] : undefined;
   const deps: WorktreeDeps & { self: typeof me } = {
     env, self: me,
+    ...(opts.sandbox ? { sbx: {
+      run: async (_bin: string, args: string[]): Promise<RunResult> => {
+        sbxCalls.push(args);
+        if (sbxLaunch(args) === "status") return { exit: 0, stdout: JSON.stringify(answers.launch), stderr: "" };
+        if (sbxLaunch(args) === "stop") return answers.stop;
+        return { exit: 0, stdout: "", stderr: "" };
+      },
+      stopEngineMcp: async (_q: Queue, runId: string) => { mcpStops.push(runId); return true; },
+    } } : {}),
     run: (bin, args, o) => runProcess(bin, args, { cwd: o.cwd, timeoutS: o.timeoutS, env: { ...env, ...(o.env ?? {}) } }),
     uv: async (root, script, args): Promise<RunResult> => {
       studio.push({ script, args, root });
@@ -72,6 +89,7 @@ async function sweepFixture(opts: { prefix?: string } = {}) {
         return { exit: a.exit, stdout: JSON.stringify(a.out), stderr: "" };
       }
       if (script.endsWith("meter.py") && args[0] === "price-run") return answers.price;
+      if (script.endsWith("plansync.py") && args[0] === "stage" && args[1] === "--from-run") return answers.stageRows;
       if (script.endsWith("ledger.py") && args[0] === "emit") return answers.emit;
       return { exit: 2, stdout: "", stderr: "unexpected script" };
     },
@@ -83,9 +101,11 @@ async function sweepFixture(opts: { prefix?: string } = {}) {
     probeWorker: (pid, start) => ({ pid, start, outcome: "not running" }),
   });
   const defn = { id: SWEEP_JOB_TYPE, target: { skill: "tk-studio-launch", payload: { verb: "sweep" } } };
-  const queued = queue.enqueue({ jobId: SWEEP_JOB_TYPE, root, projectId: "proj", definition: defn, owner: me, base_ref: "main", ...(opts.prefix ? { prefix: opts.prefix } : {}) }).run;
+  const queued = queue.enqueue({ jobId: SWEEP_JOB_TYPE, root, projectId: "proj", definition: defn, owner: me, base_ref: "main", ...(opts.prefix ? { prefix: opts.prefix } : {}),
+    ...(opts.sandbox ? { tier: "sbx" as const, sandbox: opts.sandbox } : {}) }).run;
   const claim = await queue.claim(queued.run_id, me);
   if (!claim.claimed) throw new Error("not claimed");
+  if (opts.sandbox) queue.note(claim.run.run_id, "pinned", { sandbox: opts.sandbox });
   const wt = await prepareWorktree(queue, claim.run, "proj", root, deps);
   queue.markVerbStarted(claim.run.run_id, "wake", [], { target: "skill", definition: defn });
   const BLOCK = { status: "complete", intent: "tk-studio-launch", artifacts: [".bmad-loop/runs/E1"], reason: "triage still running" };
@@ -99,7 +119,7 @@ async function sweepFixture(opts: { prefix?: string } = {}) {
   const journal = (entry: Record<string, unknown>) => writeFileSync(join(runDir, "journal.jsonl"),
     `${existsSync(join(runDir, "journal.jsonl")) ? readFileSync(join(runDir, "journal.jsonl"), "utf-8") : ""}${JSON.stringify(entry)}\n`);
   return {
-    repo, root, gh, home, studio, verbs, answers, deps, queue, wt, served, runDir, id, get: () => queue.get(id)!,
+    repo, root, gh, home, studio, verbs, answers, deps, queue, wt, served, runDir, id, get: () => queue.get(id)!, sbxCalls, mcpStops,
     triage: (t: unknown = TRIAGE) => writeFileSync(join(runDir, "triage.json"), typeof t === "string" ? t : JSON.stringify(t)),
     landed: (name: string) => journal({ ts: 1, kind: "sweep-bundle-closed", story_key: `dw-${name}`, dw_ids: [] }),
     journal,
@@ -244,7 +264,7 @@ describe("Story 35.7: the run-sweep job type", () => {
     fx.commit("a.txt", "sweep bundle dw-a");
     fx.answers.launch = { ok: true, run: { status: "finished" } };
     expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.id]);
-    const calls = () => fx.studio.filter((s) => s.script.endsWith("plansync.py"));
+    const calls = () => fx.studio.filter((s) => s.script.endsWith("plansync.py") && s.args[0] === "ledger-resolve");
     expect(await ledgerPass(fx.queue, fx.deps)).toEqual([]); // OPEN: nothing
     expect(calls()).toHaveLength(0);
     fx.gh.answer({ view: "MERGED" });
@@ -316,7 +336,7 @@ describe("Story 35.7: the run-sweep job type", () => {
     expect(fx.get().reason).toBe("sweep: 1/2 bundles; blocked: DW-4; decisions: DW-5"); // the triage read in the served root
     fx.gh.answer({ view: "MERGED" });
     expect(await ledgerPass(fx.queue, fx.deps)).toEqual([fx.id]);
-    const call = fx.studio.find((s) => s.script.endsWith("plansync.py"))!;
+    const call = fx.studio.find((s) => s.script.endsWith("plansync.py") && s.args[0] === "ledger-resolve")!;
     expect(call.args.slice(0, 3)).toEqual(["ledger-resolve", "--directory", fx.root]);
     expect(call.root).toBe(fx.root);
     expect(fx.get().prefix).toBe("game/");
@@ -438,7 +458,7 @@ describe("Story 35.7: the run-sweep job type", () => {
     fx.gh.answer({ view: "CLOSED" });
     expect(await ledgerPass(fx.queue, fx.deps)).toEqual([fx.id]);
     expect(await ledgerPass(fx.queue, fx.deps)).toEqual([]);
-    expect(fx.studio.some((s) => s.script.endsWith("plansync.py"))).toBe(false);
+    expect(fx.studio.some((s) => s.script.endsWith("plansync.py") && s.args[0] === "ledger-resolve")).toBe(false);
     expect(fx.queue.events(fx.id).filter((e) => e.kind === LEDGER_RESOLVE).map((e) => e.detail)).toEqual([
       { pr: PR, ids: ["DW-1", "DW-2", "DW-6"], resolved: [], pending: [], ok: false, settled: true, skipped: true, reason: "pr closed unmerged" },
     ]);
@@ -485,7 +505,7 @@ describe("Story 35.7: the run-sweep job type", () => {
       bundles: [{ name: "a", landed: true }, { name: "b", landed: false }, { name: "a", cycle: 2, landed: false }, { name: "c", cycle: 2, landed: true }] } });
     fx.gh.answer({ view: "MERGED" });
     expect(await ledgerPass(fx.queue, fx.deps)).toEqual([fx.id]);
-    const call = fx.studio.find((s) => s.script.endsWith("plansync.py"))!;
+    const call = fx.studio.find((s) => s.script.endsWith("plansync.py") && s.args[0] === "ledger-resolve")!;
     expect(call.args.slice(-2)).toEqual(["--ids", "DW-1,DW-2,DW-7,DW-6,DW-9"]);
   });
 
@@ -610,7 +630,7 @@ describe("Story 36.2: the sweep's records are whole", () => {
     fx.answers.ledger.push(pending, pending, pending);
     const records = () => fx.queue.events(fx.id).filter((e) => e.kind === LEDGER_RESOLVE);
     const leases = () => fx.queue.events(fx.id).filter((e) => e.kind === "plan-lease" && e.detail?.phase === LEDGER_LEASE);
-    const calls = () => fx.studio.filter((s) => s.script.endsWith("plansync.py"));
+    const calls = () => fx.studio.filter((s) => s.script.endsWith("plansync.py") && s.args[0] === "ledger-resolve");
     const views = () => fx.gh.calls().filter((c) => c.argv[0] === "pr" && c.argv[1] === "view");
 
     // the first waiting pass holds the lease and releases it settled
@@ -659,7 +679,7 @@ describe("Story 36.2: the sweep's records are whole", () => {
     expect(await ledgerPass(fx.queue, fx.deps)).toEqual([fx.id]);
     expect(fx.queue.events(fx.id).findLast((e) => e.kind === LEDGER_RESOLVE)!.detail).toMatchObject({ settled: true, resolved: ["DW-1"] });
     expect(await ledgerPass(fx.queue, fx.deps)).toEqual([]);
-    expect(fx.studio.filter((s) => s.script.endsWith("plansync.py"))).toHaveLength(2);
+    expect(fx.studio.filter((s) => s.script.endsWith("plansync.py") && s.args[0] === "ledger-resolve")).toHaveLength(2);
   });
 
   test("a partial flip is one wait: the next call's empty `resolved` adds no second record, the first flip's ids kept on it", async () => {
@@ -1036,7 +1056,7 @@ describe("Story 36.3: a paused sweep's bounded stop and its WIP (DW-121)", () =>
   };
   const firstNoteAt = (fx: Awaited<ReturnType<typeof sweepFixture>>) => Date.parse(fx.queue.events(fx.id).find((e) => e.kind === SWEEP_ENGINE_STOP)!.at);
 
-  test("Story 36.3: a stop unanswered under the deadline is retried with one note; past it: one line, an explicit `blocked` end, the WIP committed, lock and pin released", async () => {
+  test("Story 36.3: a stop unanswered under the deadline is retried with one note; past it: one line, an explicit `blocked` end, the WIP committed, lock and pin held (Story 38.3)", async () => {
     const fx = await sweepFixture();
     fx.triage();
     fx.landed("a"); // `sweepEndState` would read this `partial`
@@ -1054,12 +1074,14 @@ describe("Story 36.3: a paused sweep's bounded stop and its WIP (DW-121)", () =>
     expect(fx.queue.events(fx.id).filter((e) => e.kind === SWEEP_ENGINE_STOP)).toHaveLength(1);
     now = firstNoteAt(fx) + SWEEP_STOP_DEADLINE_MS + 1000;
     expect(await sweepEngines(fx.queue, n.deps)).toEqual([fx.id]);
-    const line = `paused sweep ${fx.id}: stop unanswered for 30 min — ended blocked, lock and pin released`;
+    const line = `paused sweep ${fx.id}: stop unanswered for 30 min — ended blocked, lock and pin held until a stop is confirmed or the engine exits`;
     expect(n.sent).toEqual([line]);
     expect(fx.get().state).toBe("blocked");
     expect(fx.get().reason).toContain(line);
     expect(fx.get().reason).toContain(wipMessage("dw-b", fx.id));
-    expect(fx.queue.lock(fx.root)).toBeNull();
+    // Story 38.3 (B1): the unanswered engine may still run, so its lock stays the engine's
+    expect(fx.queue.lock(fx.root)).toMatchObject({ kind: "engine", run_id: fx.id, engine_run_id: "E1" });
+    expect(fx.queue.events(fx.id).findLast((e) => e.kind === "ended")!.detail).toMatchObject({ engine_held: { engine_run_id: "E1" }, lock: { handed_to_engine: "E1" } });
     expect(existsSync(fx.get().worktree!)).toBe(true); // the unanswered engine may still run there
     expect(fx.queue.events(fx.id).findLast((e) => e.kind === "ended")!.detail).toMatchObject({ closeout: { worktree: "kept" } });
     expect(testGit(fx.repo.origin, "log", "-1", "--format=%s", `supervisor/run-${fx.id}`)).toBe(wipMessage("dw-b", fx.id));
@@ -1116,12 +1138,12 @@ describe("Story 36.3: a paused sweep's bounded stop and its WIP (DW-121)", () =>
       clock.now = firstNoteAt(fx) + SWEEP_STOP_DEADLINE_MS + 1000;
       expect(await sweepEngines(fx.queue, n.deps)).toEqual([fx.id]);
       expect(stops(fx)).toBe(2);
-      const line = `paused sweep ${fx.id}: stop unanswered for 30 min — ended blocked, lock and pin released`;
+      const line = `paused sweep ${fx.id}: stop unanswered for 30 min — ended blocked, lock and pin held until a stop is confirmed or the engine exits`;
       expect(n.sent).toEqual([line]);
       expect(fx.get().state).toBe("blocked");
       expect(fx.get().reason).toContain(line);
       expect(fx.get().reason).toContain(wipMessage("dw-b", fx.id));
-      expect(fx.queue.lock(fx.root)).toBeNull();
+      expect(fx.queue.lock(fx.root)).toMatchObject({ kind: "engine", run_id: fx.id, engine_run_id: "E1" }); // Story 38.3: held
       expect(existsSync(fx.get().worktree!)).toBe(true);
       expect(testGit(fx.repo.origin, "log", "-1", "--format=%s", `supervisor/run-${fx.id}`)).toBe(wipMessage("dw-b", fx.id));
       expect(fx.gh.calls().find((c) => c.argv[1] === "create")!.argv).toContain("--draft");
@@ -1138,7 +1160,7 @@ describe("Story 36.3: a paused sweep's bounded stop and its WIP (DW-121)", () =>
       expect(fx.get().reason).toContain("WIP not committed, worktree kept: the worktree is on 'elsewhere'");
       expect((fx.queue.events(fx.id).findLast((e) => e.kind === "ended")!.detail as any).wip.error).toContain("elsewhere");
       expect(n.sent).toHaveLength(1);
-      expect(fx.queue.lock(fx.root)).toBeNull();
+      expect(fx.queue.lock(fx.root)).toMatchObject({ kind: "engine", run_id: fx.id }); // Story 38.3: held
     });
 
     test("Story 36.3: `unknown` past the deadline with the stop answering `stopped`: no end this tick; the next closes it out as usual", async () => {
@@ -1272,13 +1294,16 @@ describe("Story 37.5: the sweep's end-rule bugs and cost lines before a fourth s
     expect(lines[0]).toContain(`sweep ${fx.id}`);
     expect(lines[0]).toContain("DW-1, DW-2");
     // the settled run is never flipped again on its own: the line carries the manual remedy, the PR and the pending ids
-    expect(lines[0]).toEndWith(`; once the owner checkout has pulled, flip them by hand: uv run plugins/tk-studio/lib/plansync.py ledger-resolve --directory "${fx.root}" --pr ${String(first.detail!.pr)} --ids DW-1,DW-2`);
+    // Story 38.3 (B4): the remedy is the one builder's, the verb's absolute path under the studio install (joined natively)
+    const cmd = ledgerResolveCommand(fx.root, String(first.detail!.pr), ["DW-1", "DW-2"], fx.deps.env);
+    expect(lines[0]).toEndWith(`; once the owner checkout has pulled, flip them by hand: ${ledgerRemedyText(cmd)}`);
+    expect(lines[0]).toContain(`uv run --no-project python "${join("/studio-root", "plugins", "tk-studio", "lib", "plansync.py")}" ledger-resolve --directory "${fx.root}" --pr ${String(first.detail!.pr)} --ids DW-1,DW-2`);
     // the lease released settled, the one plansync call only
     expect(fx.queue.events(fx.id).filter((e) => e.kind === "plan-lease" && e.detail?.phase === LEDGER_LEASE && e.detail?.owner === null).at(-1)!.detail?.settled).toBe(true);
     for (let i = 0; i < 3; i++) expect(await ledgerPass(fx.queue, deps, notify)).toEqual([]);
     expect(records(fx)).toHaveLength(2);
     expect(lines).toHaveLength(1);
-    expect(fx.studio.filter((c) => c.script.endsWith("plansync.py"))).toHaveLength(1);
+    expect(fx.studio.filter((c) => c.script.endsWith("plansync.py") && c.args[0] === "ledger-resolve")).toHaveLength(1);
   });
 
   test("B4: a changed `pending` set is a new record and a new clock", async () => {
@@ -1313,7 +1338,7 @@ describe("Story 37.5: the sweep's end-rule bugs and cost lines before a fourth s
     expect(readFileSync(resolve(import.meta.dir, "../src/sweep.ts"), "utf-8")).not.toMatch(/^import (?!type)[^;]*from "\.\/(hygiene|worktree)"/m);
   });
 
-  test("B5: a probe answering `unknown` from the start (never paused) notes one `engine-probe`; the deadline runs from it, a `running` probe never resets it; past it: the stop, then `blocked`", async () => {
+  test("B5: a probe answering `unknown` from the start (never paused) notes one `engine-probe`; Story 38.3 (B1): a `running` probe resets the deadline, a later blip starts a new one; past it: the stop, then `blocked`, held", async () => {
     const fx = await sweepFixture();
     fx.triage();
     fx.landed("a");
@@ -1333,18 +1358,28 @@ describe("Story 37.5: the sweep's end-rule bugs and cost lines before a fourth s
     expect(typeof probes()[0]!.detail!.error).toBe("string");
     expect(fx.queue.events(fx.id).some((e) => e.kind === SWEEP_ENGINE_STOP)).toBe(false); // never an `engine-stop` note
     fx.answers.launch = { ok: true, run: { status: "running" } };
-    expect(await sweepEngines(fx.queue, deps)).toEqual([]); // `running`: no reset, no stop
+    expect(await sweepEngines(fx.queue, deps)).toEqual([]); // `running`: the streak closed by one `running` note
+    expect(await sweepEngines(fx.queue, deps)).toEqual([]); // still `running`: no streak open, no note
+    expect(probes().map((e) => e.detail?.phase)).toEqual(["unknown", "running"]);
     fx.answers.launch = UNKNOWN;
-    now = Date.parse(probes()[0]!.at) + SWEEP_STOP_DEADLINE_MS - 1000;
-    expect(await sweepEngines(fx.queue, deps)).toEqual([]);
-    expect(probes()).toHaveLength(1);
+    // the early blip and the `running` note moved back: the early note is past its deadline by the queue's own clock
+    now = Date.now();
+    fx.queue.db.query("UPDATE events SET at = ? WHERE seq = ?").run(new Date(now - SWEEP_STOP_DEADLINE_MS - 60_000).toISOString(), probes()[0]!.seq);
+    fx.queue.db.query("UPDATE events SET at = ? WHERE seq = ?").run(new Date(now - 10 * 60_000).toISOString(), probes()[1]!.seq);
+    expect(await sweepEngines(fx.queue, deps)).toEqual([]); // the fresh blip starts a new clock: no stop
+    expect(probes().map((e) => e.detail?.phase)).toEqual(["unknown", "running", "unknown"]);
     expect(stops()).toBe(0);
-    now = Date.parse(probes()[0]!.at) + SWEEP_STOP_DEADLINE_MS + 1000;
+    expect(fx.get().state).toBe("running");
+    // the new streak's own note, once per streak
+    expect(await sweepEngines(fx.queue, deps)).toEqual([]);
+    expect(probes()).toHaveLength(3);
+    now = Date.parse(probes()[2]!.at) + SWEEP_STOP_DEADLINE_MS + 1000;
     expect(await sweepEngines(fx.queue, deps)).toEqual([fx.id]);
     expect(stops()).toBe(1);
     expect(fx.get().state).toBe("blocked");
-    // never paused nor asked to stop: the line names the probe, never a stop left unanswered
-    expect(sent).toEqual([`sweep ${fx.id}: the status probe answered \`unknown\` for 30 min — ended blocked, lock and pin released`]);
+    // never paused nor asked to stop: the line names the probe; the stop unanswered, the lock and pin held
+    expect(sent).toEqual([`sweep ${fx.id}: the status probe answered \`unknown\` for 30 min — ended blocked, lock and pin held until a stop is confirmed or the engine exits`]);
+    expect(fx.queue.lock(fx.root)).toMatchObject({ kind: "engine", run_id: fx.id, engine_run_id: "E1" });
   });
 
   test("B5: a probe-only stop that answered `stopped` notes `engine-stop {stopped: true}` once; the next tick's `stopped` end commits the WIP and is not penalised", async () => {
@@ -1398,6 +1433,9 @@ describe("Story 37.5: the sweep's end-rule bugs and cost lines before a fourth s
     expect(stopNotes()).toHaveLength(1);
     // its stop answered, the engine never paused: the line names the probe, never a stop left unanswered
     expect(sent).toEqual([`sweep ${fx.id}: the status probe answered \`unknown\` for 30 min — ended blocked, lock and pin released`]);
+    // Story 38.3 (B1): a stop already confirmed releases at once, never held
+    expect(fx.queue.lock(fx.root)).toBeNull();
+    expect(heldEngine(fx.queue.events(fx.id))).toBeUndefined();
     expect(fx.get().reason).toContain(wipMessage("dw-b", fx.id));
     expect(testGit(fx.repo.origin, "log", "-1", "--format=%s", `supervisor/run-${fx.id}`)).toBe(wipMessage("dw-b", fx.id));
     expect(fx.queue.events(fx.id).filter((e) => e.kind === "host-verify").map((e) => e.detail)).toEqual([{ skipped: true, reason: "paused sweep: WIP committed, leg skipped" }]);
@@ -1412,6 +1450,26 @@ describe("Story 37.5: the sweep's end-rule bugs and cost lines before a fourth s
     expect(sweepStopPastDeadline([probe, stop], "E1", t)).toBe(true);
     expect(sweepStopPastDeadline([stop], "E1", t)).toBe(false);
     expect(sweepStopPastDeadline([probe], "E2", t)).toBe(false);
+  });
+
+  test("Story 38.3 (B1): the deadline runs from the first note of the latest non-`running` streak; an older note with no `phase` reads non-`running`", () => {
+    const ev = (kind: string, iso: string, detail: Record<string, unknown>) => ({ seq: 1, kind, at: iso, detail }) as unknown as QueueEvent;
+    const early = ev(SWEEP_ENGINE_PROBE, "2026-11-07T00:00:00.000Z", { engine_run_id: "E1", phase: "unknown", error: "x" });
+    const running = ev(SWEEP_ENGINE_PROBE, "2026-11-07T00:05:00.000Z", { engine_run_id: "E1", phase: "running" });
+    const blip = ev(SWEEP_ENGINE_PROBE, "2026-11-07T01:00:00.000Z", { engine_run_id: "E1", phase: "unknown", error: "y" });
+    const t = Date.parse(blip.at) + 10 * 60_000; // past the early note's deadline, 10 min after the blip
+    expect(sweepStopPastDeadline([early], "E1", t)).toBe(true);
+    expect(sweepStopPastDeadline([early, running], "E1", t)).toBe(false); // reset, no streak open
+    expect(sweepStopPastDeadline([early, running, blip], "E1", t)).toBe(false);
+    expect(sweepStopPastDeadline([early, running, blip], "E1", Date.parse(blip.at) + SWEEP_STOP_DEADLINE_MS + 1000)).toBe(true);
+    // a stop error after the reset starts the new streak too; another engine's `running` note resets nothing
+    const stopErr = ev(SWEEP_ENGINE_STOP, "2026-11-07T00:50:00.000Z", { engine_run_id: "E1", error: "stop failed" });
+    expect(sweepStopPastDeadline([early, running, stopErr, blip], "E1", Date.parse(stopErr.at) + SWEEP_STOP_DEADLINE_MS + 1000)).toBe(true);
+    const other = ev(SWEEP_ENGINE_PROBE, "2026-11-07T00:05:00.000Z", { engine_run_id: "E2", phase: "running" });
+    expect(sweepStopPastDeadline([early, other], "E1", t)).toBe(true);
+    const legacy = ev(SWEEP_ENGINE_PROBE, "2026-11-07T00:00:00.000Z", { engine_run_id: "E1", error: "x" });
+    expect(sweepStopPastDeadline([legacy], "E1", t)).toBe(true);
+    expect(sweepStopPastDeadline([legacy, running], "E1", t)).toBe(false);
   });
 
   test("DW-137: the note is patched `emitting` before the emit, then `emitted`", async () => {
@@ -1555,5 +1613,339 @@ describe("Story 37.5: the sweep's end-rule bugs and cost lines before a fourth s
     const file = join(tempDir("tk-sup-sweep-ledger-"), "l.jsonl");
     writeFileSync(file, text);
     expect(runCost(file, "s-2")).toBe(4.25);
+  });
+});
+
+describe("Story 38.3: the sweep's path cleared", () => {
+  const PAUSED = { ok: true, run: { status: "running", paused_stage: "review", paused_reason: "escalation", paused_story_key: "dw-b" } };
+  const REFUSED: RunResult = { exit: 2, stdout: "", stderr: "sbx exec: sandbox stopped" };
+  /** A paused sweep whose stop went unanswered past the deadline: ended `blocked`, its lock and pin held. `sandbox`: on
+   * the sbx tier, pinned (`sweepFixture`'s `sandbox`). */
+  const held = async (opts: { sandbox?: string } = {}) => {
+    const fx = await sweepFixture(opts);
+    fx.triage();
+    fx.landed("a");
+    fx.commit("a.txt", "bundle a");
+    fx.answers.launch = PAUSED;
+    fx.answers.stop = REFUSED;
+    const clock = { now: Date.now() };
+    const deps: WorktreeDeps = { ...fx.deps, clockMs: () => clock.now };
+    expect(await sweepEngines(fx.queue, deps)).toEqual([]);
+    clock.now = Date.parse(fx.queue.events(fx.id).find((e) => e.kind === SWEEP_ENGINE_STOP)!.at) + SWEEP_STOP_DEADLINE_MS + 1000;
+    expect(await sweepEngines(fx.queue, deps)).toEqual([fx.id]);
+    expect(fx.get().state).toBe("blocked");
+    expect(heldEngine(fx.queue.events(fx.id))).toBe("E1");
+    expect(fx.queue.lock(fx.root)).toMatchObject({ kind: "engine", run_id: fx.id, engine_run_id: "E1" });
+    return { fx, deps };
+  };
+  const released = (fx: Awaited<ReturnType<typeof sweepFixture>>) => fx.queue.events(fx.id).filter((e) => e.kind === ENGINE_RELEASED);
+
+  test("Story 38.3: a held end frees nothing while the probe answers `unknown` (fail closed); a confirmed stop releases the lock, `engine-released {by: \"stop\"}`", async () => {
+    const { fx, deps } = await held();
+    fx.answers.launch = { ok: false, error: "sbx exec: sandbox stopped" };
+    for (let i = 0; i < 3; i++) expect(await releaseHeldEngines(fx.queue, deps)).toEqual([]);
+    expect(released(fx)).toEqual([]);
+    expect(fx.queue.lock(fx.root)).toMatchObject({ kind: "engine", run_id: fx.id });
+    fx.answers.launch = PAUSED; // still running: one stop, still refused
+    expect(await sweepEngines(fx.queue, deps)).toEqual([]);
+    expect(released(fx)).toEqual([]);
+    fx.answers.stop = { exit: 0, stdout: JSON.stringify({ ok: true }), stderr: "" };
+    expect(await sweepEngines(fx.queue, deps)).toEqual([]); // the pass releases; it closes nothing out
+    expect(released(fx).map((e) => e.detail)).toEqual([expect.objectContaining({ engine_run_id: "E1", by: "stop" })]);
+    expect(fx.queue.lock(fx.root)).toBeNull();
+    expect(fx.queue.events(fx.id).filter((e) => e.kind === "lock-released").map((e) => e.detail?.why)).toEqual(["its engine's stop was confirmed"]);
+    expect(heldEngine(fx.queue.events(fx.id))).toBeUndefined();
+    expect(await releaseHeldEngines(fx.queue, deps)).toEqual([]); // released once
+    expect(released(fx)).toHaveLength(1);
+  });
+
+  test("Story 38.3: a held engine's own exit releases the lock, `engine-released {by: \"exit\"}`", async () => {
+    const { fx, deps } = await held();
+    fx.answers.launch = { ok: true, run: { status: "stopped" } };
+    expect(await releaseHeldEngines(fx.queue, deps)).toEqual([fx.id]);
+    expect(released(fx).map((e) => e.detail)).toEqual([expect.objectContaining({ engine_run_id: "E1", by: "exit" })]);
+    expect(fx.queue.lock(fx.root)).toBeNull();
+    expect(fx.queue.events(fx.id).findLast((e) => e.kind === "lock-released")!.detail?.why).toBe("its engine exited");
+  });
+
+  test("Story 38.3: a held engine's kept worktree removed reads as `ended`: the lock released, `engine-released {by: \"exit\"}`, nothing probed", async () => {
+    const { fx, deps } = await held();
+    fx.answers.launch = { ok: false, error: "sbx exec: sandbox stopped" }; // a probe would answer `unknown`
+    rmSync(fx.get().worktree!, { recursive: true, force: true });
+    const probes = fx.studio.length;
+    expect(await releaseHeldEngines(fx.queue, deps)).toEqual([fx.id]);
+    expect(fx.studio.slice(probes)).toEqual([]); // the gone worktree is never probed nor stopped
+    expect(released(fx).map((e) => e.detail)).toEqual([expect.objectContaining({ engine_run_id: "E1", by: "exit", engine: expect.objectContaining({ gone: expect.any(String) }) })]);
+    expect(fx.queue.lock(fx.root)).toBeNull();
+    expect(fx.queue.events(fx.id).findLast((e) => e.kind === "lock-released")!.detail?.why).toBe("its engine exited");
+    expect(heldEngine(fx.queue.events(fx.id))).toBeUndefined();
+  });
+
+  /** Story 38.3 (B1): a paused sweep with an older streak (a stop refused, then a stop that answered `stopped` while the
+   * engine kept running), closed by a `running` probe; the engine now probes paused and its stop is refused again. */
+  const secondStreak = async () => {
+    const fx = await sweepFixture();
+    fx.triage();
+    fx.landed("a");
+    fx.commit("a.txt", "bundle a");
+    fx.answers.launch = PAUSED;
+    fx.answers.stop = REFUSED;
+    const clock = { now: Date.now() };
+    const deps: WorktreeDeps = { ...fx.deps, clockMs: () => clock.now };
+    const stopErrors = () => fx.queue.events(fx.id).filter((e) => e.kind === SWEEP_ENGINE_STOP && e.detail?.error !== undefined);
+    expect(await sweepEngines(fx.queue, deps)).toEqual([]); // the older streak's `error` note
+    fx.queue.note(fx.id, SWEEP_ENGINE_STOP, { engine_run_id: "E1", stopped: true }); // the old stop that answered `stopped`
+    fx.answers.launch = { ok: true, run: { status: "running" } };
+    expect(await sweepEngines(fx.queue, deps)).toEqual([]); // still running: one `running` note closes the older streak
+    const old = fx.queue.events(fx.id).filter((e) => e.kind === SWEEP_ENGINE_STOP || e.kind === SWEEP_ENGINE_PROBE);
+    expect(old.map((e) => [e.kind, e.detail?.error !== undefined, e.detail?.stopped ?? null, e.detail?.phase ?? null]))
+      .toEqual([[SWEEP_ENGINE_STOP, true, null, null], [SWEEP_ENGINE_STOP, false, true, null], [SWEEP_ENGINE_PROBE, false, null, "running"]]);
+    // the older streak moved back well past the deadline: only the new streak's clock may count
+    for (const [i, e] of old.entries()) {
+      fx.queue.db.query("UPDATE events SET at = ? WHERE seq = ?").run(new Date(clock.now - 3 * SWEEP_STOP_DEADLINE_MS + i * 60_000).toISOString(), e.seq);
+    }
+    expect(stopErrors()).toHaveLength(1);
+    fx.answers.launch = PAUSED;
+    expect(await sweepEngines(fx.queue, deps)).toEqual([]); // paused again, the stop refused: the new streak's own `error` note
+    return { fx, deps, clock, stopErrors };
+  };
+
+  test("Story 38.3 (B1): a paused sweep's second streak gets its own `engine-stop {error}` note; under the deadline the run is not ended", async () => {
+    const { fx, deps, stopErrors } = await secondStreak();
+    expect(stopErrors()).toHaveLength(2);
+    expect(stopErrors()[1]!.detail).toMatchObject({ engine_run_id: "E1", error: expect.any(String) });
+    expect(fx.get().state).toBe("running");
+    expect(fx.queue.events(fx.id).some((e) => e.kind === "ended")).toBe(false);
+    expect(await sweepEngines(fx.queue, deps)).toEqual([]); // retried: once per streak, no third note
+    expect(stopErrors()).toHaveLength(2);
+    expect(fx.get().state).toBe("running");
+  });
+
+  test("Story 38.3 (B1): past the new streak's deadline the run ends `blocked`, held: the older streak's `{stopped: true}` is not a confirmed stop", async () => {
+    const { fx, deps, clock, stopErrors } = await secondStreak();
+    const fresh = stopErrors()[1]!;
+    clock.now = Date.now();
+    fx.queue.db.query("UPDATE events SET at = ? WHERE seq = ?").run(new Date(clock.now - SWEEP_STOP_DEADLINE_MS - 60_000).toISOString(), fresh.seq);
+    expect(await sweepEngines(fx.queue, deps)).toEqual([fx.id]);
+    expect(stopErrors()).toHaveLength(2);
+    expect(fx.get().state).toBe("blocked");
+    const tail = "lock and pin held until a stop is confirmed or the engine exits";
+    const line = `paused sweep ${fx.id}: stop unanswered for 30 min — ended blocked, ${tail}`;
+    expect(fx.get().reason).toContain(line);
+    expect(fx.get().reason).not.toContain("lock and pin released");
+    expect(fx.queue.lock(fx.root)).toMatchObject({ kind: "engine", run_id: fx.id, engine_run_id: "E1" });
+    expect(fx.queue.events(fx.id).findLast((e) => e.kind === "ended")!.detail).toMatchObject({ engine_held: { engine_run_id: "E1" } });
+    expect(heldEngine(fx.queue.events(fx.id))).toBe("E1");
+  });
+
+  describe("Story 38.3: the pin of a held sbx sweep", () => {
+    const SB = "sb-sweep";
+    const pinStops = (fx: Awaited<ReturnType<typeof sweepFixture>>) => fx.sbxCalls.filter((a) => a[0] === "stop" && a[1] === SB);
+    const seqOf = (fx: Awaited<ReturnType<typeof sweepFixture>>, kind: string) => fx.queue.events(fx.id).findLast((e) => e.kind === kind)!.seq;
+
+    test("Story 38.3: the held end releases neither the lock nor the pin: no `sbx stop`, no `pin-released`, no engine MCP stop", async () => {
+      const { fx, deps } = await held({ sandbox: SB });
+      expect(fx.get()).toMatchObject({ tier: "sbx", sandbox: SB });
+      expect(fx.sbxCalls.some((a) => a[0] === "exec" && a[1] === SB && a[5] === "status")).toBe(true); // probed in the sandbox
+      expect(pinStops(fx)).toEqual([]);
+      expect(fx.mcpStops).toEqual([]);
+      expect(fx.queue.events(fx.id).filter((e) => e.kind === "pin-released" || e.kind === "pin-kept")).toEqual([]);
+      expect(fx.queue.pinOutstanding(SB)).toBe(true);
+      fx.answers.launch = { ok: false, error: "sbx exec: sandbox stopped" };
+      expect(await sweepEngines(fx.queue, deps)).toEqual([]); // `unknown`: still held
+      expect(pinStops(fx)).toEqual([]);
+      expect(fx.queue.pinOutstanding(SB)).toBe(true);
+    });
+
+    test("Story 38.3: the engine's exit releases the lock, then the pin (`sbx stop`), then `engine-released {by: \"exit\"}`", async () => {
+      const { fx, deps } = await held({ sandbox: SB });
+      fx.answers.launch = { ok: true, run: { status: "stopped" } };
+      expect(await releaseHeldEngines(fx.queue, deps)).toEqual([fx.id]);
+      expect(pinStops(fx)).toHaveLength(1);
+      expect(fx.mcpStops).toEqual([fx.id]);
+      expect(fx.queue.events(fx.id).findLast((e) => e.kind === "pin-released")!.detail).toMatchObject({ sandbox: SB, stop: { ok: true } });
+      expect(seqOf(fx, "lock-released")).toBeLessThan(seqOf(fx, "pin-released"));
+      expect(seqOf(fx, "pin-released")).toBeLessThan(seqOf(fx, ENGINE_RELEASED));
+      expect(released(fx).map((e) => e.detail)).toEqual([expect.objectContaining({ engine_run_id: "E1", by: "exit" })]);
+      expect(fx.queue.pinOutstanding(SB)).toBe(false);
+    });
+
+    test("Story 38.3: a confirmed stop (in the sandbox) releases the lock, then the pin, then `engine-released {by: \"stop\"}`", async () => {
+      const { fx, deps } = await held({ sandbox: SB });
+      fx.answers.stop = { exit: 0, stdout: JSON.stringify({ ok: true }), stderr: "" };
+      const before = fx.sbxCalls.length;
+      expect(await releaseHeldEngines(fx.queue, deps)).toEqual([fx.id]);
+      expect(fx.sbxCalls.slice(before).filter((a) => a[0] === "exec" && a[5] === "stop")).toHaveLength(1);
+      expect(pinStops(fx)).toHaveLength(1);
+      expect(seqOf(fx, "lock-released")).toBeLessThan(seqOf(fx, "pin-released"));
+      expect(seqOf(fx, "pin-released")).toBeLessThan(seqOf(fx, ENGINE_RELEASED));
+      expect(released(fx).map((e) => e.detail)).toEqual([expect.objectContaining({ engine_run_id: "E1", by: "stop" })]);
+    });
+
+    test("Story 38.3: a held end replayed from `closed_out {pending}` carries `holdEngine` and releases no pin", async () => {
+      const fx = await sweepFixture({ sandbox: SB });
+      fx.triage();
+      fx.landed("a");
+      fx.commit("a.txt", "bundle a");
+      fx.answers.launch = PAUSED;
+      fx.answers.stop = REFUSED;
+      const clock = { now: Date.now() };
+      const deps: WorktreeDeps = { ...fx.deps, clockMs: () => clock.now };
+      expect(await sweepEngines(fx.queue, deps)).toEqual([]);
+      clock.now = Date.parse(fx.queue.events(fx.id).find((e) => e.kind === SWEEP_ENGINE_STOP)!.at) + SWEEP_STOP_DEADLINE_MS + 1000;
+      // The queue busy at the transition: the close-out is recorded with its transition, written by the next tick.
+      const endEngine = fx.queue.endEngine.bind(fx.queue);
+      let busy = true;
+      fx.queue.endEngine = ((...a: Parameters<Queue["endEngine"]>) => { if (busy) { busy = false; throw new Error("database is locked"); } return endEngine(...a); }) as Queue["endEngine"];
+      expect(await sweepEngines(fx.queue, deps)).toEqual([]);
+      expect(fx.get().state).toBe("running");
+      const pending = fx.queue.events(fx.id).findLast((e) => e.kind === "closed_out")!.detail?.pending;
+      expect(pending).toMatchObject({ phase: "ended", state: "blocked", holdEngine: "E1", detail: { engine_held: { engine_run_id: "E1" } } });
+      expect(await sweepEngines(fx.queue, deps)).toEqual([fx.id]); // the replay
+      expect(fx.get().state).toBe("blocked");
+      expect(heldEngine(fx.queue.events(fx.id))).toBe("E1");
+      expect(fx.queue.lock(fx.root)).toMatchObject({ kind: "engine", run_id: fx.id, engine_run_id: "E1" });
+      expect(pinStops(fx)).toEqual([]);
+      expect(fx.mcpStops).toEqual([]);
+      expect(fx.queue.pinOutstanding(SB)).toBe(true);
+      fx.answers.launch = { ok: true, run: { status: "stopped" } };
+      expect(await releaseHeldEngines(fx.queue, deps)).toEqual([fx.id]);
+      expect(pinStops(fx)).toHaveLength(1);
+      expect(released(fx).map((e) => e.detail)).toEqual([expect.objectContaining({ engine_run_id: "E1", by: "exit" })]);
+    });
+
+    test("Story 38.3: a release whose `engine-released` note failed is finished on the next tick from the record, never probed again", async () => {
+      const { fx, deps } = await held({ sandbox: SB });
+      fx.answers.stop = { exit: 0, stdout: JSON.stringify({ ok: true }), stderr: "" };
+      const note = fx.queue.note.bind(fx.queue);
+      let busy = true;
+      fx.queue.note = ((runId: string, kind: string, detail: Record<string, unknown>) => {
+        if (kind === ENGINE_RELEASED && busy) { busy = false; throw new Error("database is locked"); }
+        return note(runId, kind, detail);
+      }) as Queue["note"];
+      expect(await releaseHeldEngines(fx.queue, deps)).toEqual([]); // the lock and the pin went, the note did not
+      expect(fx.queue.lock(fx.root)).toBeNull();
+      expect(pinStops(fx)).toHaveLength(1);
+      expect(released(fx)).toEqual([]);
+      expect(heldEngine(fx.queue.events(fx.id))).toBe("E1");
+      // The sandbox stopped by that release: a probe would answer `unknown` for good.
+      fx.answers.launch = { ok: false, error: "sbx exec: sandbox stopped" };
+      const before = fx.sbxCalls.length;
+      expect(await releaseHeldEngines(fx.queue, deps)).toEqual([fx.id]);
+      expect(fx.sbxCalls.slice(before)).toEqual([]); // no probe, no stop, no second `sbx stop`
+      expect(released(fx).map((e) => e.detail)).toEqual([{ engine_run_id: "E1", by: "stop", resumed: true }]);
+      expect(heldEngine(fx.queue.events(fx.id))).toBeUndefined();
+      expect(fx.queue.events(fx.id).filter((e) => e.kind === "pin-released")).toHaveLength(1);
+      expect(await releaseHeldEngines(fx.queue, deps)).toEqual([]);
+    });
+  });
+
+  test("Story 38.3: a refused ledger pass ends `refused` with one notifier line carrying the remedy, never a silent settle", async () => {
+    const fx = await sweepFixture();
+    fx.triage();
+    fx.landed("a");
+    fx.commit("a.txt", "sweep bundle dw-a");
+    fx.answers.launch = { ok: true, run: { status: "finished" } };
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.id]);
+    fx.gh.answer({ view: "MERGED" });
+    ownerLedger(fx.root, "a ledger with a doubled heading");
+    const error = "LedgerDuplicateId: DW-1 at lines 3 and 9";
+    fx.answers.ledger.push({ exit: 2, out: { written: [], ok: false, error, status: "blocked", reason: error } });
+    const lines: string[] = [];
+    const notify = async (text: string) => { lines.push(text); return { ok: true }; };
+    expect(await ledgerPass(fx.queue, fx.deps, notify)).toEqual([fx.id]);
+    const recs = fx.queue.events(fx.id).filter((e) => e.kind === LEDGER_RESOLVE);
+    expect(recs).toHaveLength(1);
+    const ids = ["DW-1", "DW-2", "DW-6"];
+    expect(recs[0]!.detail).toEqual({ pr: PR, ids, resolved: [], pending: [], ok: false, settled: true, ended: "refused", reason: error, error, notify: { ok: true } });
+    const remedy = ledgerRemedyText(ledgerResolveCommand(fx.root, PR, ids, fx.deps.env));
+    expect(lines).toEqual([`sweep ${fx.id}: the ledger pass was refused and flipped nothing: ${error}; fix the owner ledger (a duplicate heading: renumber one; a missing id: use its entry's current id), then flip by hand: ${remedy}`]);
+    expect(remedy).toContain(`"${join("/studio-root", "plugins", "tk-studio", "lib", "plansync.py")}"`);
+    for (let i = 0; i < 2; i++) expect(await ledgerPass(fx.queue, fx.deps, notify)).toEqual([]);
+    expect(lines).toHaveLength(1);
+    // the lease released settled: never counted, never retried
+    expect(fx.queue.events(fx.id).filter((e) => e.kind === "plan-lease" && e.detail?.phase === LEDGER_LEASE && e.detail?.owner === null).at(-1)!.detail?.settled).toBe(true);
+  });
+
+  test("Story 38.3: with no notifier injected the refused record says so", async () => {
+    const fx = await sweepFixture();
+    fx.triage();
+    fx.landed("a");
+    fx.commit("a.txt", "sweep bundle dw-a");
+    fx.answers.launch = { ok: true, run: { status: "finished" } };
+    await sweepEngines(fx.queue, fx.deps);
+    fx.gh.answer({ view: "MERGED" });
+    fx.answers.ledger.push({ exit: 2, out: { ok: false, error: "LedgerMissingId: DW-6 not in the ledger (the counter's next id: DW-7)" } });
+    await ledgerPass(fx.queue, fx.deps);
+    expect(fx.queue.events(fx.id).findLast((e) => e.kind === LEDGER_RESOLVE)!.detail).toMatchObject({ ended: "refused", settled: true, notify: { ok: false, skipped: "no notifier injected" } });
+  });
+
+  test("Story 38.3: the remedy runs under a fixture root from an unrelated cwd: DW-1 flips, DW-9 refuses `LedgerMissingId`", async () => {
+    const fx = await sweepFixture();
+    // a real ledger, written utf-8
+    mkdirSync(dirname(join(fx.root, DEFERRED_REL)), { recursive: true });
+    writeFileSync(join(fx.root, DEFERRED_REL), "# Deferred Work\n\n### DW-1: one\nstatus: done 2026-11-07\nresolution: resolved by sweep bundle dw-a\n\n### DW-2: two\nstatus: open\n", "utf-8");
+    const env = { TK_STUDIO_ROOT: resolve(import.meta.dir, "../../..") };
+    const cwd = tempDir("tk-sup-sweep-remedy-");
+    const run = (ids: string[]) => {
+      const cmd = ledgerResolveCommand(fx.root, PR, ids, env);
+      expect(cmd.argv[3]).toBe(join(env.TK_STUDIO_ROOT, "plugins", "tk-studio", "lib", "plansync.py"));
+      return runProcess(cmd.bin, cmd.argv, { cwd, timeoutS: 50, env: { ...process.env, PYTHONIOENCODING: "utf-8" } });
+    };
+    const ok = await run(["DW-1"]);
+    expect(ok.exit).toBe(0);
+    const ledger = readFileSync(join(fx.root, DEFERRED_REL), "utf-8");
+    expect(ledger).toContain("status: resolved 2026-11-07 by acme/widget#42");
+    const missing = await run(["DW-9"]);
+    expect(missing.exit).toBe(2);
+    expect(String((JSON.parse(missing.stdout) as Record<string, unknown>).reason)).toStartWith("LedgerMissingId: DW-9 not in the ledger");
+    // the line the notifier sends holds the same builder's text
+    expect(ledgerRemedyText(ledgerResolveCommand(fx.root, PR, ["DW-9"], env))).toBe(
+      `uv run --no-project python "${join(env.TK_STUDIO_ROOT, "plugins", "tk-studio", "lib", "plansync.py")}" ledger-resolve --directory "${fx.root}" --pr ${PR} --ids DW-9`);
+    // with no studio root the text form names the placeholder
+    expect(ledgerResolveCommand(fx.root, PR, ["DW-9"], {}, { placeholders: true }).argv[3]).toBe(join("<studio-root>", "plugins", "tk-studio", "lib", "plansync.py"));
+  }, 60_000);
+
+  test("Story 38.3 (DW-165): a bundle's engine passes are Stage Log rows in the PR body, after `## Sweep`, rebuilt from the record", async () => {
+    const fx = await sweepFixture();
+    fx.triage();
+    fx.landed("a");
+    fx.commit("a.txt", "sweep bundle dw-a");
+    fx.answers.launch = { ok: true, run: { status: "finished" } };
+    const columns = ["stage", "pass", "started", "ended", "session_id", "model", "effort", "tokens_in", "tokens_out", "cost_usd", "outcome"];
+    const row = { stage: "dev", pass: "1", started: "2026-11-07T10:00:00Z", ended: "2026-11-07T10:10:00Z", session_id: "s-1", model: "claude-opus-5-5", effort: "medium", tokens_in: "1000", tokens_out: "200", cost_usd: "0.0080", outcome: "completed" };
+    fx.answers.stageRows = { exit: 0, stdout: JSON.stringify({ ok: true, columns, bundles: [{ key: "dw-a", rows: [row] }, { key: "dw-b", rows: [] }], written: [] }), stderr: "" };
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.id]);
+    const call = fx.studio.find((c) => c.script.endsWith("plansync.py") && c.args[0] === "stage")!;
+    expect(call.args).toEqual(["stage", "--from-run", "--run-dir", fx.runDir, "--worktree", fx.served]);
+    const table = [
+      "## Stage Log", "", "### a (DW-1, DW-2)", "",
+      "| stage | pass | started | ended | session_id | model | effort | tokens_in | tokens_out | cost_usd | outcome |",
+      "|---|---|---|---|---|---|---|---|---|---|---|",
+      "| dev | 1 | 2026-11-07T10:00:00Z | 2026-11-07T10:10:00Z | s-1 | claude-opus-5-5 | medium | 1000 | 200 | 0.0080 | completed |",
+      "", "### b (DW-3)", "", "no engine pass recorded",
+    ].join("\n");
+    const body = fx.gh.calls().find((c) => c.argv[1] === "create")!.body!;
+    expect(body).toContain(table);
+    expect(body.indexOf("## Sweep")).toBeLessThan(body.indexOf("## Stage Log"));
+    expect(body.indexOf("## Stage Log")).toBeLessThan(body.indexOf("## Host verify"));
+    const ended = fx.queue.events(fx.id).findLast((e) => e.kind === "ended")!.detail as Record<string, any>;
+    expect(ended.sweep.bundles.map((b: Record<string, unknown>) => b.stage_rows)).toEqual([[row], []]);
+    // a re-run's body rebuilds from the record (the worktree gone)
+    expect(prBody({ runId: fx.id, commits: [], sweep: summaryFromRecord(fx.queue.events(fx.id))! })).toContain(table);
+  });
+
+  test("Story 38.3 (DW-165): a verb failure says the Stage Log was not read; a summary with neither rows nor an error has none", async () => {
+    const fx = await sweepFixture();
+    fx.triage();
+    fx.landed("a");
+    fx.commit("a.txt", "sweep bundle dw-a");
+    fx.answers.launch = { ok: true, run: { status: "finished" } };
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.id]);
+    const body = fx.gh.calls().find((c) => c.argv[1] === "create")!.body!;
+    expect(body).toContain("## Stage Log\n\nStage Log not read: no stage rows here");
+    expect((fx.queue.events(fx.id).findLast((e) => e.kind === "ended")!.detail as Record<string, any>).sweep.stage_error).toBe("no stage rows here");
+    expect(sweepStageLogText(summary([true, false]))).toBeUndefined();
+    expect(prBody({ runId: "r", commits: [], sweep: summary([true]) })).not.toContain("## Stage Log");
   });
 });
