@@ -294,6 +294,17 @@ RETRY_DELAYS = (1, 2, 4, 8, 16)
 RETRY_AFTER_CAP = 30
 RETRY_WAIT_BUDGET = 90
 THROTTLE_LOG_MAX = 50
+# connection-level failures in the Jira client's default transport
+# (DW-187): one retry per delay, then `cannot reach … after N retries`.
+# A `URLError` (urllib's wrapper for the connect/send phase: WinError 10060,
+# refused, DNS) is retried for every method, since the request never reached
+# the server. A bare OSError/timeout is raised while awaiting or reading the
+# response, when the server may already have applied the write, so it is
+# retried only for idempotent methods (GET, HEAD); on any other method it
+# raises `cannot reach …` at once. HTTP answers and the proxy's refusal are
+# never retried here.
+CONNECT_RETRY_DELAYS = (1, 2)
+IDEMPOTENT_METHODS = frozenset({"GET", "HEAD"})
 
 
 def new_retry_budget() -> dict:
@@ -433,6 +444,25 @@ class JiraClient:
                    toggle_site=site)
 
     def _http(self, method: str, url: str, body: dict | None):
+        retries = len(CONNECT_RETRY_DELAYS)
+        for attempt in range(retries + 1):
+            try:
+                return self._http_once(method, url, body)
+            except (urllib.error.URLError, OSError) as exc:
+                proxied = proxy_refusal("Jira", method, url, exc, self.site)
+                if proxied:
+                    raise JiraError(proxied) from exc
+                if not (isinstance(exc, urllib.error.URLError)
+                        or method.upper() in IDEMPOTENT_METHODS):
+                    raise JiraError(f"cannot reach {self.site}: {exc}") \
+                        from exc
+                if attempt < retries:
+                    self.sleep(CONNECT_RETRY_DELAYS[attempt])
+                    continue
+                raise JiraError(f"cannot reach {self.site} after {retries} "
+                                f"retries: {exc}") from exc
+
+    def _http_once(self, method: str, url: str, body: dict | None):
         data = json.dumps(body).encode("utf-8") if body is not None else None
         req = urllib.request.Request(url, data=data, headers=self._headers,
                                      method=method)
@@ -453,11 +483,6 @@ class JiraClient:
             except ValueError:
                 parsed = raw
             return exc.code, parsed, _lower_headers(exc.headers)
-        except (urllib.error.URLError, OSError) as exc:
-            proxied = proxy_refusal("Jira", method, url, exc, self.site)
-            if proxied:
-                raise JiraError(proxied) from exc
-            raise JiraError(f"cannot reach {self.site}: {exc}") from exc
 
     def request(self, method: str, path: str, body: dict | None = None,
                 query: dict | None = None, scope: str | None = None):
@@ -1582,7 +1607,7 @@ def create_project(client: JiraClient, key: str, name: str,
     if lead_account_id:
         body["leadAccountId"] = lead_account_id
     status, data = client.request("POST", "/project", body,
-                                  scope=SCOPE_PROJECT)
+                                  scope=SCOPE_CONFIGURATION)
     if status not in (200, 201) or not isinstance(data, dict):
         return None, _refusal(status, data)
     return data, ""
@@ -1640,8 +1665,10 @@ def find_statuses(client: JiraClient, project_id: str,
     PROJECT-scoped statuses and its in-use list count: a GLOBAL status of
     the same name is another project's and cannot be on this one."""
     scoped = _paged_values(client, "/statuses/search",
-                           {"projectId": project_id}, scope=SCOPE_READ)
-    site = _paged_values(client, "/statuses/search", {}, scope=SCOPE_READ)
+                           {"projectId": project_id},
+                           scope=SCOPE_CONFIGURATION)
+    site = _paged_values(client, "/statuses/search", {},
+                         scope=SCOPE_CONFIGURATION)
     status, by_type = client.request("GET", f"/project/{project_key}/statuses",
                                      scope=SCOPE_READ)
     if status != 200 or not isinstance(by_type, list):
@@ -1704,7 +1731,7 @@ def find_workflow(client: JiraClient, project_key: str) -> tuple[dict | None, st
     values = _paged_values(client, "/workflow/search",
                            {"queryString": project_key,
                             "expand": "statuses,transitions,transitions.rules,transitions.properties"},
-                           scope=SCOPE_READ)
+                           scope=SCOPE_PROJECT)
     exact = [w for w in values if (w.get("id") or {}).get("name") == wanted]
     if len(exact) == 1:
         return exact[0], ""

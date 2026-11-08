@@ -1589,7 +1589,8 @@ source_spec: `kb/agent-pc-setup-runbook.md` fixes row "hole 115"; `handoff-phase
 location: plugins/tk-studio/lib/plansync.py plan-status (the Jira call behind the `in-progress` sync); apps/supervisor/src/planstatus.ts (the pass that records the answer)
 severity: low
 reason: At launch the pass read `ok: false, error: blocked, reason: "cannot reach api.atlassian.com: <urlopen error [WinError 10060] A connection attempt failed …"` and the story's `in-progress` never reached Jira; the end-of-run pass at 06:12:47Z synced fine (TKSTUDIO-228 `Done`), so the record healed itself, but a `blocked` written on a single transient refusal is a false alarm the operator reads past, and a launch whose only Jira write is this one leaves the issue `Backlog` for the run's whole length. Fix to make: retry a connection-level error (`URLError`, socket timeouts) a bounded number of times with a short back-off before writing `blocked`, and name the retry count in the reason when it still fails.
-status: open
+status: done 2026-11-08
+resolution: resolved by sweep bundle dw-atlassian-client-hardening
 
 ### DW-188: Follow-up review still recommended for 38-4-the-owners-decisions-have-a-source-and-a-sink after the damping cap was spent
 origin: review-budget-followup
@@ -1605,7 +1606,8 @@ source_spec: `kb/atlassian-free-tier.md` item 5 (the rewritten scope lists); `ha
 location: plugins/tk-studio/lib/jirabackend.py `find_statuses` (`_paged_values(client, "/statuses/search", …, scope=SCOPE_READ)` twice: the Jira v2 spec lists `manage:jira-configuration`), `find_workflow` (`/workflow/search` with `scope=SCOPE_READ`: the deprecated endpoint lists `manage:jira-project`), `create_project` (`POST /project` with `scope=SCOPE_PROJECT`: the spec lists `manage:jira-configuration`); plugins/tk-studio/lib/confluence.py `upload_attachment` (the v1 `PUT /content/{id}/child/attachment` (`scope=SCOPE_ATTACHMENT, v1=True`: the v1 spec adds `read:content-details:confluence`)
 severity: low
 reason: A `403` on one of these calls prints a remedy naming a scope the token already has, so the operator recreates a token that fails the same way (the pattern Tim named on TKSTUDIO-236: "I have recreated the API keys multiple times and yet we still seem to be missing permissions"). Fix to make: carry the spec's scope on each call (`SCOPE_CONFIGURATION` for `/statuses/search` and `POST /project`, `SCOPE_PROJECT` for `/workflow/search`, `read:content-details:confluence` beside `write:attachment:confluence` on the v1 upload) and pin each in the backends' tests; the message shape is unchanged. Sweep-safe.
-status: open
+status: done 2026-11-08
+resolution: resolved by sweep bundle dw-atlassian-client-hardening
 
 ### DW-190: Two engagements of one project starting their first append in separate supervisor processes at once can both see no holder: the approve lock is per engagement, so the DW-49 wait check is not atomic ac
 origin: spec-deferred 098796f73cb8

@@ -10,9 +10,11 @@ silent 401).
 from __future__ import annotations
 
 import base64
+import io
 import json
 import os
 import re
+import socket
 import sys
 import tempfile
 import unittest
@@ -1204,11 +1206,234 @@ class ProxyConnectRefusalTests(unittest.TestCase):
     def test_other_connect_failure_still_cannot_reach(self):
         client = jirabackend.JiraClient.for_gateway(
             "cloud-test", "agent@example.com", "fake-agent-token")
+        client.sleep = lambda _s: None  # DW-187: the retry never waits here
         with mock.patch("urllib.request.urlopen",
                         side_effect=urllib.error.URLError("Name or service not known")):
             with self.assertRaises(jirabackend.JiraError) as caught:
                 client.request("GET", "/myself")
         self.assertIn("cannot reach", str(caught.exception))
+
+
+def _urlopen_over(fake):
+    """A `urllib.request.urlopen` stand-in that answers each Request from
+    the `(status, body)` transport `fake`: a 2xx as a response, anything
+    else as the HTTPError urllib raises."""
+    def urlopen(req, timeout=None):
+        body = json.loads(req.data.decode("utf-8")) if req.data else None
+        answer = fake(req.get_method(), req.full_url, body)
+        status, data = answer[0], answer[1]
+        raw = json.dumps(data).encode("utf-8") if data is not None else b""
+        if status >= 400:
+            raise urllib.error.HTTPError(req.full_url, status, "error", {},
+                                         io.BytesIO(raw))
+        resp = mock.MagicMock()
+        resp.status = status
+        resp.read.return_value = raw
+        resp.headers = {}
+        resp.__enter__.return_value = resp
+        return resp
+    return urlopen
+
+
+class ConnectRetryTests(unittest.TestCase):
+    """DW-187: a connection-level failure in the default transport is
+    retried CONNECT_RETRY_DELAYS times before `cannot reach … after N
+    retries`; HTTP answers and the proxy refusal are never retried."""
+
+    def setUp(self):
+        self.client = jirabackend.JiraClient.for_gateway(
+            "cloud-test", "agent@example.com", "fake-agent-token")
+        self.sleeps: list[float] = []
+        self.client.sleep = self.sleeps.append
+        self.attempts = 0
+
+    def _failing(self, *errors, then=None):
+        """urlopen raising `errors` in turn (the last one repeats), or
+        answering `then` once they are spent."""
+        def urlopen(req, timeout=None):
+            self.attempts += 1
+            if self.attempts <= len(errors) or then is None:
+                raise errors[min(self.attempts, len(errors)) - 1]
+            return then(req, timeout)
+        return urlopen
+
+    def test_transient_failure_then_ok_returns_the_data(self):
+        ok = _urlopen_over(lambda m, u, b: (200, {"accountId": "acc-agent"}))
+        err = urllib.error.URLError(OSError(10060, "WinError 10060 timed out"))
+        with mock.patch("urllib.request.urlopen",
+                        side_effect=self._failing(err, then=ok)):
+            status, data = self.client.request("GET", "/myself")
+        self.assertEqual((status, data), (200, {"accountId": "acc-agent"}))
+        self.assertEqual(self.attempts, 2)
+        self.assertEqual(self.sleeps, [1])
+
+    def test_persistent_failure_names_the_retry_count(self):
+        for err in (urllib.error.URLError("Name or service not known"),
+                    TimeoutError("timed out"), socket.timeout("timed out")):
+            with self.subTest(err=type(err).__name__):
+                self.attempts, self.sleeps[:] = 0, []
+                with mock.patch("urllib.request.urlopen",
+                                side_effect=self._failing(err)):
+                    with self.assertRaises(jirabackend.JiraError) as caught:
+                        self.client.request("GET", "/myself")
+                reason = str(caught.exception)
+                self.assertEqual(self.attempts, 3)
+                self.assertEqual(self.sleeps, [1, 2])
+                self.assertIn("cannot reach api.atlassian.com", reason)
+                self.assertIn("after 2 retries", reason)
+
+    def test_bare_timeout_on_a_write_is_not_retried(self):
+        # a bare timeout is raised while awaiting the response: the server
+        # may already have applied the POST, so re-sending would duplicate it
+        with mock.patch("urllib.request.urlopen", side_effect=self._failing(
+                TimeoutError("timed out"))):
+            with self.assertRaises(jirabackend.JiraError) as caught:
+                self.client.request("POST", "/issue/T-1/comment",
+                                    {"body": "hi"})
+        reason = str(caught.exception)
+        self.assertEqual(self.attempts, 1)
+        self.assertEqual(self.sleeps, [])
+        self.assertIn("cannot reach", reason)
+        self.assertNotIn("retries", reason)
+
+    def test_connect_phase_failure_on_a_write_is_retried(self):
+        err = urllib.error.URLError(OSError(10060, "WinError 10060 timed out"))
+        with mock.patch("urllib.request.urlopen",
+                        side_effect=self._failing(err)):
+            with self.assertRaises(jirabackend.JiraError) as caught:
+                self.client.request("POST", "/issue/T-1/comment",
+                                    {"body": "hi"})
+        reason = str(caught.exception)
+        self.assertEqual(self.attempts, 3)
+        self.assertEqual(self.sleeps, [1, 2])
+        self.assertIn("after 2 retries", reason)
+
+    def test_proxy_refusal_is_not_retried(self):
+        with mock.patch("urllib.request.urlopen", side_effect=self._failing(
+                ProxyConnectRefusalTests.ERROR)):
+            with self.assertRaises(jirabackend.JiraError) as caught:
+                self.client.request("GET", "/myself")
+        reason = str(caught.exception)
+        self.assertEqual(self.attempts, 1)
+        self.assertEqual(self.sleeps, [])
+        self.assertIn("network approval", reason)
+        self.assertNotIn("cannot reach", reason)
+        self.assertNotIn("retries", reason)
+
+    def test_http_error_is_not_retried(self):
+        for code in (403, 500):
+            with self.subTest(code=code):
+                self.attempts, self.sleeps[:] = 0, []
+                answer = _urlopen_over(
+                    lambda m, u, b, c=code: (c, {"errorMessages": ["no"]}))
+
+                def urlopen(req, timeout=None):
+                    self.attempts += 1
+                    return answer(req, timeout)
+                with mock.patch("urllib.request.urlopen", side_effect=urlopen):
+                    try:
+                        status, _ = self.client.request("GET", "/myself")
+                    except jirabackend.JiraError as exc:
+                        self.assertIn("403", str(exc))
+                        status = 403
+                self.assertEqual(status, code)
+                self.assertEqual(self.attempts, 1)
+                self.assertEqual(self.sleeps, [])
+
+    def test_non_json_2xx_is_not_retried(self):
+        def urlopen(req, timeout=None):
+            self.attempts += 1
+            resp = mock.MagicMock()
+            resp.status = 200
+            resp.read.return_value = b"<html>interstitial</html>"
+            resp.__enter__.return_value = resp
+            return resp
+        with mock.patch("urllib.request.urlopen", side_effect=urlopen):
+            with self.assertRaises(jirabackend.JiraError) as caught:
+                self.client.request("GET", "/myself")
+        self.assertIn("non-JSON 2xx body", str(caught.exception))
+        self.assertEqual(self.attempts, 1)
+        self.assertEqual(self.sleeps, [])
+
+
+class ConnectRetryPlanStatusTests(JiraTestCase):
+    """DW-187 acceptance: the plan-status pass (`plansync.py status`)."""
+
+    def setUp(self):
+        super().setUp()
+        self.attempts = 0
+        self.sleeps: list[float] = []
+
+    def _run(self, urlopen):
+        with mock.patch("urllib.request.urlopen", side_effect=urlopen), \
+                mock.patch("time.sleep", self.sleeps.append):
+            return plansync.status_pull_back(self.root, "ST-001",
+                                             "in-progress")
+
+    def test_persistent_failure_blocks_after_two_retries(self):
+        def urlopen(req, timeout=None):
+            self.attempts += 1
+            raise urllib.error.URLError(
+                OSError(10060, "WinError 10060 timed out"))
+        result = self._run(urlopen)
+        self.assertTrue(result.get("blocked"))
+        self.assertIn("cannot reach", result["reason"])
+        self.assertIn("after 2 retries", result["reason"])
+        self.assertEqual(self.attempts, 3)
+        self.assertEqual(self.sleeps, [1, 2])
+
+    def test_one_transient_failure_does_not_block(self):
+        answer = _urlopen_over(self.fake)
+
+        def urlopen(req, timeout=None):
+            self.attempts += 1
+            if self.attempts == 1:
+                raise urllib.error.URLError(
+                    OSError(10060, "WinError 10060 timed out"))
+            return answer(req, timeout)
+        result = self._run(urlopen)
+        self.assertFalse(result.get("blocked"), result.get("reason"))
+        self.assertTrue(result["ok"])
+        self.assertEqual(self.sleeps, [1])
+        self.assertIn(("GET", "/myself"), self.fake.calls)
+
+
+class PublishedScopeTests(unittest.TestCase):
+    """DW-189: each setup call's 403 names the scope Atlassian publishes
+    for it, in the unchanged `token lacks <scope> — create a new scoped
+    token` shape."""
+
+    def _client(self, forbidden_path):
+        def transport(method, url, body):
+            path = url.split(jirabackend.API_PREFIX, 1)[1].partition("?")[0]
+            if path == forbidden_path:
+                return 403, {"errorMessages": ["Forbidden"]}
+            return 200, {"values": [], "isLast": True}
+        return jirabackend.JiraClient.for_gateway(
+            "cloud-test", "agent@example.com", "fake-agent-token", transport)
+
+    def _assert_scope(self, caught, scope):
+        reason = str(caught.exception)
+        self.assertIn(f"token lacks {scope} — create a new scoped token",
+                      reason)
+
+    def test_find_statuses_names_manage_jira_configuration(self):
+        client = self._client("/statuses/search")
+        with self.assertRaises(jirabackend.JiraError) as caught:
+            jirabackend.find_statuses(client, "10000", "TKS")
+        self._assert_scope(caught, "manage:jira-configuration")
+
+    def test_create_project_names_manage_jira_configuration(self):
+        client = self._client("/project")
+        with self.assertRaises(jirabackend.JiraError) as caught:
+            jirabackend.create_project(client, "TKS", "Studio", None)
+        self._assert_scope(caught, "manage:jira-configuration")
+
+    def test_find_workflow_names_manage_jira_project(self):
+        client = self._client("/workflow/search")
+        with self.assertRaises(jirabackend.JiraError) as caught:
+            jirabackend.find_workflow(client, "TKS")
+        self._assert_scope(caught, "manage:jira-project")
 
 
 class BlockWriteTests(unittest.TestCase):

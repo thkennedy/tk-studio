@@ -736,7 +736,8 @@ class AuthSplitTests(SetupTestCase):
             403, {"errorMessages": ["Unauthorized; scope does not match"]})
         result = self._setup(owner_account_id="acc-owner")
         self.assert_block_last(result, "blocked")
-        self.assertIn("manage:jira-project", result["reason"])
+        # DW-189: POST /project's published scope
+        self.assertIn("manage:jira-configuration", result["reason"])
         self.assertIn("new scoped token", result["reason"])
         self.assertIn(jirabackend.AGENT_TOKEN_ENV, result["reason"])
 
