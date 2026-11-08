@@ -52,6 +52,10 @@ jobs:
   # place tk-studio/run-epic-39 {tier: sbx} in the supervisor's per-job config before the first POST (hole 90),
   # and POST only after Epic 38 has landed.
   - run-epic-39
+  # run-epic-40 (2026-11-08): Epic 40, the studio's analytics, planned on Tim's request of 2026-11-08;
+  # place tk-studio/run-epic-40 {tier: sbx} in the supervisor's per-job config before the first POST (hole 90),
+  # and POST only after Epic 39 has landed and the previous landing's docs PR has merged.
+  - run-epic-40
 
 # Role-keyed working sets (AD-17) — recorded only on explicit
 # confirmation via tk-studio-onboard; one entry per role.

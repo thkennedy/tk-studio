@@ -1,0 +1,18 @@
+{
+  "job_schema_version": 1,
+  "id": "run-epic-40",
+  "type": "run-epic",
+  "description": "tk-studio Epic 40 (the studio's analytics: how long, how much, and what changed; the research _bmad-output/planning-artifacts/research/studio-analytics-2026-11-08/research.md and the design addendum _bmad-output/planning-artifacts/design/studio-design-spec-2026-11-08-analytics/README.md): seven stories in the order of the owner's use (40.1 the analytics store and the backfill, 40.2 the API and the verdict rule, 40.3 the overview and the story against its band, 40.4 over time with the changes marked, 40.5 before and after a change, 40.6 the settings know what they cost, 40.7 the records), one story per run (stop.after_stories 1), contract 0.1.36 additive. Submit it with POST /jobs {project: tk-studio, job: run-epic-40} only after tk-studio/run-epic-40 is placed {tier: sbx, sandbox: claude-tk-studio} in the supervisor's per-job config (hole 90), only after Epic 39 has landed (its settings page and settings-changed event are inputs to 40.1 and 40.6), and only after the previous landing's docs PR has merged. Guards: the type's (max_wall_clock_seconds 3600 for the engine, host_verify_seconds 7200 for the host leg, merged key-wise); no interim guard.",
+  "target": {
+    "payload": {
+      "epic": 40
+    }
+  },
+  "stop": {
+    "max_runs": 13,
+    "after_stories": 1
+  },
+  "guards": {
+    "max_turns": 80
+  }
+}
