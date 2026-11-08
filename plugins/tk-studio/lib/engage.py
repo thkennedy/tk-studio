@@ -129,9 +129,11 @@ per-story dollars). Each band is `{tokens, usd, share}`, the share over
 An unreadable `prices.json` or an unpriced route model is
 `PricesUnreadable`. The record is re-read fresh and only `quote {band50,
 band85, band95, cap, basis, computed_at}` and `updated` are merged into it
-(`cap` a number in USD); `.tk-studio/budget-bands.yaml` gains
-`epics.<EP-NNN>.usd_estimate` (the p85 dollars of each proposed epic, keyed
-by the id `plan-counter.yaml` predicts) with every other byte kept. The
+(`cap` a number in USD); each `basis.epics[]` entry carries
+`usd_estimate` (the p85 dollars of that proposed epic, `null` when it
+proposes no story) beside the `ep_id` `plan-counter.yaml` predicts. The
+quote never reads or writes `.tk-studio/budget-bands.yaml`: approve copies
+the record's figures onto the minted EP ids (DW-46, DW-50). The
 state does not move: the owner's `go` moves `scoping → quoted` (32.1's
 `quote-present` row). An OS refusal is `QuoteUnwritable` (`written` names
 what had landed).
@@ -1565,8 +1567,9 @@ def quote(project_root: Path, engagement: str, seed: int | None = None,
           lock_wait_s=SCOPE_LOCK_WAIT_S) -> dict:
     """The `quote` verb (Story 32.5 Settled shape 2): the seeded 50/85/95
     band over the scope's proposed stories, merged as `quote` (and
-    `updated`) into a fresh read of the record, and `epics.<EP-NNN>.
-    usd_estimate` in `.tk-studio/budget-bands.yaml`. The state stays
+    `updated`) into a fresh read of the record, each proposed epic's p85
+    dollars recorded as `basis.epics[].usd_estimate` (the bands file is
+    neither read nor written: approve copies the figures). The state stays
     `scoping`: the owner's `go` moves it to `quoted` (Settled shape 3)."""
     import consolidate
     import ledger
@@ -1659,6 +1662,8 @@ def quote(project_root: Path, engagement: str, seed: int | None = None,
                       else f"EP-{nxt + e['k'] - 1:03d}"}
                      for e in counts["epics"]]
             figures = quotelib.compute(samples, n, epics, seed, window)
+            for e in epics:
+                e["usd_estimate"] = figures["epic_usd"].get(e["k"])
             def planning_of(rec: dict):
                 spend = rec.get("spend") if isinstance(rec.get("spend"),
                                                        dict) else {}
@@ -1691,31 +1696,16 @@ def quote(project_root: Path, engagement: str, seed: int | None = None,
             result["notes"].extend(figures["notes"])
             if window is None:
                 result["notes"].append("share unknown: no plan.window_tokens")
-            estimates = {e["ep_id"]: figures["epic_usd"][e["k"]] for e in epics
-                         if e["ep_id"] and e["k"] in figures["epic_usd"]}
+            estimates = {e["ep_id"]: e["usd_estimate"] for e in epics
+                         if e["ep_id"] and e["usd_estimate"] is not None}
             if nxt is None:
                 result["notes"].append(".tk-studio/plan-counter.yaml is "
-                                       "unreadable: no epics band written")
-            bands_path = root / quotelib.BANDS_REL
-            bands_rel = quotelib.BANDS_REL.as_posix()
-            try:
-                current = bands_path.read_text(encoding="utf-8") \
-                    if bands_path.is_file() else None
-            except (OSError, UnicodeDecodeError) as exc:
-                raise Refused("QuoteUnwritable", f"{bands_rel}: "
-                              f"{exc.__class__.__name__}") from None
-            try:
-                bands_text = quotelib.epic_bands_text(current, estimates) \
-                    if estimates else None
-            except quotelib.QuoteError as exc:
-                raise Refused("QuoteUnwritable", str(exc)) from None
+                                       "unreadable: no EP id predicted")
             result["bands"] = estimates
             if dry_run:
-                result["notes"].append("dry run: the quote was not merged and "
-                                       "the bands not written")
+                result["notes"].append("dry run: the quote was not merged")
                 return _finish(result, "partial", "dry run: nothing "
-                               "written; a real run would merge `quote` and "
-                               "write the bands")
+                               "written; a real run would merge `quote`")
             fresh = read_record(root, engagement)  # the state may have moved
             if fresh.get("state") in TERMINAL_STATES:
                 raise Refused("EngagementClosed", f"{engagement} is "
@@ -1739,14 +1729,6 @@ def quote(project_root: Path, engagement: str, seed: int | None = None,
                 raise Refused("QuoteUnwritable", f"{record_rel}: "
                               f"{exc.__class__.__name__}") from None
             result["written"].append(record_rel)
-            if bands_text is not None and bands_text != current:
-                try:
-                    bands_path.parent.mkdir(parents=True, exist_ok=True)
-                    atomic_write_text(bands_path, bands_text)
-                except OSError as exc:
-                    raise Refused("QuoteUnwritable", f"{bands_rel}: "
-                                  f"{exc.__class__.__name__}") from None
-                result["written"].append(bands_rel)
             return _finish(result, "complete", None)
 
         if dry_run:

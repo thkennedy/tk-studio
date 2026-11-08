@@ -17,8 +17,9 @@
  *                pass re-runs the sync in it, never a second append):
  *                the served root's checkout is never switched or dirtied), under a cross-process lockfile beside it
  *                (`….lock`, a dead pid's reclaimed). Every step event is scoped to the newest `approve` line, so a
- *                re-approval after `revise` runs the pass again. Inputs (`scope.md`, the record, the budget-bands
- *                values) are read from the served root.
+ *                re-approval after `revise` runs the pass again. Inputs (`scope.md`, the record) are read from the
+ *                served root; the per-epic dollars come from the record (`quote.basis.epics[].usd_estimate`), never
+ *                from the served root's budget-bands file (DW-46, DW-50).
  *                The steps, in order, each one `engagement-approve {id, project, step, ok, detail}` service event (a
  *                failed step is retried at the next pass and never moves the state; the pass writes nothing into the
  *                record; a failure equal to the step's newest event is not repeated):
@@ -33,9 +34,10 @@
  *                  job     each appended epic's `run-epic-N` job declared (`.tk-studio/jobs/run-epic-N.json` and its id
  *                          appended to `.tk-studio/config.yaml`'s `jobs:`, every other byte kept; Story 34.8: `type:
  *                          "run-vertical-slice"` when the record carries `game: true`, else `"run-epic"`), and
- *                          `.tk-studio/budget-bands.yaml` re-keyed: each `quote.basis.epics[].ep_id`'s `usd_estimate`
- *                          (read from the served root) moved to the minted EP id in `quote.epic_bands_text`'s byte
- *                          shape, other entries kept; a `null` `ep_id` writes no band and is named in `no_band`;
+ *                          the worktree's `.tk-studio/budget-bands.yaml` given each appended epic's band: the record's
+ *                          `quote.basis.epics[].usd_estimate` (matched by `k`) set on the minted EP id in
+ *                          `quote.epic_bands_text`'s byte shape, every other entry kept (none removed); an epic with no
+ *                          minted EP id or no `usd_estimate` writes no band and is named in `no_band`;
  *                  commit  exactly one commit of the union of plansync's `written[]` (its `removed[]` staged as deletions) and the files this pass wrote
  *                          (on a cut from the engagement branch, also the reset to the default branch's tree), pushed
  *                          to origin as a plain fast-forward, never forced (a rejection: `NonFastForward`, retried: the next pass,
@@ -46,7 +48,11 @@
  *                          `detail.pr {number, url}` — main is protected, the plan change is reviewed like any change;
  *                  queued  the first epic's job queued with `payload {engagement, project}` once `gh pr view` says
  *                          `MERGED`, in every case (an OPEN PR queues nothing; the job resolves from the served root
- *                          only once the PR lands — operator ruling 2026-10-25, option (c)); the approval's
+ *                          only once the PR lands — operator ruling 2026-10-25, option (c)); before the submit the
+ *                          served checkout is pulled fast-forward-only (`git pull --ff-only origin <the PR's base>`),
+ *                          refused by name and retried at the next pass: `DirtyCheckout` (a tracked file modified or
+ *                          staged; untracked files do not count; never stashed, reset or cleaned), `NotOnBase` (the
+ *                          checkout is on another branch), `PullFailed` (the pull exited non-zero); the approval's
  *                          `base_ref`, when given, is passed to that run as its `base_ref` (its worktree cut from it),
  *                          else the run cuts from the default branch; `detail.run_id` and the placement; then
  *                          `engagement-run-queued {engagement, project, run_id, job}` and the step `done`.
@@ -81,7 +87,6 @@
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { load as loadYaml } from "js-yaml";
 import { jobRunCosts } from "./board";
 import { frontmatter, jiraBound, storyLanded } from "./closeout";
 import {
@@ -311,7 +316,7 @@ export function proposedEpics(text: string, id: string): { ok: true; epics: Prop
 }
 
 /** `epics.md` with the proposed epics appended as `## Epic N` (N = the highest `## Epic` number + 1, + 2, … in the
- * scope's order, contiguous whatever the scope's own numbers; each keeps its `k` for the band re-key), each first body
+ * scope's order, contiguous whatever the scope's own numbers; each keeps its `k` for the band copy), each first body
  * line `engagement: ENG-NNN`, its stories `### Story N.M:` (see the header). `reserved`: the epic numbers other
  * engagements' unmerged approvals hold (`reservedEpics`), counted in that highest number. */
 export function appendEpics(
@@ -687,7 +692,7 @@ async function worktreeSteps(queue: Queue, deps: ApproveDeps, t: Target, record:
       emit("sync", true, { written: rel(written), ...(removed.length ? { removed: rel(removed) } : {}) });
       keep = true;
     }
-    // job: the run-epic-N jobs, then the band re-key
+    // job: the run-epic-N jobs, then the bands copied from the record
     step = "job";
     const minted = mintedEpics(served, appendedEpics.map((e) => e.n));
     const jobs: string[] = [];
@@ -720,28 +725,22 @@ async function worktreeSteps(queue: Queue, deps: ApproveDeps, t: Target, record:
     atomicWrite(join(served, CONFIG_REL), config);
     ours.add(CONFIG_REL);
     const basis = isObject(record.quote) && isObject(record.quote.basis) && Array.isArray(record.quote.basis.epics) ? record.quote.basis.epics : [];
-    let servedBands: Record<string, unknown> = {};
-    try {
-      const doc = loadYaml(readFileSync(join(t.root, BANDS_REL), "utf-8")) as Record<string, unknown> | null;
-      if (isObject(doc) && isObject(doc.epics)) servedBands = doc.epics;
-    } catch { /* no bands: nothing re-keyed */ }
+    // DW-46, DW-50: the figures come from the record (keyed by `k` to the minted id), never from the served root's
+    // shared bands file, and no entry is removed (the predicted id may be another engagement's minted band)
     const estimates: Record<string, number> = {};
-    const moved: string[] = [];
     const noBand: Detail[] = [];
     for (const e of appendedEpics) {
       const b = basis.find((x) => isObject(x) && x.k === e.k) as Record<string, unknown> | undefined;
-      const ep = b?.ep_id, mintedId = minted.get(e.n);
-      if (typeof ep !== "string" || !ep) { noBand.push({ k: e.k, n: e.n, reason: "ep_id null" }); continue; }
+      const ep = typeof b?.ep_id === "string" && b.ep_id ? b.ep_id : null, mintedId = minted.get(e.n);
       if (!mintedId) { noBand.push({ k: e.k, n: e.n, ep_id: ep, reason: "no minted EP id" }); continue; }
-      const usd = isObject(servedBands[ep]) ? num((servedBands[ep] as Record<string, unknown>).usd_estimate) : undefined;
+      const usd = num(b?.usd_estimate);
       if (usd === undefined) { noBand.push({ k: e.k, n: e.n, ep_id: ep, reason: "no usd_estimate" }); continue; }
       estimates[mintedId] = usd;
-      if (ep !== mintedId) moved.push(ep);
     }
     if (Object.keys(estimates).length) {
       let bands: string | null = null;
       try { bands = readFileSync(join(served, BANDS_REL), "utf-8"); } catch { /* absent: a new file */ }
-      try { atomicWrite(join(served, BANDS_REL), rekeyBands(bands, estimates, moved)); } catch (err) { return fail("job", clip(message(err))); }
+      try { atomicWrite(join(served, BANDS_REL), rekeyBands(bands, estimates)); } catch (err) { return fail("job", clip(message(err))); }
       ours.add(BANDS_REL);
     }
     emit("job", true, {
@@ -828,7 +827,7 @@ async function prStep(queue: Queue, deps: ApproveDeps, t: Target, project: strin
       try {
         const body = join(dir, "body.md");
         writeFileSync(body, `The plan engagement ${t.engagement} approved (Story 32.6): the scope's proposed epics and stories in \`epics.md\`, `
-          + `the plan entities \`plansync sync\` wrote, the run-epic job and the re-keyed budget band. Reviewed like any change; `
+          + `the plan entities \`plansync sync\` wrote, the run-epic job and the budget band copied from the quote. Reviewed like any change; `
           + `the first run is queued on its merge (cut from the approval's \`base_ref\` when it named one, else from the default branch).\n`, "utf-8");
         const created = await gh(deps, t.root, ["pr", "create", "--base", base, "--head", branch, "--title", `${t.engagement}: the approved plan`, "--body-file", body]);
         if (created.exit !== 0) return fail(`gh pr create ${failed(created)}`);
@@ -861,6 +860,21 @@ async function queueStep(queue: Queue, deps: ApproveDeps, t: Target, record: Eng
   if (state === "CLOSED") return fail(`PrClosed: ${url} was closed unmerged`);
   if (state !== "MERGED") return false; // OPEN, or gh failed: asked again at the next pass
   if (!deps.submit) return fail("NoSubmitter: no run submitter wired");
+  // DW-50: the served checkout fast-forwarded to the merged base before the run resolves its job from it; a dirty or
+  // off-base checkout is refused by name (never stashed, reset or cleaned) and retried at the next pass
+  const prBase = stepDetail(okStep(queue, project, t.engagement, since, "pr")).base;
+  const base = typeof prBase === "string" && prBase ? prBase : "main";
+  try {
+    const status = await git(deps, t.root, ["status", "--porcelain", "--untracked-files=no"], 60);
+    if (status.exit !== 0) return fail(`PullFailed: git status ${failed(status)}`);
+    const dirty = status.stdout.split(/\r?\n/).filter((l) => l.trim()).map((l) => l.slice(3));
+    if (dirty.length) return fail(`DirtyCheckout: ${t.root} has uncommitted changes (${dirty.slice(0, 3).join(", ")})`);
+    const head = await git(deps, t.root, ["rev-parse", "--abbrev-ref", "HEAD"], 30);
+    const branch = head.exit === 0 ? head.stdout.trim() : "";
+    if (branch !== base) return fail(`NotOnBase: ${t.root} is on ${branch || "an unknown branch"}, the PR merged into ${base}`);
+    const pulled = await git(deps, t.root, ["pull", "--ff-only", "-q", "origin", base], 300);
+    if (pulled.exit !== 0) return fail(`PullFailed: ${clip(pulled.stderr || pulled.stdout)}`);
+  } catch (e) { return fail(`PullFailed: ${clip(message(e))}`); }
   const payload = { engagement: t.engagement, project };
   let queued: { run_id: string; placement?: Record<string, unknown> | null };
   try { queued = await deps.submit(jobId, t.root, { ...(baseRef ? { baseRef } : {}), payload }); }

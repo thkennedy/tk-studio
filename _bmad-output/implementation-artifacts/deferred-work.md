@@ -423,7 +423,8 @@ location: apps/supervisor/src/approve.ts queueStep
 severity: medium
 reason: The approve PR changes .tk-studio/budget-bands.yaml; the served root holds the quote's uncommitted copy of it, and queueStep submits against the served root, which the pass never pulls (ruling (c)). Recorded against SPEC Open Question 3 / plans/32-6.md risk.
 decision: owner 2026-11-05 (TKSTUDIO-214, ENG-A): A — both fixes in one story: the supervisor does a fast-forward-only pull of the served checkout before queueing the first run (a dirty checkout is a named refusal) and the quote stores its per-epic USD figures in the engagement record (`quote.basis.epics[].usd_estimate`, copied by approve) instead of the shared bands file; stays open for the sweep bundle
-status: open
+status: done 2026-11-08
+resolution: resolved by sweep bundle dw-approve-served-pull-and-quote-usd
 
 ### DW-47: Nothing closes a cap or ask block after go or continue, and the questions pass will not close an owed questions block while the newest block is cap or ask.
 origin: spec-deferred 668eb901a685
@@ -458,7 +459,8 @@ location: apps/supervisor/src/approve.ts rekeyBands call in the job step
 severity: medium
 reason: 32.5's quote writes epics.<predicted EP>.usd_estimate into the served root's shared bands file and basis.epics[] carries no per-epic usd, so approve's rekeyBands reads the shared entry. Pre-existing in 32.5. Meets DEFERRAL DISCIPLINE (a): AC2's band re-key.
 decision: owner 2026-11-05 (TKSTUDIO-214, ENG-A): A — both fixes in one story: the supervisor does a fast-forward-only pull of the served checkout before queueing the first run (a dirty checkout is a named refusal) and the quote stores its per-epic USD figures in the engagement record (`quote.basis.epics[].usd_estimate`, copied by approve) instead of the shared bands file; stays open for the sweep bundle
-status: open
+status: done 2026-11-08
+resolution: resolved by sweep bundle dw-approve-served-pull-and-quote-usd
 
 ### DW-51: A re-approval after revise, before the first PR merges, resets the approve worktree to the default branch's tree, so the second plansync sync promotes fresh EP/ST entities to Jira and the first cycle'
 origin: spec-deferred 4ec1b6eb659c

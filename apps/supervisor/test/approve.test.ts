@@ -39,7 +39,7 @@ const SCOPE = scopeWith(PROPOSED);
 const QUOTE = {
   band50: { tokens: 1, usd: 20, share: "share unknown" }, band85: { tokens: 2, usd: 30, share: "share unknown" },
   band95: { tokens: 3, usd: 38, share: "share unknown" }, cap: 40,
-  basis: { epics: [{ k: 1, title: "Report exports", stories: 2, ep_id: "EP-033" }] }, computed_at: "2026-10-25T05:00:00.000Z",
+  basis: { epics: [{ k: 1, title: "Report exports", stories: 2, ep_id: "EP-033", usd_estimate: 40.0 }] }, computed_at: "2026-10-25T05:00:00.000Z",
 };
 const PLAN_40 = "---\nshape_version: 1\nid: EP-030\ntype: epic\ntitle: Old work\nstatus: done\nsource: epics.md#epic-40\n---\n";
 
@@ -63,8 +63,8 @@ function approvedRecord(o: { autonomy?: Autonomy; baseRef?: string; approve?: bo
   return applied.record;
 }
 
-/** The served root: a git checkout of a project (its origin pushed), the quote's uncommitted band for the predicted
- * EP-033, the scope, and the approved record. */
+/** The served root: a clean git checkout of a project (its origin pushed), the scope and the approved record
+ * (untracked). The quote's figures live in the record (`basis.epics[].usd_estimate`), not the bands file (DW-46). */
 function servedRepo(o: { scope?: string | null; record?: Engagement; bound?: boolean } = {}) {
   const repo = gitRepo({
     ".tk-studio/config.yaml": CONFIG + (o.bound ? BOUND : ""),
@@ -74,7 +74,6 @@ function servedRepo(o: { scope?: string | null; record?: Engagement; bound?: boo
     "_bmad-output/planning-artifacts/plan/EP-030.md": PLAN_40,
   });
   const root = repo.checkout;
-  writeFileSync(join(root, ".tk-studio", "budget-bands.yaml"), BANDS_HEAD + "  EP-033:\n    usd_estimate: 40.0\n");
   if (o.scope !== null) {
     mkdirSync(join(root, "_bmad-output", "engagements", ENG), { recursive: true });
     writeFileSync(join(root, "_bmad-output", "engagements", ENG, "scope.md"), o.scope ?? SCOPE);
@@ -157,7 +156,7 @@ describe("Story 32.6: the approve pass (AC1)", () => {
     const minted = JSON.parse(show(".tk-studio/jobs/run-epic-41.json"));
     expect(minted).toMatchObject({ job_schema_version: 1, id: "run-epic-41", type: "run-epic", target: { payload: { epic: 41 } } });
     expect(minted.stop).toEqual({ on_status: ["blocked"] }); // Story 36.6: no rhythm: the engagement's autonomy sets it
-    // the band re-keyed from the predicted EP-033 to the minted EP-034 (test_quote.py pins this literal)
+    // the record's usd_estimate set on the minted EP-034, EP-030 kept (test_quote.py pins this literal)
     expect(show(".tk-studio/budget-bands.yaml")).toBe(BANDS_HEAD + "  EP-034:\n    usd_estimate: 40.0\n");
     // the worktree is gone; plansync ran sync in it
     expect(existsSync(join(fx.work, "worktrees", "p", `engagement-${ENG}`))).toBe(false);
@@ -228,15 +227,44 @@ describe("Story 32.6: the approve pass (AC1)", () => {
     expect(readEngagement(root, ENG)!.state).toBe("approved");
   }, 60_000);
 
-  test("a null ep_id writes no band and is named in the job step's detail", async () => {
+  test("a null ep_id still copies the record's usd_estimate onto the minted id (keyed by k)", async () => {
     const queue = newQueue();
-    const quote = { ...structuredClone(QUOTE), basis: { epics: [{ k: 1, title: "Report exports", stories: 2, ep_id: null }] } };
+    const quote = { ...structuredClone(QUOTE), basis: { epics: [{ k: 1, title: "Report exports", stories: 2, ep_id: null, usd_estimate: 40.0 }] } };
+    const { root, origin } = servedRepo({ record: approvedRecord({ quote }) });
+    const fx = approveDeps(queue);
+    await approvePass(queue, fx.deps, { root, engagement: ENG });
+    const job = approveEvents(queue).find((d) => d.step === "job")!;
+    expect(job.detail.bands).toEqual({ "EP-034": 40 });
+    expect(job.detail.no_band).toEqual([]);
+    expect(git(origin, "show", "engagement/ENG-001:.tk-studio/budget-bands.yaml") + "\n").toBe(BANDS_HEAD + "  EP-034:\n    usd_estimate: 40.0\n");
+  }, 60_000);
+
+  test("DW-46, DW-50: the copy comes from the record's usd_estimate, never the served bands file; the other epic's entry kept", async () => {
+    const queue = newQueue();
+    const quote = { ...structuredClone(QUOTE), basis: { epics: [{ k: 1, title: "Report exports", stories: 2, ep_id: "EP-033", usd_estimate: 17.25 }] } };
+    const { root, origin } = servedRepo({ record: approvedRecord({ quote }) });
+    // another engagement's minted band at the predicted EP-033, committed on origin: kept (no `moved` removal)
+    const other = BANDS_HEAD + "  EP-033:\n    usd_estimate: 999.0\n";
+    writeFileSync(join(root, ".tk-studio", "budget-bands.yaml"), other);
+    git(root, "commit", "-qam", "another engagement's band");
+    git(root, "push", "-q", "origin", "main");
+    const fx = approveDeps(queue);
+    await approvePass(queue, fx.deps, { root, engagement: ENG });
+    const job = approveEvents(queue).find((d) => d.step === "job")!;
+    expect(job.detail.bands).toEqual({ "EP-034": 17.25 });
+    expect(job.detail.no_band).toEqual([]);
+    expect(git(origin, "show", "engagement/ENG-001:.tk-studio/budget-bands.yaml") + "\n").toBe(other + "  EP-034:\n    usd_estimate: 17.25\n");
+  }, 60_000);
+
+  test("a legacy record (a basis entry without usd_estimate) writes no band: no usd_estimate", async () => {
+    const queue = newQueue();
+    const quote = { ...structuredClone(QUOTE), basis: { epics: [{ k: 1, title: "Report exports", stories: 2, ep_id: "EP-033" }] } };
     const { root, origin } = servedRepo({ record: approvedRecord({ quote }) });
     const fx = approveDeps(queue);
     await approvePass(queue, fx.deps, { root, engagement: ENG });
     const job = approveEvents(queue).find((d) => d.step === "job")!;
     expect(job.detail.bands).toEqual({});
-    expect(job.detail.no_band).toEqual([{ k: 1, n: 41, reason: "ep_id null" }]);
+    expect(job.detail.no_band).toEqual([{ k: 1, n: 41, ep_id: "EP-033", reason: "no usd_estimate" }]);
     expect(git(origin, "diff", "--name-only", "main", "engagement/ENG-001")).not.toContain("budget-bands.yaml");
   }, 60_000);
 
@@ -1296,4 +1324,122 @@ describe("Story 36.3: go or continue closes the cap or ask block (DW-47)", () =>
     await engagementRunPass(queue, fx.deps);
     expect(where).toEqual([{ tier: queue.get(run)!.tier, sandbox: queue.get(run)!.sandbox }]);
   });
+});
+
+describe("DW-46, DW-50: the served checkout pulled fast-forward-only before the first run", () => {
+  /** The pass driven to its `pr` step (OPEN), the submitter recording the served HEAD at each call. */
+  async function toPr() {
+    const queue = newQueue();
+    const { root, origin } = servedRepo();
+    const fx = approveDeps(queue);
+    const heads: string[] = [];
+    const submit = fx.deps.submit!;
+    fx.deps.submit = async (jobId, r, opts) => { heads.push(git(root, "rev-parse", "HEAD")); return submit(jobId, r, opts); };
+    expect(await approvePass(queue, fx.deps, { root, engagement: ENG })).toEqual({ done: [], refused: [], failed: [] });
+    expect(steps(queue)).toEqual([["append", true], ["sync", true], ["job", true], ["commit", true], ["pr", true]]);
+    return { queue, root, origin, fx, heads };
+  }
+  /** The PR merged on origin: the engagement branch fast-forwarded into origin's main from a second clone. */
+  function mergeOnOrigin(origin: string) {
+    const clone = join(temp("tk-sup-ap-clone-"), "c");
+    git(dirnameOf(clone), "clone", "-q", origin, clone);
+    git(clone, "merge", "-q", "--ff-only", "origin/engagement/ENG-001");
+    git(clone, "push", "-q", "origin", "main");
+    return git(clone, "rev-parse", "HEAD");
+  }
+  const queuedReason = (q: Queue) => approveEvents(q).filter((d) => d.step === "queued").map((d) => [d.ok, d.detail.reason ?? null]);
+
+  test("the 32.5-era served bands file modified uncommitted: the job step copies from the record, then queued refuses DirtyCheckout naming it", async () => {
+    const queue = newQueue();
+    const { root } = servedRepo();
+    writeFileSync(join(root, ".tk-studio", "budget-bands.yaml"), BANDS_HEAD + "  EP-033:\n    usd_estimate: 999.0\n");
+    const fx = approveDeps(queue);
+    await approvePass(queue, fx.deps, { root, engagement: ENG });
+    expect(approveEvents(queue).find((d) => d.step === "job")!.detail.bands).toEqual({ "EP-034": 40 });
+    fx.gh.answer({ view: "MERGED" });
+    expect((await approvePass(queue, fx.deps)).done).toEqual([]);
+    expect(queuedReason(queue)).toEqual([[false, `DirtyCheckout: ${root} has uncommitted changes (.tk-studio/budget-bands.yaml)`]]);
+    expect(fx.submitted).toEqual([]);
+    expect(readFileSync(join(root, ".tk-studio", "budget-bands.yaml"), "utf-8")).toContain("999.0"); // never stashed or reset
+  }, 60_000);
+
+  test("merged and behind: the served checkout fast-forwarded to origin/main, then the run submitted", async () => {
+    const { queue, root, origin, fx, heads } = await toPr();
+    const merged = mergeOnOrigin(origin);
+    expect(git(root, "rev-parse", "HEAD")).not.toBe(merged);
+    fx.gh.answer({ view: "MERGED" });
+    expect((await approvePass(queue, fx.deps)).done).toEqual([ENG]);
+    expect(heads).toEqual([merged]); // pulled before the submit
+    expect(git(root, "rev-parse", "HEAD")).toBe(merged);
+    expect(existsSync(join(root, ".tk-studio", "jobs", "run-epic-41.json"))).toBe(true);
+    expect(fx.submitted).toHaveLength(1);
+  }, 60_000);
+
+  test("dirty: a modified tracked file refuses DirtyCheckout (told once, no submit); after the restore the next pass queues", async () => {
+    const { queue, root, origin, fx } = await toPr();
+    mergeOnOrigin(origin);
+    writeFileSync(join(root, ".tk-studio", "config.yaml"), CONFIG + "# local edit\n");
+    fx.gh.answer({ view: "MERGED" });
+    expect((await approvePass(queue, fx.deps)).done).toEqual([]);
+    await approvePass(queue, fx.deps);
+    expect(queuedReason(queue)).toEqual([[false, `DirtyCheckout: ${root} has uncommitted changes (.tk-studio/config.yaml)`]]);
+    expect(fx.submitted).toEqual([]);
+    git(root, "checkout", "--", ".tk-studio/config.yaml");
+    expect((await approvePass(queue, fx.deps)).done).toEqual([ENG]);
+    expect(fx.submitted).toHaveLength(1);
+    expect(steps(queue).slice(-2)).toEqual([["queued", true], ["done", true]]);
+  }, 60_000);
+
+  test("untracked files only (the record, scope.md, a note) are not dirty: the pull proceeds", async () => {
+    const { queue, root, origin, fx } = await toPr();
+    const merged = mergeOnOrigin(origin);
+    writeFileSync(join(root, "notes.txt"), "scratch\n");
+    expect(git(root, "status", "--porcelain")).toContain("??");
+    fx.gh.answer({ view: "MERGED" });
+    expect((await approvePass(queue, fx.deps)).done).toEqual([ENG]);
+    expect(git(root, "rev-parse", "HEAD")).toBe(merged);
+    expect(fx.submitted).toHaveLength(1);
+  }, 60_000);
+
+  test("diverged: a local commit not on origin/main is PullFailed, no submit", async () => {
+    const { queue, root, origin, fx } = await toPr();
+    mergeOnOrigin(origin);
+    writeFileSync(join(root, "local.txt"), "local\n");
+    git(root, "add", "local.txt");
+    git(root, "commit", "-qm", "a local commit");
+    fx.gh.answer({ view: "MERGED" });
+    expect((await approvePass(queue, fx.deps)).done).toEqual([]);
+    const q = queuedReason(queue);
+    expect(q).toHaveLength(1);
+    expect(q[0]![0]).toBe(false);
+    expect(q[0]![1]).toStartWith("PullFailed: ");
+    expect(fx.submitted).toEqual([]);
+  }, 60_000);
+
+  test("wrong branch: the served root on feature, the PR merged into main, is NotOnBase, no submit", async () => {
+    const { queue, root, fx } = await toPr();
+    git(root, "checkout", "-q", "-b", "feature");
+    fx.gh.answer({ view: "MERGED" });
+    expect((await approvePass(queue, fx.deps)).done).toEqual([]);
+    expect(queuedReason(queue)).toEqual([[false, `NotOnBase: ${root} is on feature, the PR merged into main`]]);
+    expect(fx.submitted).toEqual([]);
+  }, 60_000);
+
+  test("git status exiting non-zero in the served root is PullFailed: git status, no submit", async () => {
+    const { queue, root, fx } = await toPr();
+    const env = fx.deps.env;
+    fx.deps.run = async (bin, args, opts) => {
+      if (bin === "git" && args.join(" ") === "status --porcelain --untracked-files=no" && opts.cwd === root) {
+        return { exit: 128, stdout: "", stderr: "fatal: not a git repository" };
+      }
+      return runProcess(bin, args, { cwd: opts.cwd, timeoutS: opts.timeoutS, env: { ...(env ?? process.env), ...(opts.env ?? {}) } });
+    };
+    fx.gh.answer({ view: "MERGED" });
+    expect((await approvePass(queue, fx.deps)).done).toEqual([]);
+    const q = queuedReason(queue);
+    expect(q).toHaveLength(1);
+    expect(q[0]![0]).toBe(false);
+    expect(q[0]![1]).toStartWith("PullFailed: git status");
+    expect(fx.submitted).toEqual([]);
+  }, 60_000);
 });

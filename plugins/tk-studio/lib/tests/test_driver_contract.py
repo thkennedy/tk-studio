@@ -1215,28 +1215,38 @@ class DriverContractTestCase(unittest.TestCase):
                        "not numbered 1..m in order",
                        "a held `scope.lock`",
                        "/scope.lock is held`",
-                       "an unparseable `budget-bands.yaml`",
                        "an unreadable `measurements/`",
                        "`basis.notes` is a list of strings",
                        "`thin history: <n> landed stories`",
                        "`tokens unknown: thin history (no metered story)`",
                        "`tokens unknown: thin history (no usd-per-token "
                        "ratio)`",
-                       "`ep_id` `null` when that counter is unreadable",
-                       "no `epics` band is written",
-                       "every byte outside the top-level `epics:` block "
-                       "kept, other epics' entries kept and this quote's "
-                       "entries overwritten",
+                       "`ep_id` the id `.tk-studio/plan-counter.yaml` "
+                       "predicts, `null` when that counter is unreadable",
+                       # DW-46, DW-50: the per-epic dollars live in the
+                       # record; approve copies them, the quote writes no
+                       # bands file
+                       "`basis.epics[] {k, title, stories, ep_id, "
+                       "usd_estimate}`",
+                       "`usd_estimate` a number, `null` for an epic that "
+                       "proposes no story",
+                       "the quote neither reads nor writes "
+                       "`.tk-studio/budget-bands.yaml` (DW-46, DW-50)",
+                       "approve copies each `usd_estimate` onto the minted "
+                       "EP id as `epics.<EP-NNN>.usd_estimate`",
                        # the seed stays exact through the JSON rewrite; a
                        # scalar epics is refused, never a second key
                        "a `--seed` outside `0 <= seed < 2**53` `BadSeed`",
                        "the first 6 bytes of `sha256(\"<engagement>:<n>\")`",
-                       "a top-level `epics:` scalar other than empty, `~`, "
-                       "`null` or `{}`",
                        "`ScopeUnwritable` from `scope`, a retry from the "
                        "sync-back",
                        "— additive) |"):
             self.assertIn(phrase, clause)
+        for gone in ("an unparseable `budget-bands.yaml`",
+                     "no `epics` band is written",
+                     "this quote's entries overwritten",
+                     "a top-level `epics:` scalar other than empty"):
+            self.assertNotIn(gone, clause)
         stories = next(line for line in self.text.splitlines()
                        if line.startswith("| Story / rulings"))
         self.assertIn("Story 32.5", stories)
@@ -1255,14 +1265,20 @@ class DriverContractTestCase(unittest.TestCase):
                        "number; default the first 6 bytes of "
                        "`sha256(\"<engagement>:<n>\")`",
                        "`BadSeed` (a `--seed` outside `0 <= seed < 2**53`)",
-                       "a top-level `epics:` scalar other than empty, `~`, "
-                       "`null` or `{}`",
+                       # DW-46, DW-50: the record alone
+                       "recording each proposed epic's p85 dollars as "
+                       "`basis.epics[].usd_estimate`",
+                       "`.tk-studio/budget-bands.yaml` is neither read nor "
+                       "written: approve copies the figures onto the minted "
+                       "EP ids",
+                       "`QuoteUnwritable` (the record refused by the OS,",
                        # the quote verb's result shape
                        "`{ok, dry_run, engagement, mode: \"quote\", quote, "
                        "bands, written[], notes[]}`",
                        "also on a dry run, `null` on a refusal before it is "
                        "computed",
-                       "`bands` `{EP-NNN: usd}`",
+                       "`bands` `{EP-NNN: usd}`, the estimates recorded in "
+                       "the record",
                        # a failed void: the scope refuses, the sync-back
                        # (which never raises) retries
                        "a failed void refuses `ScopeUnwritable` from `scope` "
@@ -1276,14 +1292,20 @@ class DriverContractTestCase(unittest.TestCase):
         self.assertNotIn("a failed void refuses `ScopeUnwritable` with "
                          "`scope.md` untouched", engage)
         self.assertNotIn("default from `sha256(", engage)
+        for gone in ("the record or the bands refused by the OS",
+                     "an unparseable `budget-bands.yaml`",
+                     "a top-level `epics:` scalar other than empty"):
+            self.assertNotIn(gone, engage)
         self.assertNotIn("every other byte", self.text)
         read = next(line for line in self.text.splitlines()
                     if line.startswith("| the engagement (Story 32.1, "
                                        "0.1.27) | `GET /engagements/{id}` |"))
         self.assertIn("`quote {band50, band85, band95, cap, basis, "
                       "computed_at}`", read)
-        for phrase in ("`basis.epics[] {k, title, stories, ep_id}`",
-                       "`ep_id` `null`", "`basis.notes` a list of strings",
+        for phrase in ("`basis.epics[] {k, title, stories, ep_id, "
+                       "usd_estimate}`",
+                       "`ep_id` `null`", "`usd_estimate` the epic's p85 "
+                       "dollars, the band approve copies", "`basis.notes` a list of strings",
                        "`thin history: <n> landed stories`"):
             self.assertIn(phrase, read)
         observe = next(line for line in self.text.splitlines()
@@ -1336,6 +1358,21 @@ class DriverContractTestCase(unittest.TestCase):
                        "the rest of the file kept byte for byte",
                        "`TK_SUPERVISOR_CONFIG` never written",
                        "`epic_bands_text`'s byte shape", "`no_band`",
+                       # DW-46, DW-50: copied from the record, nothing
+                       # removed; the served checkout pulled before the run
+                       "`basis.epics[].usd_estimate` from the record, "
+                       "matched by `k` and never read from the served "
+                       "root's bands file",
+                       "no other entry removed",
+                       "(`no minted EP id`, `no usd_estimate`)",
+                       "`git pull --ff-only origin <base>`, the PR's base; "
+                       "never stashed, reset or cleaned",
+                       "`DirtyCheckout: <root> has uncommitted changes "
+                       "(<up to 3 paths>)`",
+                       "untracked files do not count",
+                       "`NotOnBase: <root> is on <branch>, the PR merged "
+                       "into <base>`", "`PullFailed: <stderr>`",
+                       "retried at the next pass with nothing submitted",
                        "`NonFastForward`", "`detail.pr {number, url}`",
                        "`MERGED`", "with or without `base_ref`",
                        "`payload {engagement, project}`",
