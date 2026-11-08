@@ -63,21 +63,25 @@ older free-text `meter: story=… usd=…` line is counted as
   cap the run pauses `partial`, the engagement's issue blocks with the
   figures, and the owner decides (`basis.at_cap`).
 - **Basis.** `method`, `resamples`, `seed`, `stories`, `epics[] {k, title,
-  stories, ep_id}`, `history {n, unstructured, project}`, `kind: "story"`
+  stories, ep_id, usd_estimate}`, `history {n, unstructured, project}`, `kind: "story"`
   (project-wide; the meter carries no story kind yet), `thin`, `at_cap`,
   `route`, `autonomy` (`ask`, `steady`, `full`, the levels 32.6 offers),
   `planning_usd` with `scoping_billable` (planning spend so far > 0),
   `prices_date`, `window_tokens`, `cap_tokens` and `notes`.
 - **The board.** Each proposed epic `k` gets the id `plan-counter.yaml`
-  predicts, `EP-<next.epic + k − 1>`. Its `usd_estimate` (the p85 dollars of
-  a bootstrap over that epic's own story count) is written into
-  `.tk-studio/budget-bands.yaml`'s top-level `epics:`: every byte outside
-  that block is kept, other epics' entries are kept and this quote's are
-  overwritten. The proposed epics must be numbered 1..m in order (else
-  `NoScope`), so no id lands on a live epic or a gap; with the counter
-  unreadable `ep_id` is `null` and no band is written. `GET /board`'s
-  `band_usd` then draws the band against spend once the epic exists. If the counter moves before approval, 32.6
-  re-keys from `basis.epics[].ep_id`.
+  predicts, `EP-<next.epic + k − 1>` (`null` with the counter unreadable).
+  Its `usd_estimate` (the p85 dollars of a bootstrap over that epic's own
+  story count, `null` for an epic with no story) is recorded in the record
+  as `basis.epics[].usd_estimate`. The quote never reads or writes
+  `.tk-studio/budget-bands.yaml` (DW-46, DW-50): two engagements quoted
+  before either approves predict the same id, and a shared uncommitted
+  entry would hold only the later figure and dirty the served checkout.
+  The proposed epics must be numbered 1..m in order (else `NoScope`). At
+  approval, 32.6 copies each epic's `usd_estimate` (matched by `k`) onto
+  the minted EP id in the approve commit, removing no other entry, and
+  `GET /board`'s `band_usd` draws the band against spend once that commit
+  merges. A record quoted before this change has no `usd_estimate` and
+  gets no band (`no_band: no usd_estimate`).
 
 ## Thin history
 

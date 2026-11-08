@@ -619,9 +619,14 @@ describe("hold: the engine pid recorded and one `sbx exec … tail --pid` held f
     const q = newQueue();
     const { run } = await sbxRun(q);
     launched(q, run.run_id);
+    const seen = sbx.calls().length;
     const { calls } = await during(async () => {
       await holdEngine(q, run.run_id, deps);
-      await Bun.sleep(400); // the fake's `tail` exits at once
+      // The hold is a detached child whose spawn is not awaited: wait for the fake's call, not a fixed time. On a
+      // Windows host a detached spawn takes ~0.5 s (hole 116: a Defender signature update 2026-11-08 stretched it
+      // past the 400 ms this test once slept, and the late call then polluted the next test's window). The fake's
+      // `tail` exits at once.
+      for (let i = 0; i < 200 && sbx.calls().length === seen; i++) await Bun.sleep(50);
     });
     expect(calls).toEqual([["exec", SB, "tail", "--pid=6509", "-f", "/dev/null"]]);
     expect(typeof (q.events(run.run_id).find((e) => e.kind === "hold")?.detail as Record<string, unknown>).pid).toBe("number");

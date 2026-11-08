@@ -1,6 +1,6 @@
 # Deferred Work
 
-<!-- deferred-work counter: last minted DW-189; mint through plansync.py deferred mint -->
+<!-- deferred-work counter: last minted DW-192; mint through plansync.py deferred mint -->
 
 ### DW-124: Contract §4 `submit` admitted a full job definition but the CLI/skill surface was id-only
 origin: migrated from legacy ledger ("Deferred from: code review of feat/tk-studio-connector (2026-08-06)"), 2026-10-29
@@ -257,7 +257,8 @@ location: plugins/tk-studio/contracts/driver-contract.md:151; apps/studio-web/sr
 severity: medium
 reason: Category (a), a defect in behaviour AC2 names ("the current story's phase"). driver-contract.md:151 pins "A run new to the live set sends an epic-only office.progress beside its office.run", so the store holds no stories for that run. A consult (pass 2) ruled it a contract or operator decision (an additive per-story office.progress for a new run), not a 30-4 patch. A reconnect snapshot fills it.
 decision: owner 2026-11-05 (TKSTUDIO-213): A with one change — the pending phase and engine id read "Loading…", never a bare "—" ("always be intentional regarding UI feedback; no symbols without human-readable meaning in displayed text"); stays open until that text lands (a sweep bundle)
-status: open
+status: done 2026-11-08
+resolution: resolved by sweep bundle dw-office-hud-loading-text
 
 ### DW-30: A run that becomes live, or reaches `launched`, after the page's snapshot keeps the HUD's engine run id at "—" until a reconnect snapshot brings it.
 origin: spec-deferred 4fdab8eaa859
@@ -266,7 +267,8 @@ location: apps/supervisor/src/office.ts:663; apps/studio-web/src/live/store.ts:1
 severity: medium
 reason: Category (a), a defect in behaviour AC2 names ("the engine run id"). The `office.run` delta has the pinned shape {run_id, project, state, from} with no engine_run_id, and the hub emits it only on a state change (apps/supervisor/src/office.ts:663). The web store's applyRun creates new rows with engine_run_id null and never updates it (apps/studio-web/src/live/store.ts:151). The fix is an additive delta field, so it is a contract or operator decision, the same class as the existing phase deferral. Found by follow-up review pass 4.
 decision: owner 2026-11-05 (TKSTUDIO-213): A with one change — the pending phase and engine id read "Loading…", never a bare "—" ("always be intentional regarding UI feedback; no symbols without human-readable meaning in displayed text"); stays open until that text lands (a sweep bundle)
-status: open
+status: done 2026-11-08
+resolution: resolved by sweep bundle dw-office-hud-loading-text
 
 ### DW-31: Follow-up review still recommended for 30-4-the-office-screen after the damping cap was spent
 origin: review-budget-followup
@@ -421,7 +423,8 @@ location: apps/supervisor/src/approve.ts queueStep
 severity: medium
 reason: The approve PR changes .tk-studio/budget-bands.yaml; the served root holds the quote's uncommitted copy of it, and queueStep submits against the served root, which the pass never pulls (ruling (c)). Recorded against SPEC Open Question 3 / plans/32-6.md risk.
 decision: owner 2026-11-05 (TKSTUDIO-214, ENG-A): A — both fixes in one story: the supervisor does a fast-forward-only pull of the served checkout before queueing the first run (a dirty checkout is a named refusal) and the quote stores its per-epic USD figures in the engagement record (`quote.basis.epics[].usd_estimate`, copied by approve) instead of the shared bands file; stays open for the sweep bundle
-status: open
+status: done 2026-11-08
+resolution: resolved by sweep bundle dw-approve-served-pull-and-quote-usd
 
 ### DW-47: Nothing closes a cap or ask block after go or continue, and the questions pass will not close an owed questions block while the newest block is cap or ask.
 origin: spec-deferred 668eb901a685
@@ -447,7 +450,8 @@ location: apps/supervisor/src/approve.ts reservedEpics / the sync step
 severity: medium
 reason: plansync's plan-counter.yaml is branch-local; reservedEpics reserves only ## Epic numbers, so the second PR adds the same EP-<n>.md (an add/add conflict GitHub surfaces, not a silent duplicate). Pre-existing property of plansync's counter across unmerged branches. Meets DEFERRAL DISCIPLINE (b): AD-4 id uniqueness at risk.
 decision: owner 2026-11-05 (TKSTUDIO-216): A — wait, don't clash: an approve pass for a project waits (retrying each tick) while another engagement's approve PR for that project is still open; stays open for the sweep
-status: open
+status: done 2026-11-08
+resolution: resolved by sweep bundle dw-approve-concurrency-and-reapproval
 
 ### DW-50: Two engagements quoted before either approves predict the same EP id, so the shared budget-bands.yaml entry holds only the later quote's estimate and the re-key can move the other engagement's figure.
 origin: spec-deferred 27739241dd4d
@@ -456,7 +460,8 @@ location: apps/supervisor/src/approve.ts rekeyBands call in the job step
 severity: medium
 reason: 32.5's quote writes epics.<predicted EP>.usd_estimate into the served root's shared bands file and basis.epics[] carries no per-epic usd, so approve's rekeyBands reads the shared entry. Pre-existing in 32.5. Meets DEFERRAL DISCIPLINE (a): AC2's band re-key.
 decision: owner 2026-11-05 (TKSTUDIO-214, ENG-A): A — both fixes in one story: the supervisor does a fast-forward-only pull of the served checkout before queueing the first run (a dirty checkout is a named refusal) and the quote stores its per-epic USD figures in the engagement record (`quote.basis.epics[].usd_estimate`, copied by approve) instead of the shared bands file; stays open for the sweep bundle
-status: open
+status: done 2026-11-08
+resolution: resolved by sweep bundle dw-approve-served-pull-and-quote-usd
 
 ### DW-51: A re-approval after revise, before the first PR merges, resets the approve worktree to the default branch's tree, so the second plansync sync promotes fresh EP/ST entities to Jira and the first cycle'
 origin: spec-deferred 4ec1b6eb659c
@@ -465,7 +470,8 @@ location: apps/supervisor/src/approve.ts re-approval cut (read-tree reset) and t
 severity: medium
 reason: approve.ts re-approval path (operator ruling (2), pass 5): `git read-tree -u --reset origin/<default>` drops the first cycle's entity files holding external.jira.key and resets plan-counter.yaml; the following `plansync.py sync` mints keyless entities and jirabackend.promote POSTs a new issue for each. Consequence of ruling (2)'s wholesale replacement; reconciling the earlier promote (drop/transition the orphans, or carry keys forward) needs an operator decision. Meets DEFERRAL DISCIPLINE (a): AC1's plansync sync (the promote to Jira).
 decision: owner 2026-11-05 (TKSTUDIO-217): A — mark them dropped: before the second sync, move the first cycle's issues to the project's dropped/cancelled status (DNI) with a comment naming the re-approval; stays open for the sweep
-status: open
+status: done 2026-11-08
+resolution: resolved by sweep bundle dw-approve-concurrency-and-reapproval
 
 ### DW-52: A named engage.py closeout refusal records engagement-closeout ok:false and is never retried, so the record stays in-progress/partial with the issue open; a manual engage.py closeout rerun writes the
 origin: spec-deferred 8106661dadd5
@@ -474,7 +480,8 @@ location: apps/supervisor/src/delivery.ts:274
 severity: medium
 reason: Blind Hunter; delivery.ts closeoutStep records the run_id on refusal (counts as done, accepted by consult 1 as deviation 4); the lib never moves state. Deferral class (a): AC1's state/issue/notifier outcome is not reached after a refusal.
 decision: owner 2026-11-05 (TKSTUDIO-218, ENG-B): A — both: the delivery pass retries a refused close-out on every pass (a notice only when the reason changes), and `go` after an unstopped end resubmits when stories remain, else re-runs the close-out at once; stays open for the sweep bundle
-status: open
+status: done 2026-11-08
+resolution: resolved by sweep bundle dw-delivery-closeout-retry-and-go
 
 ### DW-53: After a closeout leaves an engagement partial for a run that ended unstopped, an owner go {cap} moves it to in-progress with no run queued and no new closeout, so it stays in-progress indefinitely.
 origin: spec-deferred fcebc307be1b
@@ -483,7 +490,8 @@ location: apps/supervisor/src/delivery.ts (lastRunEnded / closeoutStep); apps/su
 severity: medium
 reason: Edge Case Hunter; step 7 resubmits only cap-stopped runs and the closeout pass treats the engagement-closeout event for that run_id as done. Deferral class (a): the go-past-a-cap input named by AC2 leaves no run and no report.
 decision: owner 2026-11-05 (TKSTUDIO-218, ENG-B): A — both: the delivery pass retries a refused close-out on every pass (a notice only when the reason changes), and `go` after an unstopped end resubmits when stories remain, else re-runs the close-out at once; stays open for the sweep bundle
-status: open
+status: done 2026-11-08
+resolution: resolved by sweep bundle dw-delivery-closeout-retry-and-go
 
 ### DW-54: Follow-up review still recommended for 32-8-delivery-the-closeout-report-and-change-requests after the damping cap was spent
 origin: review-budget-followup
@@ -611,7 +619,7 @@ source_spec: `34-3-the-playable-verify-leg-spec.md`
 location: apps/supervisor/src/hostverify.ts defaultJudge; plugins/tk-studio/skills/tk-studio-playable-judge/SKILL.md
 severity: medium
 reason: Review pass 1 (blind hunter). AC1 names the read-only rule; enforcing it needs a deny-profile design for invokeSkill's `deny_profile`, which this story's plan does not settle. Deferral class (a).
-decision: owner 2026-11-07 (TKSTUDIO-224): A — ship the judge deny profile: no Edit/Write/Bash and no Read of the project's code, `plugins`, `apps` and `_bmad-output` folders, passed by `defaultJudge` and pinned by a test; best effort, not a seal; stays open for the sweep bundle
+decision: owner 2026-11-07 (TKSTUDIO-224): A — ship the judge deny profile: no Edit/Write/Bash and no Read of the project's code, `plugins`, `apps` and `_bmad-output` folders, passed by `defaultJudge` and pinned by a test; best effort, not a seal; stays open for the sweep bundle. Operator reading 2026-11-08 (the fourth sweep, run q-run-sweep-20261108T093348Z-f76978, bundle playable-judge-sandbox-hygiene paused at a CRITICAL escalation 12:55Z): the literal list breaks the judge itself — its SKILL.md runs `uv run playable_judge.py prepare|verdict` through Bash and writes `answer.json` through Write to produce the `judge.json` the host leg requires (`hostverify.ts` defaultJudge) — so the profile that carries the ruling's intent is the scoped one: bare `Edit` denied, `Write(...)` and `Read(...)` denied for `./plugins/**`, `./apps/**`, `./_bmad-output/**` and the project's code folders, Bash left open (best effort, as ruled: a Bash read of the code is not sealed). The literal list plus a host-run judge core (a `judge.json` contract change) was weighed and set aside as a rework beyond the bundle. The owner may override on TKSTUDIO-224 (a comment names the reading); the bundle re-queues in the next sweep with this intent. DW-69 does not depend on it and may bundle alone.
 status: open
 
 ### DW-69: A 33.8 re-run on an ended run pins (starts) the stopped sandbox for the judge and nothing releases it; it carries no pin record, so the launch check warns "started outside the supervisor" until the ne
@@ -1592,4 +1600,28 @@ source_spec: `kb/atlassian-free-tier.md` item 5 (the rewritten scope lists); `ha
 location: plugins/tk-studio/lib/jirabackend.py `find_statuses` (`_paged_values(client, "/statuses/search", …, scope=SCOPE_READ)` twice: the Jira v2 spec lists `manage:jira-configuration`), `find_workflow` (`/workflow/search` with `scope=SCOPE_READ`: the deprecated endpoint lists `manage:jira-project`), `create_project` (`POST /project` with `scope=SCOPE_PROJECT`: the spec lists `manage:jira-configuration`); plugins/tk-studio/lib/confluence.py `upload_attachment` (the v1 `PUT /content/{id}/child/attachment` (`scope=SCOPE_ATTACHMENT, v1=True`: the v1 spec adds `read:content-details:confluence`)
 severity: low
 reason: A `403` on one of these calls prints a remedy naming a scope the token already has, so the operator recreates a token that fails the same way (the pattern Tim named on TKSTUDIO-236: "I have recreated the API keys multiple times and yet we still seem to be missing permissions"). Fix to make: carry the spec's scope on each call (`SCOPE_CONFIGURATION` for `/statuses/search` and `POST /project`, `SCOPE_PROJECT` for `/workflow/search`, `read:content-details:confluence` beside `write:attachment:confluence` on the v1 upload) and pin each in the backends' tests; the message shape is unchanged. Sweep-safe.
+status: open
+
+### DW-190: Two engagements of one project starting their first append in separate supervisor processes at once can both see no holder: the approve lock is per engagement, so the DW-49 wait check is not atomic ac
+origin: spec-deferred 098796f73cb8
+source_spec: `spec-approve-concurrency-and-reapproval.md`
+location: apps/supervisor/src/approve.ts approveStep (the DW-49 wait check)
+severity: medium
+reason: approveStep takes only takeLock(<worktree>.lock) per engagement; serialised() covers one process. Serve and run/drain processes can each run approvePass concurrently. Meets DEFERRAL DISCIPLINE (b): AD-4 id uniqueness.
+status: open
+
+### DW-191: Two engagements of one project that each still have an earlier approve PR open, both revised and re-approved before either new cycle appends, hold each other through the cross-cycle hold: a mutual Wai
+origin: spec-deferred e13671470a74
+source_spec: `spec-approve-concurrency-and-reapproval.md`
+location: apps/supervisor/src/approve.ts openPrHolder (the earlier-open-PR hold)
+severity: medium
+reason: openPrHolder's earlier-open-PR branch (Spec Change Log #3) holds on the other's newest ok pr while gh answers OPEN, symmetrically. Reachable only from approve PRs already open side by side before DW-49 ships, or the deferred cross-process race. A tie-break lets one sync clash with the other's open ids, so it needs an owner ruling. Meets DEFERRAL DISCIPLINE (a): the DW-49 wait the criteria name.
+status: open
+
+### DW-192: A first cycle whose sync promoted Jira issues but whose commit/push never landed, then revised and re-approved, re-runs fresh: the kept worktree holding the keys is removed and no origin branch exists
+origin: spec-deferred 62be94cb1011
+source_spec: `spec-approve-concurrency-and-reapproval.md`
+location: apps/supervisor/src/approve.ts the fresh re-approval path (removeWorktree before the cut)
+severity: medium
+reason: dropSuperseded runs only on the onBranch read-tree cut (the path DW-51 names); the fresh path's removeWorktree drops the only copy of the keys. Pre-existing path not changed by this bundle. Meets DEFERRAL DISCIPLINE (a): AC1's promote to Jira.
 status: open

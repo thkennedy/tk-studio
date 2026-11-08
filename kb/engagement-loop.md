@@ -37,7 +37,7 @@ moves anything. This page describes what exists after Story 32.8.
 | 1. The chat | `POST /chat/{id}` | one `engagement-chat` run, `engage.py reply` | `chat.jsonl` | `chat-queued` |
 | 2. Questions | the planner's `engage.py questions` | the questions pass (`questions.ts`): `questions` row, the Jira block, answers read back, the issue closed | `questions.json` | `engagement-issue`, `engagement-answers` |
 | 3. The scope | the planner's `engage.py scope`, or a `revise` body (the scope pass) | `scope.ts` | `scope.md`, the page `ENG-NNN: Scope of Work` | `engagement-scope` |
-| 4. The quote | the planner's `engage.py quote`; the owner's `go` (`scoping → quoted`) | `engage.py quote` | the record's `quote`, `budget-bands.yaml` | — |
+| 4. The quote | the planner's `engage.py quote`; the owner's `go` (`scoping → quoted`) | `engage.py quote` | the record's `quote` (each epic's `basis.epics[].usd_estimate`; approve copies it into `budget-bands.yaml`) | — |
 | 5. Approval | the owner's `approve {autonomy, base_ref?}` | the approve pass (`approve.ts`): append, sync, job, commit, PR, queued on merge | `epics.md`, plan entities, `run-epic-N.json` on `engagement/ENG-NNN` | `engagement-approve`, `engagement-run-queued` |
 | 6. The run | the queue | the engagement-run pass: `launched`, autonomy stops, the cap, resubmits; the run-spend pass | the record's `spend.runs_usd` | `engagement-run-stop`, `engagement-cap`, `engagement-continue` |
 | 7–9. Delivery | the last run ending | the closeout pass (`delivery.ts`), `engage.py closeout` | `closeout.md`, the page `ENG-NNN: Closeout`, the record's `closeout` | `engagement-closeout`, `engagement-issue {action: closed}` |

@@ -232,6 +232,33 @@ create "<summary>" (Task, tk-studio-decision, assigned to the owner) for
 <ids> and move it to 'Blocked - Awaiting User' with the mention comment`),
 `partial`. The sweep's close-out (`apps/supervisor/src/sweep.ts`
 `postDecisions`) is the caller, on a bound project only.
+
+The `drop` verb (DW-51, TKSTUDIO-217) retires the issues a superseded plan
+promoted, when an engagement is re-approved after `revise` with its earlier
+approve PR still open:
+
+  uv run track.py drop --directory ROOT --engagement ENG-NNN
+      --issue KEY [--issue KEY …] --reason TEXT [--dry-run]
+
+Before any write, every issue not already in a
+`jirabackend.DROPPED_STATUS_NAMES` status must have a transition reaching
+`jirabackend.DNI_STATUS`, else `NoTransition` with nothing moved or
+commented. Each issue (agent seat) then moves by name to `DNI_STATUS` and
+gets one agent comment `Dropped: <reason>`, with no account mention. An
+issue already dropped is not moved: it gets the comment only when its
+newest agent comment is not that same body (a retry after a failed comment
+posts it), else it is named in `skipped[]` — so a retry never comments
+twice. The result is `{ok, dry_run, engagement, issues: [{issue, transitioned,
+commented}], skipped[], notes, written: []}`. Refusals end `blocked` (exit
+2), each by name: `EngagementNotFound` (a bad id or no engagement
+directory), `NoIssue` (no `--issue`), `BadIssue` (a malformed key),
+`ReasonMissing` (no `--reason`), the agent seat's gaps (as `close`),
+`NoTransition` (no transition reaches `DNI`), and `JiraRefused: <key>:
+<error>` (any other non-transient Jira error, e.g. a 404 on a deleted
+issue). A temporary failure ends
+`partial`, `ok: false`, `retry: true`. It holds the engagement's
+`track.lock` as `close` does. The supervisor's approve pass is the caller
+(`apps/supervisor/src/approve.ts`), on a bound project only.
 """
 from __future__ import annotations
 
@@ -959,6 +986,118 @@ def close_engagement(project_root: Path, engagement: str,
         if dry_run and any(n.startswith("dry run:") for n in notes):
             return _finish(result, "partial", "dry run: nothing written; a "
                            "real run would move as `notes[]` names")
+        return _finish(result, "complete", None)
+
+    return _locked(root, engagement, result, dry_run, run)
+
+
+def drop_comment(reason: str) -> str:
+    """The drop comment: names the reason, mentions nobody."""
+    return f"Dropped: {reason.strip()}"
+
+
+def drop_issues(project_root: Path, engagement: str, issues, reason,
+                dry_run: bool = False, transport=None, sleep=None) -> dict:
+    """The `drop` verb (DW-51; see the module docstring)."""
+    root = Path(project_root).resolve()
+    result = {"ok": False, "dry_run": dry_run, "engagement": engagement,
+              "issues": [], "skipped": [], "notes": [], "written": []}
+
+    def refuse(why: str) -> dict:
+        return _finish(result, "blocked", f"track refused: {why}")
+
+    if not ENGAGEMENT_ID_RE.match(engagement or ""):
+        return refuse(f"EngagementNotFound: --engagement {engagement!r} is "
+                      f"not an engagement id (ENG-001); no Atlassian call "
+                      f"made")
+    keys = list(dict.fromkeys(issues or []))
+    if not keys:
+        return refuse("NoIssue: give at least one --issue KEY; no Atlassian "
+                      "call made")
+    bad = [k for k in keys if not ISSUE_KEY_RE.match(str(k or ""))]
+    if bad:
+        return refuse(f"BadIssue: {', '.join(repr(k) for k in bad)} is not "
+                      f"a Jira issue key (TKS-12); no Atlassian call made")
+    if not str(reason or "").strip():
+        return refuse("ReasonMissing: drop needs --reason; no Atlassian call "
+                      "made")
+    settings, owner, gap = _agent_seat(root)
+    if gap:
+        return refuse(gap)
+    if not (root / ENGAGEMENTS_REL / engagement).is_dir():
+        return refuse(f"EngagementNotFound: no _bmad-output/engagements/"
+                      f"{engagement}/; no Atlassian call made")
+    body = drop_comment(str(reason))
+    target = jirabackend.DNI_STATUS
+
+    def run() -> dict:
+        client = jirabackend.client_for(settings, transport)
+        if sleep is not None:
+            client.sleep = sleep
+        notes, skipped = result["notes"], result["skipped"]
+        key = None
+        try:
+            # preflight, before any write: every issue not yet dropped must
+            # have a transition reaching DNI, so a refusal moves nothing
+            current: dict[str, str] = {}
+            for key in keys:
+                name, _ = jirabackend._current_status(client, key)
+                current[key] = name
+                if name in jirabackend.DROPPED_STATUS_NAMES:
+                    continue
+                if not _reaches(client, key, target):
+                    notes.append(f"{key} has no transition into {target!r} "
+                                 f"— the workflow lacks it (rerun "
+                                 f"`plansync.py setup`, or add the "
+                                 f"transition in the project's workflow)")
+                    return refuse(f"NoTransition: {key}: no transition "
+                                  f"reaches {target!r} from {name!r}; "
+                                  f"nothing moved or commented")
+            for key in keys:
+                name = current[key]
+                dropped = name in jirabackend.DROPPED_STATUS_NAMES
+                # already dropped: commented only when its newest agent
+                # comment is not this body (a retry after a failed comment)
+                if dropped and newest_agent_body(client, key, owner) == body:
+                    skipped.append(f"{key}: already in {name!r} with its "
+                                   f"drop comment")
+                    continue
+                if dry_run:
+                    notes.append(
+                        f"dry run: {key} would get the comment {body!r}"
+                        if dropped else
+                        f"dry run: {key} would move from {name!r} to "
+                        f"{target!r} with the comment {body!r}")
+                    continue
+                entry = {"issue": key, "transitioned": False,
+                         "commented": False}
+                result["issues"].append(entry)
+                if not dropped:
+                    tried: list[str] = []
+                    if jirabackend.transition_to_name(
+                            client, key, target, tried, engagement) is None:
+                        notes.extend(tried)
+                        return refuse(f"NoTransition: {key}: no transition "
+                                      f"reaches {target!r} from {name!r}")
+                    notes.extend(tried)
+                    entry["transitioned"] = True
+                else:
+                    notes.append(f"{key} already in {name!r} without its "
+                                 f"drop comment — commenting (no "
+                                 f"transition)")
+                jirabackend.add_comment(client, key, body)
+                entry["commented"] = True
+        except jirabackend.JiraError as exc:
+            if transient(exc):
+                result["retry"] = True
+                return _finish(result, "partial", f"track retry: {key}: "
+                               f"{exc} — a temporary failure; call again",
+                               ok=False)
+            return refuse(f"JiraRefused: {key}: {exc}")
+        if dry_run and any(n.startswith("dry run:") for n in notes):
+            return _finish(result, "partial", "dry run: nothing written; a "
+                           "real run would move and comment as `notes[]` "
+                           "names")
         return _finish(result, "complete", None)
 
     return _locked(root, engagement, result, dry_run, run)
@@ -1780,6 +1919,16 @@ def main(argv: list[str] | None = None) -> int:
                      help="project root (walks up to the nearest)")
     cls.add_argument("--engagement", required=True, help="ENG-NNN")
     cls.add_argument("--dry-run", action="store_true")
+    # DW-51: the superseded cycle's issues moved to DNI (validated in code: a
+    # refusal stays JSON, exit 2)
+    drp = sub.add_parser("drop")
+    drp.add_argument("--directory", required=True,
+                     help="project root (walks up to the nearest)")
+    drp.add_argument("--engagement", help="ENG-NNN")
+    drp.add_argument("--issue", action="append",
+                     help="a Jira issue key (repeatable)")
+    drp.add_argument("--reason")
+    drp.add_argument("--dry-run", action="store_true")
     rep = sub.add_parser("reply")
     rep.add_argument("--directory", required=True,
                      help="project root (walks up to the nearest)")
@@ -1867,6 +2016,12 @@ def main(argv: list[str] | None = None) -> int:
                              "track refused: give --story with --reason, or "
                              "--engagement with --kind and --reason; no "
                              "Atlassian call made")
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 2 if result.get("status") == "blocked" else 0
+    if args.command == "drop":
+        result = drop_issues(directory, args.engagement or "",
+                             args.issue or [], args.reason,
+                             dry_run=args.dry_run)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 2 if result.get("status") == "blocked" else 0
     if args.command == "close":

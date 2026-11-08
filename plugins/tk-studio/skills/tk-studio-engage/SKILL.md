@@ -235,9 +235,10 @@ presses through the supervisor's `POST /engagements/{id}/input`.
    the record (`basis` names the seed, the history, the route, the
    autonomy levels on offer, `planning_usd` and `scoping_billable`, and
    `at_cap`: the run pauses `partial`, the engagement's issue blocks with
-   the figures, the owner decides) and writes each proposed epic's
-   `epics.<EP-NNN>.usd_estimate` (its p85 dollars) into
-   `.tk-studio/budget-bands.yaml`. **The state does not move**: write the
+   the figures, the owner decides) with each proposed epic's p85 dollars
+   as `basis.epics[].usd_estimate`; `.tk-studio/budget-bands.yaml` is
+   neither read nor written (approve copies the figures onto the minted
+   EP ids). **The state does not move**: write the
    reply (mode 2) stating the band, the cap and what happens at the cap,
    never a bare number (say "thin history" when `basis.thin`), with the
    proposal `{"verb": "go", "payload": {}, "label": "Accept the quote"}`;
@@ -255,10 +256,8 @@ presses through the supervisor's `POST /engagements/{id}/input`.
    `scope.md`, no proposed story, a repeated `### Epic <k>` number, or
    proposed epics not numbered 1..m in order), `PricesUnreadable` (an
    unreadable `prices.json` or an unpriced route model), `QuoteUnwritable`
-   (the record or the bands refused by the OS, an unparseable
-   `budget-bands.yaml` or a top-level `epics:` scalar other than empty,
-   `~`, `null` or `{}`, an unreadable `measurements/`, or `scope.lock is
-   held` — the quote holds it from reading `scope.md` through the merge;
+   (the record refused by the OS, an unreadable `measurements/`, or
+   `scope.lock is held` — the quote holds it from reading `scope.md` through the merge;
    `written` names what had landed), plus the record's.
    A dry run writes nothing and ends `partial`.
 
@@ -323,8 +322,8 @@ If the deterministic core is unrunnable — a tool call denied by permissions, `
 - The only files written are the engagement's `chat.jsonl`, one line per
   reply, its `questions.json` (Story 32.3), and its `scope.md` with the
   record's `scope_page` and the Confluence scope page (Story 32.4), and the
-  record's `quote` with `.tk-studio/budget-bands.yaml`'s `epics` entries
-  (Story 32.5); the supervisor's `closeout` (Story 32.8) writes
+  record's `quote` (Story 32.5; its `basis.epics[].usd_estimate`, never
+  `.tk-studio/budget-bands.yaml`); the supervisor's `closeout` (Story 32.8) writes
   `closeout.md`, its Confluence page and the record's `closeout`; nothing
   is committed, nothing is promoted.
 - All paths resolve through `${CLAUDE_PLUGIN_ROOT}`.

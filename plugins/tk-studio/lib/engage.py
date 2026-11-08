@@ -129,9 +129,11 @@ per-story dollars). Each band is `{tokens, usd, share}`, the share over
 An unreadable `prices.json` or an unpriced route model is
 `PricesUnreadable`. The record is re-read fresh and only `quote {band50,
 band85, band95, cap, basis, computed_at}` and `updated` are merged into it
-(`cap` a number in USD); `.tk-studio/budget-bands.yaml` gains
-`epics.<EP-NNN>.usd_estimate` (the p85 dollars of each proposed epic, keyed
-by the id `plan-counter.yaml` predicts) with every other byte kept. The
+(`cap` a number in USD); each `basis.epics[]` entry carries
+`usd_estimate` (the p85 dollars of that proposed epic, `null` when it
+proposes no story) beside the `ep_id` `plan-counter.yaml` predicts. The
+quote never reads or writes `.tk-studio/budget-bands.yaml`: approve copies
+the record's figures onto the minted EP ids (DW-46, DW-50). The
 state does not move: the owner's `go` moves `scoping → quoted` (32.1's
 `quote-present` row). An OS refusal is `QuoteUnwritable` (`written` names
 what had landed).
@@ -187,7 +189,14 @@ leaves `page: null` with a note, never a refusal. Then `closeout {path,
 page, outcome, done, not_done, run_id, at}` alone is merged into a fresh
 read of the record; the state does not move here (the supervisor applies
 `run-ended`). A 429, a 5xx or an OS refusal ends `partial` with `retry:
-true`. The result is `{status, engagement, outcome, page, written[]}`.
+true`. The result is `{status, engagement, outcome, page, stories_left,
+written[]}`: `stories_left` (DW-52/DW-53, additive) the keys, deduplicated
+in first-seen order, of every story judged `story <key> not landed` (each
+proposed story of a queued epic whose landed entry is missing or not
+`spec_status: done`; with no proposed stories, each landed entry not
+`done`), `[]` when every story landed — the supervisor's "stories remain"
+predicate for a `go` after an unstopped run end. The record's `closeout`
+merge is unchanged.
 
 Refusals end `blocked` (exit 2), each named in `reason`: `BadEngagement`,
 `UnknownEngagement` (no record), `EngagementRecordUnreadable` (not JSON, or
@@ -1565,8 +1574,9 @@ def quote(project_root: Path, engagement: str, seed: int | None = None,
           lock_wait_s=SCOPE_LOCK_WAIT_S) -> dict:
     """The `quote` verb (Story 32.5 Settled shape 2): the seeded 50/85/95
     band over the scope's proposed stories, merged as `quote` (and
-    `updated`) into a fresh read of the record, and `epics.<EP-NNN>.
-    usd_estimate` in `.tk-studio/budget-bands.yaml`. The state stays
+    `updated`) into a fresh read of the record, each proposed epic's p85
+    dollars recorded as `basis.epics[].usd_estimate` (the bands file is
+    neither read nor written: approve copies the figures). The state stays
     `scoping`: the owner's `go` moves it to `quoted` (Settled shape 3)."""
     import consolidate
     import ledger
@@ -1659,6 +1669,8 @@ def quote(project_root: Path, engagement: str, seed: int | None = None,
                       else f"EP-{nxt + e['k'] - 1:03d}"}
                      for e in counts["epics"]]
             figures = quotelib.compute(samples, n, epics, seed, window)
+            for e in epics:
+                e["usd_estimate"] = figures["epic_usd"].get(e["k"])
             def planning_of(rec: dict):
                 spend = rec.get("spend") if isinstance(rec.get("spend"),
                                                        dict) else {}
@@ -1691,31 +1703,16 @@ def quote(project_root: Path, engagement: str, seed: int | None = None,
             result["notes"].extend(figures["notes"])
             if window is None:
                 result["notes"].append("share unknown: no plan.window_tokens")
-            estimates = {e["ep_id"]: figures["epic_usd"][e["k"]] for e in epics
-                         if e["ep_id"] and e["k"] in figures["epic_usd"]}
+            estimates = {e["ep_id"]: e["usd_estimate"] for e in epics
+                         if e["ep_id"] and e["usd_estimate"] is not None}
             if nxt is None:
                 result["notes"].append(".tk-studio/plan-counter.yaml is "
-                                       "unreadable: no epics band written")
-            bands_path = root / quotelib.BANDS_REL
-            bands_rel = quotelib.BANDS_REL.as_posix()
-            try:
-                current = bands_path.read_text(encoding="utf-8") \
-                    if bands_path.is_file() else None
-            except (OSError, UnicodeDecodeError) as exc:
-                raise Refused("QuoteUnwritable", f"{bands_rel}: "
-                              f"{exc.__class__.__name__}") from None
-            try:
-                bands_text = quotelib.epic_bands_text(current, estimates) \
-                    if estimates else None
-            except quotelib.QuoteError as exc:
-                raise Refused("QuoteUnwritable", str(exc)) from None
+                                       "unreadable: no EP id predicted")
             result["bands"] = estimates
             if dry_run:
-                result["notes"].append("dry run: the quote was not merged and "
-                                       "the bands not written")
+                result["notes"].append("dry run: the quote was not merged")
                 return _finish(result, "partial", "dry run: nothing "
-                               "written; a real run would merge `quote` and "
-                               "write the bands")
+                               "written; a real run would merge `quote`")
             fresh = read_record(root, engagement)  # the state may have moved
             if fresh.get("state") in TERMINAL_STATES:
                 raise Refused("EngagementClosed", f"{engagement} is "
@@ -1739,14 +1736,6 @@ def quote(project_root: Path, engagement: str, seed: int | None = None,
                 raise Refused("QuoteUnwritable", f"{record_rel}: "
                               f"{exc.__class__.__name__}") from None
             result["written"].append(record_rel)
-            if bands_text is not None and bands_text != current:
-                try:
-                    bands_path.parent.mkdir(parents=True, exist_ok=True)
-                    atomic_write_text(bands_path, bands_text)
-                except OSError as exc:
-                    raise Refused("QuoteUnwritable", f"{bands_rel}: "
-                                  f"{exc.__class__.__name__}") from None
-                result["written"].append(bands_rel)
             return _finish(result, "complete", None)
 
         if dry_run:
@@ -1943,15 +1932,10 @@ def _cell(value) -> str:
     return text.replace("|", "\\|").replace("\n", " ")
 
 
-def closeout_verdicts(text: str, data: dict) -> list[dict]:
-    """Each deliverable's verdict (Settled shape 3): `[{title, signal,
-    done, why, stories: [key], prs: [url]}]`. A deliverable's stories are
-    the proposed stories naming its title (case-insensitive), else every
-    proposed story; the i-th proposed epic is the i-th declared job
-    (`run-epic-N`), its story `m` the landed key `N-m-…`. `done` when each
-    landed (`spec_status: done`) and its PR is `MERGED`; else the first
-    why of `no acceptance signal`, `epic not run`, `story <key> not
-    landed`, `PR <url> not merged`."""
+def _closeout_members(text: str, data: dict) -> list[dict]:
+    """Every proposed story with its epic's `queued`, its landed entry (the
+    newest `done` hit of `N-m`, else the newest hit, else None) and the key
+    it is shown under: `[{title, body, queued, entry, key}]`."""
     epics = data.get("epics") or []
     landed = data.get("stories") or []
     proposed = _proposed_stories(text)
@@ -1975,6 +1959,43 @@ def closeout_verdicts(text: str, data: dict) -> list[dict]:
             members_all.append({"title": story["title"],
                                 "body": story["body"], "queued": queued,
                                 "entry": entry, "key": shown})
+    return members_all
+
+
+def closeout_stories_left(text: str, data: dict) -> list[str]:
+    """DW-52/DW-53 (contract 0.1.34, additive): the keys, deduplicated in
+    first-seen order, of every story `closeout_verdicts` judges not
+    landed — each proposed story of a queued epic whose landed entry is
+    missing or not `spec_status: done`, under the key `story <key> not
+    landed` shows (with no proposed stories, each landed entry not
+    `done`). Empty when every story landed; a PR not merged alone leaves
+    it empty. The supervisor's single "stories remain" predicate."""
+    members_all = _closeout_members(text, data)
+    if not members_all:
+        members_all = [{"queued": True, "entry": s, "key": s.get("key")}
+                       for s in data.get("stories") or []]
+    out: list[str] = []
+    for s in members_all:
+        landed_done = (s["entry"] or {}).get("spec_status") == "done"
+        if not s["queued"] or landed_done:
+            continue
+        key = str(s["key"])
+        if key not in out:
+            out.append(key)
+    return out
+
+
+def closeout_verdicts(text: str, data: dict) -> list[dict]:
+    """Each deliverable's verdict (Settled shape 3): `[{title, signal,
+    done, why, stories: [key], prs: [url]}]`. A deliverable's stories are
+    the proposed stories naming its title (case-insensitive), else every
+    proposed story; the i-th proposed epic is the i-th declared job
+    (`run-epic-N`), its story `m` the landed key `N-m-…`. `done` when each
+    landed (`spec_status: done`) and its PR is `MERGED`; else the first
+    why of `no acceptance signal`, `epic not run`, `story <key> not
+    landed`, `PR <url> not merged`."""
+    landed = data.get("stories") or []
+    members_all = _closeout_members(text, data)
     out = []
     for d in closeout_deliverables(text):
         folded = d["title"].casefold()
@@ -2324,7 +2345,9 @@ def closeout(project_root: Path, engagement: str, data, dry_run: bool = False,
                                meter, reports)
         done = sum(1 for v in verdicts if v["done"])
         result.update({"outcome": outcome, "closeout": rel, "done": done,
-                       "not_done": len(verdicts) - done})
+                       "not_done": len(verdicts) - done,
+                       "stories_left": closeout_stories_left(scoped["text"],
+                                                             data)})
         if dry_run:
             result["notes"].append("dry run: closeout.md was not written, "
                                    "the page not published")

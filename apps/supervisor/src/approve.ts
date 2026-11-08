@@ -17,8 +17,28 @@
  *                pass re-runs the sync in it, never a second append):
  *                the served root's checkout is never switched or dirtied), under a cross-process lockfile beside it
  *                (`….lock`, a dead pid's reclaimed). Every step event is scoped to the newest `approve` line, so a
- *                re-approval after `revise` runs the pass again. Inputs (`scope.md`, the record, the budget-bands
- *                values) are read from the served root.
+ *                re-approval after `revise` runs the pass again. Inputs (`scope.md`, the record) are read from the
+ *                served root; the per-epic dollars come from the record (`quote.basis.epics[].usd_estimate`), never
+ *                from the served root's budget-bands file (DW-46, DW-50).
+ *                DW-49 (owner decision A): before a cycle starts (no ok `append` since the newest approve line), the
+ *                pass WAITS while another engagement's approve PR for the same project is still open — scoped to its
+ *                newest approve line, an ok `append` with no ok `queued` and no `PrClosed` refusal after it, with no
+ *                ok `pr` yet or `gh pr view --json state` answering `OPEN` (a gh failure counts as open), or — whatever
+ *                its newest cycle shows — its newest ok `pr` across all its cycles, with no ok `queued` and no `PrClosed`
+ *                refusal after it, still `OPEN` (an earlier PR open after a revise); a cancelled, absent or
+ *                never-approved other engagement releases (an unreadable one holds while its events show an ok
+ *                `append` with no ok `queued` and no `PrClosed` refusal after it) — recorded once as
+ *                `append` false `WaitOpenPr: <other>'s approve PR <url | pending | unknown (record unreadable)> for
+ *                project <p> is still open (retried each pass)` with `wait: true` and `holder {engagement, pr}`
+ *                (`unreadable: true` for an unreadable record), in none of done/refused/failed; a cycle already past
+ *                `append` never waits. DW-51 (owner decision A): on a fresh re-approval cut from
+ *                `origin/engagement/ENG-NNN` of a Jira-bound project, after `worktree add` and before the tree reset
+ *                and the second sync, the earlier cycle's promoted issues (by provenance: the `external.jira.key` of
+ *                the plan entities at the branch's HEAD whose `source` is `epics.md#epic-N` / `epics.md#story-N.<m>`
+ *                for each `## Epic N` there whose first body line is `engagement: ENG-NNN`, less any key a
+ *                default-branch plan entity carries) are moved to `DNI` through `track.py drop`; the ok `append`
+ *                detail carries `dropped: [keys]`; a transient failure fails `append` `DropFailed: …`, a refusal
+ *                `DropRefused: <reason>`, both removing the worktree (retried next pass).
  *                The steps, in order, each one `engagement-approve {id, project, step, ok, detail}` service event (a
  *                failed step is retried at the next pass and never moves the state; the pass writes nothing into the
  *                record; a failure equal to the step's newest event is not repeated):
@@ -33,9 +53,10 @@
  *                  job     each appended epic's `run-epic-N` job declared (`.tk-studio/jobs/run-epic-N.json` and its id
  *                          appended to `.tk-studio/config.yaml`'s `jobs:`, every other byte kept; Story 34.8: `type:
  *                          "run-vertical-slice"` when the record carries `game: true`, else `"run-epic"`), and
- *                          `.tk-studio/budget-bands.yaml` re-keyed: each `quote.basis.epics[].ep_id`'s `usd_estimate`
- *                          (read from the served root) moved to the minted EP id in `quote.epic_bands_text`'s byte
- *                          shape, other entries kept; a `null` `ep_id` writes no band and is named in `no_band`;
+ *                          the worktree's `.tk-studio/budget-bands.yaml` given each appended epic's band: the record's
+ *                          `quote.basis.epics[].usd_estimate` (matched by `k`) set on the minted EP id in
+ *                          `quote.epic_bands_text`'s byte shape, every other entry kept (none removed); an epic with no
+ *                          minted EP id or no `usd_estimate` writes no band and is named in `no_band`;
  *                  commit  exactly one commit of the union of plansync's `written[]` (its `removed[]` staged as deletions) and the files this pass wrote
  *                          (on a cut from the engagement branch, also the reset to the default branch's tree), pushed
  *                          to origin as a plain fast-forward, never forced (a rejection: `NonFastForward`, retried: the next pass,
@@ -46,7 +67,11 @@
  *                          `detail.pr {number, url}` — main is protected, the plan change is reviewed like any change;
  *                  queued  the first epic's job queued with `payload {engagement, project}` once `gh pr view` says
  *                          `MERGED`, in every case (an OPEN PR queues nothing; the job resolves from the served root
- *                          only once the PR lands — operator ruling 2026-10-25, option (c)); the approval's
+ *                          only once the PR lands — operator ruling 2026-10-25, option (c)); before the submit the
+ *                          served checkout is pulled fast-forward-only (`git pull --ff-only origin <the PR's base>`),
+ *                          refused by name and retried at the next pass: `DirtyCheckout` (a tracked file modified or
+ *                          staged; untracked files do not count; never stashed, reset or cleaned), `NotOnBase` (the
+ *                          checkout is on another branch), `PullFailed` (the pull exited non-zero); the approval's
  *                          `base_ref`, when given, is passed to that run as its `base_ref` (its worktree cut from it),
  *                          else the run cuts from the default branch; `detail.run_id` and the placement; then
  *                          `engagement-run-queued {engagement, project, run_id, job}` and the step `done`.
@@ -66,7 +91,14 @@
  *                - Story 32.8: a mid-run `revise` (any linked run of any cycle live while the record is `scoping`)
  *                  stops each live engine gracefully with reason `revise` (a still-queued run cancelled), once per
  *                  engine, and resubmits nothing (a re-approval starts a new cycle); a run that ends on its own (the
- *                  epic done, or failed) is `delivery.ts`'s closeout pass (`run-ended`, the report, the issue Done).
+ *                  epic done, or failed) is `delivery.ts`'s closeout pass (`run-ended`, the report, the issue Done);
+ *                - DW-53 (TKSTUDIO-218, option A): once that close-out left the record `partial` and an owner `go
+ *                  {cap}` moved it back to `in-progress` (a `go` line after the run's ok `engagement-closeout`, no
+ *                  stop and no `after_run` naming the run, under the cap), step 7 resubmits the run's job exactly as
+ *                  for a stopped run (same submit, `base_ref`, payload, recheck and `after_run`) when the close-out
+ *                  event's `stories_left` (engage.py's not-landed verdict) names a key of the job's epic (`N-…` for
+ *                  `run-epic-N`, any key for a job name not ending in digits; a missing field counts as none),
+ *                  else resubmits nothing and the closeout pass re-closes the run (`goAfterEnd`, shared by both).
  *                Events: `engagement-run-stop {engagement, project, run_id, engine_run_id, reason, story_key?, ok,
  *                detail}`, `engagement-cap {engagement, project, run_id, runs_usd, cap, notify}`,
  *                `engagement-continue {engagement, project, comment}`, `engagement-issue {…, action: "blocked", kind}`
@@ -81,7 +113,6 @@
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { load as loadYaml } from "js-yaml";
 import { jobRunCosts } from "./board";
 import { frontmatter, jiraBound, storyLanded } from "./closeout";
 import {
@@ -133,6 +164,9 @@ export const RUN_QUEUED_EVENT = "engagement-run-queued";
 export const RUN_STOP_EVENT = "engagement-run-stop";
 export const CAP_EVENT = "engagement-cap";
 export const CONTINUE_EVENT = "engagement-continue";
+/** `delivery.ts`'s closeout event (re-exported there as `CLOSEOUT_EVENT`); defined here so step 7 reads it without
+ * importing delivery.ts (which imports this module). */
+export const CLOSEOUT_EVENT = "engagement-closeout";
 export const APPROVE_STEPS = ["append", "sync", "job", "commit", "pr", "queued"] as const;
 export type ApproveStep = typeof APPROVE_STEPS[number] | "done";
 
@@ -311,7 +345,7 @@ export function proposedEpics(text: string, id: string): { ok: true; epics: Prop
 }
 
 /** `epics.md` with the proposed epics appended as `## Epic N` (N = the highest `## Epic` number + 1, + 2, … in the
- * scope's order, contiguous whatever the scope's own numbers; each keeps its `k` for the band re-key), each first body
+ * scope's order, contiguous whatever the scope's own numbers; each keeps its `k` for the band copy), each first body
  * line `engagement: ENG-NNN`, its stories `### Story N.M:` (see the header). `reserved`: the epic numbers other
  * engagements' unmerged approvals hold (`reservedEpics`), counted in that highest number. */
 export function appendEpics(
@@ -488,6 +522,142 @@ function reservedEpics(queue: Queue, project: string, id: string): number[] {
   return [...out];
 }
 
+/** DW-49 (TKSTUDIO-216, owner decision A): another engagement of `project` whose approve cycle is still open, so this
+ * engagement's cycle waits before it starts (both would `plansync sync` from the same branch-local `plan-counter.yaml`
+ * and mint the same EP/ST ids). Held: the other's events scoped to ITS newest approve line hold an ok `append` with no
+ * ok `queued` and no `queued` refusal starting `PrClosed` at or after it — with no ok `pr` yet (appended, synced or
+ * committed, the PR pending: `pr: null`, no gh call), or with an ok `pr` whose `gh pr view <url> --json state` answers
+ * `OPEN` (a gh failure or an unreadable answer counts as open: asked again at the next pass; `MERGED`/`CLOSED` does not
+ * hold). Also held (Spec Change Log #3), whatever its newest cycle shows: its newest ok `pr` across ALL its cycles with
+ * no ok `queued` and no `PrClosed` refusal at or after it, while gh answers `OPEN` (a gh failure holds) — an earlier PR
+ * still open after a revise, whose ids are on origin until the re-approval replaces them. Released when the other's
+ * record is absent, has no approve line, or is `cancelled`. An unreadable record holds (`unreadable: true`, its PR
+ * unknown) only while its events (any cycle) show an ok `append` with no ok `queued` and no `PrClosed` refusal after
+ * it. Null: none. */
+async function openPrHolder(queue: Queue, deps: ApproveDeps, t: Target, project: string, id: string): Promise<{ engagement: string; pr: string | null; unreadable?: true } | null> {
+  const others = queue.serviceEvents(APPROVE_EVENT).filter((e) => e.detail?.project === project && typeof e.detail?.id === "string" && e.detail.id !== id);
+  const lastOk = (evs: typeof others, step: ApproveStep) => evs.findLast((e) => e.detail?.step === step && e.detail?.ok === true);
+  // an ok queued, or a queued refusal starting PrClosed, at or after `at`: that cycle's PR is settled
+  const settledSince = (evs: typeof others, at: string) => evs.some((e) => e.detail?.step === "queued" && e.at >= at
+    && (e.detail?.ok === true || (e.detail?.ok === false && String(stepDetail(e).reason ?? "").startsWith("PrClosed"))));
+  const urlOf = (e: (typeof others)[number]): string | null => {
+    const recorded = stepDetail(e).pr;
+    return isObject(recorded) && typeof recorded.url === "string" && recorded.url ? recorded.url : null;
+  };
+  // gh's answer: MERGED/CLOSED releases; OPEN, a gh failure or an unreadable answer holds (asked again next pass)
+  const stillOpen = async (url: string): Promise<boolean> => {
+    try {
+      const r = await gh(deps, t.root, ["pr", "view", url, "--json", "state"]);
+      const view = r.exit === 0 ? lastJsonObject(r.stdout) as Record<string, unknown> | null : null;
+      const state = typeof view?.state === "string" ? view.state.toUpperCase() : undefined;
+      return state !== "MERGED" && state !== "CLOSED";
+    } catch { return true; }
+  };
+  for (const other of [...new Set(others.map((e) => e.detail!.id as string))]) {
+    const all = others.filter((e) => e.detail?.id === other);
+    let record: Engagement | null;
+    try { record = readEngagement(t.root, other); } catch {
+      // unreadable: held only while its events (any cycle) show a cycle still open
+      const append = lastOk(all, "append");
+      if (append && !settledSince(all, append.at)) return { engagement: other, pr: null, unreadable: true };
+      continue;
+    }
+    if (!record || record.state === "cancelled") continue;
+    const line = approveLine(record);
+    if (!line) continue;
+    const mine = all.filter((e) => e.at >= line.at);
+    let asked: string | null = null;
+    const append = lastOk(mine, "append");
+    if (append && !settledSince(mine, append.at)) {
+      const pr = mine.findLast((e) => e.detail?.step === "pr" && e.detail?.ok === true && e.at >= append.at);
+      if (!pr) return { engagement: other, pr: null };
+      const url = urlOf(pr); // the pr step always records one
+      if (url) {
+        if (await stillOpen(url)) return { engagement: other, pr: url };
+        asked = url;
+      }
+    }
+    // an earlier cycle's PR still open (revised and re-approved, the new cycle not yet past it)
+    const newest = lastOk(all, "pr");
+    if (!newest || settledSince(all, newest.at)) continue;
+    const url = urlOf(newest);
+    if (!url || url === asked) continue;
+    if (await stillOpen(url)) return { engagement: other, pr: url };
+  }
+  return null;
+}
+
+/** DW-51: the Jira keys (`external.jira.key`) the earlier cycle of `id` promoted, by provenance (Spec Change Log #2: no
+ * merge-base, no diff — a `read-tree --reset` commit is not a merge, so a second re-approval's merge-base stays at the
+ * original cut): the earlier cycle's epic numbers N are the `## Epic N` sections of `epics.md` at the branch's HEAD
+ * (checked out in `wt`, before the reset) whose first body line is `engagement: <id>`; the keys are those of the plan
+ * entities at HEAD whose `source` is `epics.md#epic-N` or starts `epics.md#story-N.` for those N, leaving out any key a
+ * plan entity of `defaultRef` also carries (a matched default-branch file whose frontmatter will not parse keeps every
+ * candidate key found in its text off the list); deduped and sorted. Throws when a read or git cannot answer. */
+async function supersededKeys(deps: ApproveDeps, wt: string, prefix: string, defaultRef: string, id: string): Promise<string[]> {
+  const lines = readFileSync(join(wt, `${prefix}${EPICS_REL}`), "utf-8").split(/\r?\n/);
+  const ns = new Set<number>();
+  for (let i = 0; i < lines.length; i++) {
+    const m = EPIC_HEAD_RE.exec(lines[i]!);
+    if (!m) continue;
+    let j = i + 1;
+    while (j < lines.length && !lines[j]!.trim()) j++;
+    if (j < lines.length && lines[j]!.trim() === `engagement: ${id}`) ns.add(Number(m[1]));
+  }
+  if (!ns.size) return [];
+  const keyOf = (fm: Record<string, unknown>): string => {
+    const jira = isObject(fm.external) && isObject(fm.external.jira) ? fm.external.jira : null;
+    return typeof jira?.key === "string" ? jira.key.trim() : "";
+  };
+  const parse = (text: string): Record<string, unknown> | null => { try { return frontmatter(text); } catch { return null; } };
+  const planRel = `${prefix}${PLAN_DIR_REL}`;
+  let names: string[];
+  try { names = readdirSync(join(wt, planRel)).filter((n) => n.endsWith(".md")); }
+  catch (e) { if ((e as NodeJS.ErrnoException)?.code === "ENOENT") return []; throw e; }
+  const keys = new Set<string>();
+  for (const name of names.sort()) {
+    const fm = parse(readFileSync(join(wt, planRel, name), "utf-8"));
+    if (!fm) continue;
+    const source = typeof fm.source === "string" ? fm.source.trim() : "";
+    const m = /^epics\.md#(?:epic-(\d+)$|story-(\d+)\.)/.exec(source);
+    if (!m || !ns.has(Number(m[1] ?? m[2]))) continue;
+    const key = keyOf(fm);
+    if (key) keys.add(key);
+  }
+  if (!keys.size) return [];
+  // a key a default-branch plan entity also carries is live there: never dropped
+  const grep = await git(deps, wt, ["grep", "-l", "-F", ...[...keys].flatMap((k) => ["-e", k]), defaultRef, "--", `${planRel}/`], 60);
+  if (grep.exit !== 0 && grep.exit !== 1) throw new Error(`git grep ${failed(grep)}`);
+  for (const hit of grep.exit === 0 ? grep.stdout.split(/\r?\n/).map((l) => l.trim()).filter(Boolean) : []) {
+    const rel = hit.startsWith(`${defaultRef}:`) ? hit.slice(defaultRef.length + 1) : hit;
+    const shown = await git(deps, wt, ["show", `${defaultRef}:${rel}`], 60);
+    if (shown.exit !== 0) throw new Error(`git show ${failed(shown)}`);
+    // `frontmatter` answers `{}` for a fence or YAML that will not parse: every candidate key in such a file's text
+    // may be live there, so none of them is dropped
+    const fm = parse(shown.stdout);
+    if (fm && Object.keys(fm).length) keys.delete(keyOf(fm));
+    else for (const k of [...keys]) if (shown.stdout.includes(k)) keys.delete(k);
+  }
+  return [...keys].sort();
+}
+
+/** DW-51 (TKSTUDIO-217, owner decision A): `track.py drop --engagement --issue <key>… --reason <reason>` on the host
+ * (the `trackBlock` pattern): the earlier cycle's promoted issues moved to `DNI` before the re-approval's sync. Answers
+ * ok, or the `append` refusal (`DropFailed: …` for a transient failure, `DropRefused: <track's reason>` for a refusal). */
+async function dropSuperseded(deps: ApproveDeps, root: string, id: string, keys: string[], reason: string): Promise<{ ok: true } | { ok: false; reason: string }> {
+  let r: RunResult;
+  try {
+    r = await uvRunner(deps)(root, studioScript(deps, "lib", "track.py"),
+      ["drop", "--directory", root, "--engagement", id, ...keys.flatMap((k) => ["--issue", k]), "--reason", reason], 120);
+  } catch (e) { return { ok: false, reason: `DropFailed: track.py drop: ${clip(message(e))}` }; }
+  const out = lastJsonObject(r.stdout) as Record<string, any> | null;
+  const said = typeof out?.reason === "string" && out.reason ? clip(out.reason) : "";
+  if (!out || typeof out.status !== "string" || out.retry === true) return { ok: false, reason: `DropFailed: ${said || `track.py drop ${failed(r)}`}` };
+  if (out.status === "blocked") return { ok: false, reason: `DropRefused: ${said || "track refused"}` };
+  if (out.status !== "complete") return { ok: false, reason: `DropFailed: track.py drop ended ${out.status}${said ? `: ${said}` : ""}` };
+  return { ok: true };
+}
+
 /** Whether the process `pid` lives (EPERM: it does, another user's). */
 function pidAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch (e) { return (e as NodeJS.ErrnoException)?.code === "EPERM"; }
@@ -608,12 +778,26 @@ async function worktreeSteps(queue: Queue, deps: ApproveDeps, t: Target, record:
       if (refused) return fail("append", refused);
     }
   }
+  let dropped: string[] = []; // DW-51: the earlier cycle's issues moved to DNI on this cut
   if (mode === "fresh") {
     if (existsSync(wt)) await removeWorktree();
     try {
       mkdirSync(dirname(wt), { recursive: true });
       const add = await git(deps, top, ["worktree", "add", "--relative-paths", wt, "-B", branch, base]);
       if (add.exit !== 0) return fail("append", `WorktreeAdd: git worktree add ${failed(add)}`);
+      if (onBranch && jiraBound(t.root)) {
+        // DW-51: before the reset and the second sync, the issues the earlier plan promoted (by provenance: this
+        // engagement's `## Epic N` entities' keys) moved to the dropped status; a failure removes the fresh worktree
+        let keys: string[];
+        try { keys = await supersededKeys(deps, wt, prefix, defaultRef, id); }
+        catch (e) { await removeWorktree(); return fail("append", `DropFailed: ${clip(message(e))}`); }
+        if (keys.length) {
+          const d = await dropSuperseded(deps, t.root, id, keys,
+            `${id} re-approved after revise (approve ${since}): the earlier plan this issue came from is replaced wholesale`);
+          if (!d.ok) { await removeWorktree(); return fail("append", d.reason); }
+          dropped = keys;
+        }
+      }
       if (onBranch) {
         // the earlier plan replaced wholesale in content: the index and the files reset to the default branch's tree
         const reset = await git(deps, wt, ["read-tree", "-u", "--reset", defaultRef]);
@@ -666,7 +850,7 @@ async function worktreeSteps(queue: Queue, deps: ApproveDeps, t: Target, record:
         const appended = appendEpics(epicsText, proposed, id, reservedEpics(queue, project, id));
         atomicWrite(join(served, EPICS_REL), appended.text);
         ours.add(EPICS_REL);
-        emit("append", true, { epics: appended.epics });
+        emit("append", true, { epics: appended.epics, ...(dropped.length ? { dropped } : {}) });
         appendedEpics = appended.epics;
       }
       // sync (normalize, then the projection)
@@ -687,7 +871,7 @@ async function worktreeSteps(queue: Queue, deps: ApproveDeps, t: Target, record:
       emit("sync", true, { written: rel(written), ...(removed.length ? { removed: rel(removed) } : {}) });
       keep = true;
     }
-    // job: the run-epic-N jobs, then the band re-key
+    // job: the run-epic-N jobs, then the bands copied from the record
     step = "job";
     const minted = mintedEpics(served, appendedEpics.map((e) => e.n));
     const jobs: string[] = [];
@@ -720,28 +904,22 @@ async function worktreeSteps(queue: Queue, deps: ApproveDeps, t: Target, record:
     atomicWrite(join(served, CONFIG_REL), config);
     ours.add(CONFIG_REL);
     const basis = isObject(record.quote) && isObject(record.quote.basis) && Array.isArray(record.quote.basis.epics) ? record.quote.basis.epics : [];
-    let servedBands: Record<string, unknown> = {};
-    try {
-      const doc = loadYaml(readFileSync(join(t.root, BANDS_REL), "utf-8")) as Record<string, unknown> | null;
-      if (isObject(doc) && isObject(doc.epics)) servedBands = doc.epics;
-    } catch { /* no bands: nothing re-keyed */ }
+    // DW-46, DW-50: the figures come from the record (keyed by `k` to the minted id), never from the served root's
+    // shared bands file, and no entry is removed (the predicted id may be another engagement's minted band)
     const estimates: Record<string, number> = {};
-    const moved: string[] = [];
     const noBand: Detail[] = [];
     for (const e of appendedEpics) {
       const b = basis.find((x) => isObject(x) && x.k === e.k) as Record<string, unknown> | undefined;
-      const ep = b?.ep_id, mintedId = minted.get(e.n);
-      if (typeof ep !== "string" || !ep) { noBand.push({ k: e.k, n: e.n, reason: "ep_id null" }); continue; }
+      const ep = typeof b?.ep_id === "string" && b.ep_id ? b.ep_id : null, mintedId = minted.get(e.n);
       if (!mintedId) { noBand.push({ k: e.k, n: e.n, ep_id: ep, reason: "no minted EP id" }); continue; }
-      const usd = isObject(servedBands[ep]) ? num((servedBands[ep] as Record<string, unknown>).usd_estimate) : undefined;
+      const usd = num(b?.usd_estimate);
       if (usd === undefined) { noBand.push({ k: e.k, n: e.n, ep_id: ep, reason: "no usd_estimate" }); continue; }
       estimates[mintedId] = usd;
-      if (ep !== mintedId) moved.push(ep);
     }
     if (Object.keys(estimates).length) {
       let bands: string | null = null;
       try { bands = readFileSync(join(served, BANDS_REL), "utf-8"); } catch { /* absent: a new file */ }
-      try { atomicWrite(join(served, BANDS_REL), rekeyBands(bands, estimates, moved)); } catch (err) { return fail("job", clip(message(err))); }
+      try { atomicWrite(join(served, BANDS_REL), rekeyBands(bands, estimates)); } catch (err) { return fail("job", clip(message(err))); }
       ours.add(BANDS_REL);
     }
     emit("job", true, {
@@ -828,7 +1006,7 @@ async function prStep(queue: Queue, deps: ApproveDeps, t: Target, project: strin
       try {
         const body = join(dir, "body.md");
         writeFileSync(body, `The plan engagement ${t.engagement} approved (Story 32.6): the scope's proposed epics and stories in \`epics.md\`, `
-          + `the plan entities \`plansync sync\` wrote, the run-epic job and the re-keyed budget band. Reviewed like any change; `
+          + `the plan entities \`plansync sync\` wrote, the run-epic job and the budget band copied from the quote. Reviewed like any change; `
           + `the first run is queued on its merge (cut from the approval's \`base_ref\` when it named one, else from the default branch).\n`, "utf-8");
         const created = await gh(deps, t.root, ["pr", "create", "--base", base, "--head", branch, "--title", `${t.engagement}: the approved plan`, "--body-file", body]);
         if (created.exit !== 0) return fail(`gh pr create ${failed(created)}`);
@@ -861,6 +1039,21 @@ async function queueStep(queue: Queue, deps: ApproveDeps, t: Target, record: Eng
   if (state === "CLOSED") return fail(`PrClosed: ${url} was closed unmerged`);
   if (state !== "MERGED") return false; // OPEN, or gh failed: asked again at the next pass
   if (!deps.submit) return fail("NoSubmitter: no run submitter wired");
+  // DW-50: the served checkout fast-forwarded to the merged base before the run resolves its job from it; a dirty or
+  // off-base checkout is refused by name (never stashed, reset or cleaned) and retried at the next pass
+  const prBase = stepDetail(okStep(queue, project, t.engagement, since, "pr")).base;
+  const base = typeof prBase === "string" && prBase ? prBase : "main";
+  try {
+    const status = await git(deps, t.root, ["status", "--porcelain", "--untracked-files=no"], 60);
+    if (status.exit !== 0) return fail(`PullFailed: git status ${failed(status)}`);
+    const dirty = status.stdout.split(/\r?\n/).filter((l) => l.trim()).map((l) => l.slice(3));
+    if (dirty.length) return fail(`DirtyCheckout: ${t.root} has uncommitted changes (${dirty.slice(0, 3).join(", ")})`);
+    const head = await git(deps, t.root, ["rev-parse", "--abbrev-ref", "HEAD"], 30);
+    const branch = head.exit === 0 ? head.stdout.trim() : "";
+    if (branch !== base) return fail(`NotOnBase: ${t.root} is on ${branch || "an unknown branch"}, the PR merged into ${base}`);
+    const pulled = await git(deps, t.root, ["pull", "--ff-only", "-q", "origin", base], 300);
+    if (pulled.exit !== 0) return fail(`PullFailed: ${clip(pulled.stderr || pulled.stdout)}`);
+  } catch (e) { return fail(`PullFailed: ${clip(message(e))}`); }
   const payload = { engagement: t.engagement, project };
   let queued: { run_id: string; placement?: Record<string, unknown> | null };
   try { queued = await deps.submit(jobId, t.root, { ...(baseRef ? { baseRef } : {}), payload }); }
@@ -891,6 +1084,18 @@ async function approveStep(queue: Queue, deps: ApproveDeps, t: Target, out: Appr
       emitStep(queue, deps, t, project, since, "append", false, { reason: `NotApproved: ${id} is ${record.state}, not approved` });
       out.refused.push(id);
       return;
+    }
+    // DW-49: before this cycle starts (no ok append yet), wait while another engagement's approve PR for the project
+    // is still open; told once (emitStep's dedupe), in none of done/refused/failed, the state never moved
+    if (!okStep(queue, project, id, since, "append")) {
+      const holder = await openPrHolder(queue, deps, t, project, id);
+      if (holder) {
+        emitStep(queue, deps, t, project, since, "append", false, {
+          reason: `WaitOpenPr: ${holder.engagement}'s approve PR ${holder.unreadable ? "unknown (record unreadable)" : holder.pr ?? "pending"} for project ${project} is still open (retried each pass)`,
+          wait: true, holder,
+        });
+        return;
+      }
     }
     if (!okStep(queue, project, id, since, "commit") && !(await worktreeSteps(queue, deps, t, record, since))) { out.failed.push(id); return; }
     if (!okStep(queue, project, id, since, "pr") && !(await prStep(queue, deps, t, project, since))) { out.failed.push(id); return; }
@@ -927,6 +1132,30 @@ export function linksOf(queue: Queue, project: string, id: string, since?: strin
 }
 
 export const stops = (queue: Queue, project: string, id: string) => eventsFor(queue, RUN_STOP_EVENT, project, id);
+
+/** DW-53 (TKSTUDIO-218, option A): an owner `go` after an unstopped end of `runId` (the linked run of `job`) — the
+ * record `in-progress`, the run terminal, no ok stop naming it, no `after_run` naming it, an ok `engagement-closeout`
+ * event for it and a `go` line at or after that event — answers the stories that remain in `job`'s epic: the newest
+ * ok close-out event's `stories_left` (engage.py's own not-landed verdict) filtered to the keys starting `N-` when
+ * the job name ends in the digits `N` (any key otherwise); a missing or non-array `stories_left` counts as none.
+ * Else undefined. The cap is the caller's (step 7 returns before it at or past the cap). Shared by step 7 (stories
+ * remain: resubmit) and the closeout pass (none remain: re-close). */
+export function goAfterEnd(
+  queue: Queue, project: string, id: string, record: Engagement, runId: string, job: string,
+): { storiesLeft: string[] } | undefined {
+  if (record.state !== "in-progress") return undefined;
+  const run = queue.get(runId);
+  if (!run || !isTerminal(run.state)) return undefined;
+  if (stops(queue, project, id).some((e) => e.detail?.run_id === runId && e.detail?.ok === true)) return undefined;
+  if (linksOf(queue, project, id).some((l) => l.after_run === runId)) return undefined;
+  const told = eventsFor(queue, CLOSEOUT_EVENT, project, id).findLast((e) => e.detail?.run_id === runId && e.detail?.ok === true);
+  if (!told) return undefined;
+  if (!record.inputs.some((l) => l.verb === "go" && l.at >= told.at)) return undefined;
+  const raw = told.detail?.stories_left;
+  const keys = Array.isArray(raw) ? raw.filter((k): k is string => typeof k === "string" && k !== "") : [];
+  const epic = /(\d+)$/.exec(job)?.[1];
+  return { storiesLeft: epic === undefined ? keys : keys.filter((k) => k.startsWith(`${epic}-`)) };
+}
 
 /** Stop one linked run's engine gracefully, recording `engagement-run-stop` (a failure equal to the newest one for
  * this run and reason not repeated). A run with no engine yet is not stopped (nothing recorded). */
@@ -1164,8 +1393,9 @@ async function runStep(queue: Queue, deps: ApproveDeps, t: Target, out: Engageme
   reread();
   // Story 36.3 (DW-47): the block a `go` or `continue` answered closes.
   if (jiraBound(t.root)) await unblockAnswered(queue, deps, t, project, record);
-  // 7. the resubmit: in-progress, the newest linked run stopped by this pass and ended, not resubmitted yet; never
-  // at or past the cap (an ask `continue` over the cap: the next pass's cap step makes it partial)
+  // 7. the resubmit: in-progress, the newest linked run stopped by this pass and ended, or (DW-53) ended on its own,
+  // closed out and answered by a `go` with stories left in its epic; not resubmitted yet; never at or past the cap
+  // (an ask `continue` over the cap: the next pass's cap step makes it partial)
   if (record.state !== "in-progress" || !links.length) return; // no run of this cycle: nothing to resubmit (F1)
   const capNow = isObject(record.quote) ? num(record.quote.cap) : undefined;
   if (capNow !== undefined && (num(record.spend?.runs_usd) ?? 0) >= capNow) return;
@@ -1173,8 +1403,23 @@ async function runStep(queue: Queue, deps: ApproveDeps, t: Target, out: Engageme
   const prev = runOf(last);
   if (!prev || !isTerminal(prev.state)) return;
   if (links.some((l) => l.after_run === prev.run_id)) return;
+  const resubmit = async (): Promise<void> => {
+    if (!deps.submit) return;
+    const baseRef = baseRefOf(record);
+    let queued: { run_id: string };
+    try { queued = await deps.submit(last.job, t.root, { ...(baseRef ? { baseRef } : {}), payload: { engagement: id, project } }); }
+    catch { return; } // the next pass asks again
+    if (linksOf(queue, project, id, since).some((l) => l.after_run === prev.run_id)) return; // another process resubmitted meanwhile
+    queue.serviceEvent(RUN_QUEUED_EVENT, { engagement: id, project, run_id: queued.run_id, job: last.job, after_run: prev.run_id }, nowIso(deps));
+    out.resubmitted.push(id);
+  };
   const prevStops = stops(queue, project, id).filter((e) => e.detail?.run_id === prev.run_id && e.detail?.ok === true);
-  if (!prevStops.length) return; // ended on its own (the epic done, or failed): 32.8's run end
+  if (!prevStops.length) {
+    // ended on its own (the epic done, or failed): 32.8's run end. DW-53: after its close-out, an owner `go` with
+    // stories left in the job's epic (`goAfterEnd`) resubmits the job; none left: the closeout pass re-closes
+    if (goAfterEnd(queue, project, id, record, prev.run_id, last.job)?.storiesLeft.length) await resubmit();
+    return;
+  }
   // an ask stop resumes only through the owner's `continue`: no `run-resumed` line after it, no resubmit (review P7)
   const askStop = prevStops.filter((e) => e.detail?.reason === "ask").at(-1);
   if (askStop && !record.inputs.some((l) => l.verb === "run-resumed" && l.at >= askStop.at)) return;
@@ -1187,14 +1432,7 @@ async function runStep(queue: Queue, deps: ApproveDeps, t: Target, out: Engageme
     const view = r.exit === 0 ? lastJsonObject(r.stdout) as Record<string, unknown> | null : null;
     if (typeof view?.state !== "string" || view.state.toUpperCase() !== "MERGED") return; // OPEN, CLOSED or gh failed
   }
-  if (!deps.submit) return;
-  const baseRef = baseRefOf(record);
-  let queued: { run_id: string };
-  try { queued = await deps.submit(last.job, t.root, { ...(baseRef ? { baseRef } : {}), payload: { engagement: id, project } }); }
-  catch { return; } // the next pass asks again
-  if (linksOf(queue, project, id, since).some((l) => l.after_run === prev.run_id)) return; // another process resubmitted meanwhile
-  queue.serviceEvent(RUN_QUEUED_EVENT, { engagement: id, project, run_id: queued.run_id, job: last.job, after_run: prev.run_id }, nowIso(deps));
-  out.resubmitted.push(id);
+  await resubmit();
 }
 
 /** The engagement-run pass (see the header). `only`: one engagement (the input route's). Never throws. */

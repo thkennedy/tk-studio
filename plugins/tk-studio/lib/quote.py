@@ -22,10 +22,13 @@ band95 and the cap are multiplied by WIDEN. A prior sample's tokens are its
 dollars over the history's mean usd-per-token; with no metered story the
 tokens (and the share) are null and the dollars carry.
 
-`write_epic_bands` lands `epics.<EP-NNN>.usd_estimate` in
-`.tk-studio/budget-bands.yaml` (Settled shape 4): every byte before the
-top-level `epics:` key (and after its block) is kept, entries of other epics
-are kept, and an entry this quote owns is overwritten. Stdlib-only (NFR9).
+`epic_bands_text` is the byte-shape reference for `epics.<EP-NNN>.
+usd_estimate` in `.tk-studio/budget-bands.yaml` (Settled shape 4) that the
+supervisor's approve `rekeyBands` mirrors: every byte before the top-level
+`epics:` key (and after its block) is kept, entries of other epics are kept,
+and an entry being set is overwritten. The quote no longer writes the file:
+it records each epic's figure as `basis.epics[].usd_estimate` and approve
+copies it onto the minted id (DW-46, DW-50). Stdlib-only (NFR9).
 """
 from __future__ import annotations
 

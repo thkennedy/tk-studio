@@ -1442,13 +1442,13 @@ class QuoteTestCase(EngageTestCase):
 
 
 class QuoteVerbTests(QuoteTestCase):
-    def test_a_rich_history_lands_the_quote_and_the_bands(self):
+    def test_a_rich_history_lands_the_quote_and_records_the_epic_usd(self):
         self.history(8)
+        before = self.bands.read_bytes()
         result = self.quote()
         self.assert_status_block_last(result, "complete")
         self.assertEqual(result["written"], [
-            "_bmad-output/engagements/ENG-001/engagement.yaml",
-            ".tk-studio/budget-bands.yaml"])
+            "_bmad-output/engagements/ENG-001/engagement.yaml"])
         record = self.record()
         self.assertEqual(record["state"], "scoping")  # the owner's go moves it
         self.assertEqual(record["updated"], NOW)
@@ -1474,7 +1474,10 @@ class QuoteVerbTests(QuoteTestCase):
         self.assertEqual(basis["stories"], 2)
         self.assertEqual(basis["epics"], [{"k": 1, "title": "Report exports",
                                            "stories": 2,
-                                           "ep_id": "EP-033"}])
+                                           "ep_id": "EP-033",
+                                           "usd_estimate":
+                                               want["epic_usd"][1]}])
+        self.assertEqual(result["bands"], {"EP-033": want["epic_usd"][1]})
         self.assertEqual(basis["history"], {"n": 8, "unstructured": 0,
                                             "project": "project"})
         self.assertEqual(basis["kind"], "story")
@@ -1492,11 +1495,53 @@ class QuoteVerbTests(QuoteTestCase):
         self.assertIsNone(basis["window_tokens"])
         self.assertEqual(basis["cap_tokens"], want["cap_tokens"])
         self.assertEqual(q["band50"]["share"], "share unknown")
-        # the bands: every byte before epics kept, EP-033 from the p85
-        text = self.bands.read_text(encoding="utf-8")
-        self.assertTrue(text.startswith(BANDS))
-        self.assertEqual(text[len(BANDS):], "epics:\n  EP-033:\n    "
-                         f"usd_estimate: {want['epic_usd'][1]}\n")
+        # the bands file is neither read nor written (DW-46, DW-50)
+        self.assertEqual(self.bands.read_bytes(), before)
+
+    def test_no_bands_file_is_not_created(self):
+        self.bands.unlink()
+        result = self.quote()
+        self.assert_status_block_last(result, "complete")
+        self.assertFalse(self.bands.exists())
+        self.assertIsInstance(
+            self.record()["quote"]["basis"]["epics"][0]["usd_estimate"], float)
+
+    def test_an_unreadable_counter_keeps_the_usd_estimate_and_no_bands(self):
+        (self.root / ".tk-studio" / "plan-counter.yaml").write_text(
+            "nope: [", encoding="utf-8")
+        result = self.quote()
+        self.assert_status_block_last(result, "complete")
+        entry = self.record()["quote"]["basis"]["epics"][0]
+        self.assertIsNone(entry["ep_id"])
+        self.assertIsInstance(entry["usd_estimate"], float)
+        self.assertEqual(result["bands"], {})
+
+    def test_two_engagements_predicting_one_ep_keep_their_own_figure(self):
+        other = self.root / "_bmad-output" / "engagements" / "ENG-002"
+        shutil.copytree(self.dir, other)
+        record = json.loads((other / "engagement.yaml")
+                            .read_text(encoding="utf-8"))
+        record["id"] = "ENG-002"
+        (other / "engagement.yaml").write_text(
+            json.dumps(record, indent=2) + "\n", encoding="utf-8")
+        (other / "scope.md").write_text(SCOPE.replace(
+            "#### Story 1.1", "#### Story 1.0: Extra\n\ntext\n\n"
+            "#### Story 1.1"), encoding="utf-8")
+        self.history(8)
+        before = self.bands.read_bytes()
+        a = self.quote()
+        b = engage.quote(self.root, "ENG-002", now=NOW)
+        self.assert_status_block_last(a, "complete")
+        self.assert_status_block_last(b, "complete")
+        ea = self.record()["quote"]["basis"]["epics"][0]
+        eb = json.loads((other / "engagement.yaml").read_text(
+            encoding="utf-8"))["quote"]["basis"]["epics"][0]
+        self.assertEqual((ea["ep_id"], eb["ep_id"]), ("EP-033", "EP-033"))
+        self.assertEqual((ea["stories"], eb["stories"]), (2, 3))
+        self.assertNotEqual(ea["usd_estimate"], eb["usd_estimate"])
+        self.assertEqual(a["bands"], {"EP-033": ea["usd_estimate"]})
+        self.assertEqual(b["bands"], {"EP-033": eb["usd_estimate"]})
+        self.assertEqual(self.bands.read_bytes(), before)
 
     def test_seeded_rerun_is_identical_and_another_seed_differs(self):
         path = self.home / "measurements" / "u-m.jsonl"
@@ -1637,17 +1682,15 @@ class QuoteVerbTests(QuoteTestCase):
         memory = engage.reply(self.root, ENG)
         self.assertEqual(memory["record"]["quote"], result["quote"])
 
-    def test_another_epics_entry_is_kept_and_this_one_overwritten(self):
+    def test_an_existing_epics_block_is_left_untouched(self):
         self.bands.write_text(BANDS + "epics:\n  EP-010:\n    usd_estimate: "
                               "7.5\n  EP-033:\n    usd_estimate: 1.0\n",
                               encoding="utf-8")
-        self.quote()
-        text = self.bands.read_text(encoding="utf-8")
-        self.assertTrue(text.startswith(BANDS))
-        import miniyaml
-        epics = miniyaml.loads(text)["epics"]
-        self.assertEqual(epics["EP-010"], {"usd_estimate": 7.5})
-        self.assertNotEqual(epics["EP-033"]["usd_estimate"], 1.0)
+        before = self.bands.read_bytes()
+        result = self.quote()
+        self.assert_status_block_last(result, "complete")
+        self.assertEqual(self.bands.read_bytes(), before)
+        self.assertNotEqual(result["bands"]["EP-033"], 1.0)
 
     def test_the_dry_run_writes_nothing(self):
         before = self.files()
@@ -1739,7 +1782,7 @@ class QuoteRefusalTests(QuoteTestCase):
         self.assertEqual(result["written"], [])
         self.assertEqual(self.files(), before)
 
-    def test_bands_refused_after_the_record_names_the_record(self):
+    def test_the_bands_file_is_never_written(self):
         real = engage.atomic_write_text
 
         def only_record(path, text):
@@ -1749,24 +1792,21 @@ class QuoteRefusalTests(QuoteTestCase):
 
         with mock.patch.object(engage, "atomic_write_text", only_record):
             result = self.quote()
-        self.assert_status_block_last(result, "blocked")
-        self.assertIn("QuoteUnwritable: .tk-studio/budget-bands.yaml",
-                      result["reason"])
+        self.assert_status_block_last(result, "complete")
         self.assertEqual(result["written"], [
             "_bmad-output/engagements/ENG-001/engagement.yaml"])
         self.assertEqual(self.bands.read_text(encoding="utf-8"), BANDS)
 
-
-    def test_a_scalar_epics_in_the_bands_is_quote_unwritable(self):
+    def test_an_unparseable_bands_file_no_longer_refuses(self):
         self.history(8)
-        self.bands.write_text(BANDS + 'epics: ""\n', encoding="utf-8")
-        before = self.files()
-        result = self.quote()
-        self.assert_status_block_last(result, "blocked")
-        self.assertIn("QuoteUnwritable: .tk-studio/budget-bands.yaml's "
-                      "top-level epics is", result["reason"])
-        self.assertEqual(result["written"], [])
-        self.assertEqual(self.files(), before)  # nothing written
+        for garbage in (BANDS + 'epics: ""\n', "::: [not yaml\n\t- x"):
+            self.set_record(state="scoping", quote=None)
+            self.bands.write_text(garbage, encoding="utf-8")
+            before = self.bands.read_bytes()
+            result = self.quote()
+            self.assert_status_block_last(result, "complete")
+            self.assertEqual(self.bands.read_bytes(), before)
+            self.assertIsNotNone(self.record()["quote"])
 
 class QuoteCliTests(QuoteTestCase):
     def run_cli(self, *argv):
@@ -1894,6 +1934,7 @@ class CloseoutRenderTests(CloseoutTestCase):
         self.assert_status_block_last(result, "complete")
         self.assertEqual((result["mode"], result["outcome"]),
                          ("closeout", "delivered"))
+        self.assertEqual(result["stories_left"], [])
         text = self.report()
         sections = [line[3:] for line in text.split("\n")
                     if line.startswith("## ")]
@@ -1981,6 +2022,20 @@ class CloseoutRenderTests(CloseoutTestCase):
         self.assertEqual(third["page"]["version"], 2)
         self.assertIn("- Last run: q-3", self.report())
         self.assertEqual(self.record()["closeout"]["run_id"], "q-3")
+
+    def test_the_status_block_names_an_unlanded_story_in_stories_left(self):
+        before = self.record()
+        result = self.closeout(closeout_input(
+            stories=[story("41-1-csv-button")]))
+        self.assert_status_block_last(result, "complete")
+        self.assertEqual(result["outcome"], "partial")
+        self.assertEqual(result["stories_left"], ["41-2"])
+        # the record's closeout merge is unchanged by the field
+        after = self.record()["closeout"]
+        self.assertNotIn("stories_left", after)
+        self.assertEqual(set(after), {"path", "page", "outcome", "done",
+                                      "not_done", "run_id", "at"})
+        self.assertIsNone(before["closeout"])
 
     def test_no_confluence_binding_writes_the_file_with_page_null(self):
         self.config.write_text(self.unbound, encoding="utf-8")
@@ -2078,6 +2133,34 @@ class CloseoutVerdictTests(unittest.TestCase):
         self.assertEqual(self.verdicts("no headings at all\n"), [])
         self.assertEqual(engage.closeout_outcome([], closeout_input()),
                          "partial")
+
+    def test_stories_left_names_each_unlanded_key(self):
+        # DW-52/DW-53: engage.py's own not-landed verdict, additive
+        left = engage.closeout_stories_left
+        self.assertEqual(left(SCOPE, closeout_input()), [])
+        # a proposed story with no landed entry: its `N-m` key
+        self.assertEqual(left(SCOPE, closeout_input(
+            stories=[story("41-1-csv-button")])), ["41-2"])
+        # a landed entry not `spec_status: done`: its own key
+        self.assertEqual(left(SCOPE, closeout_input(
+            stories=[story("41-1-csv-button", status="in-review"),
+                     story("41-2-filtered-export")])), ["41-1-csv-button"])
+        self.assertEqual(left(SCOPE, closeout_input(stories=[])),
+                         ["41-1", "41-2"])
+        # a merged-PR gap alone leaves it empty
+        self.assertEqual(left(SCOPE, closeout_input(
+            stories=[story("41-1-csv-button", state="OPEN"),
+                     story("41-2-filtered-export")])), [])
+        # an unqueued epic's stories are `epic not run`, not unlanded
+        self.assertEqual(left(SCOPE, closeout_input(
+            stories=[], epics=[{"job": "run-epic-41", "queued": False}])),
+            [])
+        # no proposed stories: each landed entry not done, deduplicated
+        bare = "# s\n\n## Deliverables\n\n### Thing\n\nAcceptance " \
+            "signal: x.\n"
+        self.assertEqual(left(bare, closeout_input(
+            stories=[story("9-1-a", status="review"), story("9-2-b"),
+                     story("9-1-a", status="review")])), ["9-1-a"])
 
     def test_an_unqueued_epic_reads_epic_not_run(self):
         two = SCOPE + ("\n### Epic 2: Later\n\n#### Story 2.1: Date range "

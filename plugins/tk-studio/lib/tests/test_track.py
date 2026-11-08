@@ -2055,5 +2055,224 @@ class EngagementUnblockTests(EngagementTestCase):
         self.assertEqual(self.fake.status[f"{KEY}-100"], jirabackend.RESOLVED_STATUS)
 
 
+DNI = jirabackend.DNI_STATUS
+
+
+class FakeDrop(FakeTrack):
+    """FakeTrack plus a transition into `DNI` (id 99) on every issue but
+    those in `no_dni` (DW-51)."""
+
+    def __init__(self):
+        super().__init__()
+        self.no_dni: set[str] = set()
+
+    def _jira(self, method, path, query, body):
+        m = re.match(r"^/issue/([^/]+)/transitions$", path)
+        if m and m.group(1) in self.status:
+            key = m.group(1)
+            if method == "GET":
+                status, data = super()._jira(method, path, query, body)
+                if key not in self.no_dni:
+                    data["transitions"].append(
+                        {"id": "99", "to": {"name": DNI, "statusCategory":
+                                            {"key": "done"}}})
+                return status, data
+            if body.get("transition", {}).get("id") == "99":
+                self.status[key] = DNI
+                return 204, None
+        return super()._jira(method, path, query, body)
+
+
+class EngagementDropTests(EngagementTestCase):
+    """DW-51: `drop` moves a superseded cycle's issues to `DNI` with one
+    `Dropped:` comment; an issue already dropped is skipped."""
+
+    REASON = ("ENG-001 re-approved after revise (approve 2026-10-25T06:00:00Z):"
+              " the earlier plan this issue came from is replaced wholesale")
+
+    def setUp(self):
+        super().setUp()
+        self.fake = FakeDrop()
+        for n, name in ((1, "In Progress"), (2, "To Do"), (3, "In Progress")):
+            self.fake.status[f"{KEY}-{n}"] = name
+
+    def drop(self, issues=(f"{KEY}-1", f"{KEY}-2"), reason=None, **kwargs):
+        return track.drop_issues(self.root, kwargs.pop("engagement", ENG),
+                                 list(issues),
+                                 self.REASON if reason is None else reason,
+                                 transport=self.fake,
+                                 sleep=self.sleeps.append, **kwargs)
+
+    def assert_refused(self, result, name):
+        self.assert_track_block(result, "blocked")
+        self.assertIn(name, result["reason"])
+        self.assertEqual(self.writes(), [])
+
+    def test_happy_moves_each_issue_to_dni_with_one_comment(self):
+        result = self.drop()
+        self.assert_track_block(result, "complete")
+        self.assertEqual(result["engagement"], ENG)
+        self.assertEqual(result["issues"], [
+            {"issue": f"{KEY}-1", "transitioned": True, "commented": True},
+            {"issue": f"{KEY}-2", "transitioned": True, "commented": True}])
+        self.assertEqual(result["skipped"], [])
+        self.assertEqual(result["written"], [])
+        self.assertEqual(self.fake.status[f"{KEY}-1"], DNI)
+        self.assertEqual(self.fake.status[f"{KEY}-2"], DNI)
+        self.assertEqual(self.fake.posted, {
+            f"{KEY}-1": [f"Dropped: {self.REASON}"],
+            f"{KEY}-2": [f"Dropped: {self.REASON}"]})
+        self.assertNotIn("[~accountid:", self.fake.posted[f"{KEY}-1"][0])
+
+    def seed_comment(self, key, author, text, minutes_ago):
+        store = self.fake.comment_store.setdefault(key, [])
+        store.append(comment(f"c{len(store) + 1}", author, text,
+                             minutes_ago))
+
+    def test_an_issue_already_dni_is_skipped_with_no_comment(self):
+        # the matrix's "track idempotent": DNI, its Dropped comment newest
+        self.fake.status[f"{KEY}-1"] = DNI
+        self.seed_comment(f"{KEY}-1", AGENT, f"Dropped: {self.REASON}", 5)
+        result = self.drop()
+        self.assert_track_block(result, "complete")
+        self.assertEqual([i["issue"] for i in result["issues"]], [f"{KEY}-2"])
+        self.assertEqual(len(result["skipped"]), 1)
+        self.assertIn(f"{KEY}-1", result["skipped"][0])
+        self.assertNotIn(f"{KEY}-1", self.fake.posted)
+        self.assertFalse(any(c[0] == "POST" and f"/issue/{KEY}-1/" in c[1]
+                             for c in self.writes()))
+        # a retry of the whole call: every issue skipped, nothing written
+        before = len(self.writes())
+        again = self.drop()
+        self.assert_track_block(again, "complete")
+        self.assertEqual(again["issues"], [])
+        self.assertEqual(len(again["skipped"]), 2)
+        self.assertEqual(len(self.writes()), before)
+
+    def test_an_issue_already_dni_without_its_comment_gets_it_only(self):
+        # the matrix's "track comment retry": DNI, the newest agent comment
+        # another body (the earlier drop comment failed; an owner comment
+        # carrying the body is not the agent's) -> comment, no transition
+        self.fake.status[f"{KEY}-1"] = DNI
+        self.seed_comment(f"{KEY}-1", AGENT, "something else", 5)
+        self.seed_comment(f"{KEY}-1", OWNER, f"Dropped: {self.REASON}", 1)
+        result = self.drop(issues=(f"{KEY}-1",))
+        self.assert_track_block(result, "complete")
+        self.assertEqual(result["issues"], [
+            {"issue": f"{KEY}-1", "transitioned": False, "commented": True}])
+        self.assertEqual(result["skipped"], [])
+        self.assertEqual(self.fake.posted,
+                         {f"{KEY}-1": [f"Dropped: {self.REASON}"]})
+        self.assertFalse(any(c[1].endswith("/transitions")
+                             for c in self.writes()))
+
+    def test_no_transition_to_dni_is_refused_by_name(self):
+        # the matrix's "track preflight": the second issue lacks the move,
+        # so the first (which has it) is neither moved nor commented
+        self.fake.no_dni.add(f"{KEY}-2")
+        result = self.drop()
+        self.assert_track_block(result, "blocked")
+        self.assertTrue(result["reason"].startswith(
+            "track refused: NoTransition: "), result["reason"])
+        self.assertIn(f"{KEY}-2", result["reason"])
+        self.assertIn(repr(DNI), result["reason"])
+        self.assertEqual(self.fake.status[f"{KEY}-1"], "In Progress")
+        self.assertEqual(self.fake.status[f"{KEY}-2"], "To Do")
+        self.assertEqual(self.fake.posted, {})
+        self.assertEqual(self.writes(), [])
+
+    def test_a_non_transient_jira_error_is_refused_jira_refused(self):
+        # the matrix's "track non-transient": a 404 on the issue's GET
+        self.fake.force[("GET", f"/issue/{KEY}-2")] = (
+            404, {"errorMessages": ["Issue does not exist"]})
+        result = self.drop()
+        self.assert_track_block(result, "blocked")
+        self.assertTrue(result["reason"].startswith(
+            f"track refused: JiraRefused: {KEY}-2: "), result["reason"])
+        self.assertEqual(self.writes(), [])
+
+    def test_no_issue_is_refused_by_name(self):
+        self.assert_refused(self.drop(issues=()), "NoIssue")
+
+    def test_a_malformed_key_is_refused_by_name(self):
+        self.assert_refused(self.drop(issues=(f"{KEY}-1", "not a key")),
+                            "BadIssue")
+
+    def test_no_reason_is_refused_by_name(self):
+        self.assert_refused(self.drop(reason="  "), "ReasonMissing")
+
+    def test_a_bad_engagement_is_refused_by_name(self):
+        self.assert_refused(self.drop(engagement="ENG-1"), "EngagementNotFound")
+        self.assert_refused(self.drop(engagement="ENG-009"),
+                            "EngagementNotFound")
+
+    def test_a_temporary_failure_is_partial_and_retried(self):
+        self.fake.force[("POST", f"/issue/{KEY}-2/comment")] = (
+            503, "unavailable")
+        result = self.drop()
+        self.assertEqual((result["status"], result["ok"], result["retry"]),
+                         ("partial", False, True))
+        self.assertEqual(list(result)[-4:], ["status", "intent", "artifacts",
+                                             "reason"])
+        self.assertTrue(result["reason"].startswith("track retry: "))
+        self.assertEqual(self.fake.status[f"{KEY}-1"], DNI)
+        self.assertEqual(self.fake.status[f"{KEY}-2"], DNI)
+        self.assertNotIn(f"{KEY}-2", self.fake.posted)
+        # the retry: KEY-1 skipped (no second comment), KEY-2 commented with
+        # no second transition
+        del self.fake.force[("POST", f"/issue/{KEY}-2/comment")]
+        again = self.drop()
+        self.assert_track_block(again, "complete")
+        self.assertEqual(again["issues"], [
+            {"issue": f"{KEY}-2", "transitioned": False, "commented": True}])
+        self.assertEqual({k: len(v) for k, v in self.fake.posted.items()},
+                         {f"{KEY}-1": 1, f"{KEY}-2": 1})
+
+    def test_a_held_track_lock_is_partial_and_retried(self):
+        # the engagement's track.lock held by another block/close: no call
+        lock = (self.root / "_bmad-output" / "engagements" / ENG
+                / track.ENGAGEMENT_LOCK)
+        lock.write_text("", encoding="utf-8")
+        result = self.drop()
+        self.assertEqual((result["status"], result["ok"], result["retry"]),
+                         ("partial", False, True))
+        self.assertIn("track.lock is held", result["reason"])
+        self.assertEqual(self.fake.calls, [])
+        self.assertEqual(self.fake.posted, {})
+        self.assertEqual(self.fake.status[f"{KEY}-1"], "In Progress")
+        self.assertTrue(lock.exists())  # another holder's lock is kept
+
+    def test_the_dry_run_writes_nothing(self):
+        result = self.drop(dry_run=True)
+        self.assertEqual((result["status"], result["dry_run"]),
+                         ("partial", True))
+        self.assertEqual(self.writes(), [])
+        self.assertEqual(len([n for n in result["notes"]
+                              if n.startswith("dry run:")]), 2)
+        lock = self.root / "_bmad-output" / "engagements" / ENG / "track.lock"
+        self.assertFalse(lock.exists())
+
+    def test_the_cli_drop(self):
+        out = io.StringIO()
+        with unittest.mock.patch.object(jirabackend, "client_for",
+                                        _client_with(self.fake)), \
+                contextlib.redirect_stdout(out):
+            code = track.main(["drop", "--directory", str(self.root),
+                               "--engagement", ENG, "--issue", f"{KEY}-1",
+                               "--issue", f"{KEY}-2", "--reason",
+                               self.REASON])
+        self.assertEqual(code, 0)
+        result = json.loads(out.getvalue())
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual([i["issue"] for i in result["issues"]],
+                         [f"{KEY}-1", f"{KEY}-2"])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = track.main(["drop", "--directory", str(self.root),
+                               "--engagement", ENG, "--reason", "x"])
+        self.assertEqual(code, 2)
+        self.assertIn("NoIssue", json.loads(out.getvalue())["reason"])
+
+
 if __name__ == "__main__":
     unittest.main()
