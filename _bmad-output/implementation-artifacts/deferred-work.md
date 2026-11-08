@@ -1,6 +1,6 @@
 # Deferred Work
 
-<!-- deferred-work counter: last minted DW-197; mint through plansync.py deferred mint -->
+<!-- deferred-work counter: last minted DW-199; mint through plansync.py deferred mint -->
 
 ### DW-124: Contract §4 `submit` admitted a full job definition but the CLI/skill surface was id-only
 origin: migrated from legacy ledger ("Deferred from: code review of feat/tk-studio-connector (2026-08-06)"), 2026-10-29
@@ -621,7 +621,8 @@ location: apps/supervisor/src/hostverify.ts defaultJudge; plugins/tk-studio/skil
 severity: medium
 reason: Review pass 1 (blind hunter). AC1 names the read-only rule; enforcing it needs a deny-profile design for invokeSkill's `deny_profile`, which this story's plan does not settle. Deferral class (a).
 decision: owner 2026-11-07 (TKSTUDIO-224): A — ship the judge deny profile: no Edit/Write/Bash and no Read of the project's code, `plugins`, `apps` and `_bmad-output` folders, passed by `defaultJudge` and pinned by a test; best effort, not a seal; stays open for the sweep bundle. Operator reading 2026-11-08 (the fourth sweep, run q-run-sweep-20261108T093348Z-f76978, bundle playable-judge-sandbox-hygiene paused at a CRITICAL escalation 12:55Z): the literal list breaks the judge itself — its SKILL.md runs `uv run playable_judge.py prepare|verdict` through Bash and writes `answer.json` through Write to produce the `judge.json` the host leg requires (`hostverify.ts` defaultJudge) — so the profile that carries the ruling's intent is the scoped one: bare `Edit` denied, `Write(...)` and `Read(...)` denied for `./plugins/**`, `./apps/**`, `./_bmad-output/**` and the project's code folders, Bash left open (best effort, as ruled: a Bash read of the code is not sealed). The literal list plus a host-run judge core (a `judge.json` contract change) was weighed and set aside as a rework beyond the bundle. The owner may override on TKSTUDIO-224 (a comment names the reading); the bundle re-queues in the next sweep with this intent. DW-69 does not depend on it and may bundle alone.
-status: open
+status: done 2026-11-08
+resolution: resolved by sweep bundle dw-playable-judge-deny-profile
 
 ### DW-69: A 33.8 re-run on an ended run pins (starts) the stopped sandbox for the judge and nothing releases it; it carries no pin record, so the launch check warns "started outside the supervisor" until the ne
 origin: spec-deferred b5240c800ca2
@@ -1672,4 +1673,20 @@ source_spec: `spec-dw-184-dw-195-host-leg-live-lease-guards.md`
 location: apps/supervisor/src/hostverify.ts:244
 severity: low
 reason: leaseClock(guardS) at apps/supervisor/src/liveleg.ts:33-35 is written by noteCloseOutLease (hostverify.ts:244-249) before hostVerify; steps at hostverify.ts:607/618/640/650 each get guardS. The intent fixes the deadline as lease start plus one leg guard; the later steps (assets, engine, playable) run past it by design, so a whole-leg deadline is a follow-up decision (deferral (a); consult 2026-11-08T21:47:05Z). The host step, which carries the bun drives hole 118 names, lies inside the first guard window.
+status: open
+
+### DW-198: The judge profile leaves all of `.bmad-loop/` readable, including the engine run's transcripts, tasks, bundles and journal beside the media folder, which carry the code and the spec.
+origin: spec-deferred 1146d732fa3b
+source_spec: `spec-dw-68-playable-judge-deny-profile.md`
+location: apps/supervisor/src/hostverify.ts judgeDenyRules
+severity: medium
+reason: Review pass 1 (blind hunter): `judgeDenyRules` skips `.bmad-loop` wholesale; only the media chain `.bmad-loop/runs/<engine>/playable/` must stay open. The bundle intent enumerates plugins/apps/_bmad-output and the project's code folders only, so denying run state siblings level by level along the media path is beyond this bundle. Deferral class (a): DW-68's read-only rule.
+status: open
+
+### DW-199: The judge profile also leaves `.bmad-loop/` writable by the Write/Edit tools, so the judge could overwrite the engine run's state (transcripts, tasks, journal) beside the media.
+origin: spec-deferred 0a806c96b78e
+source_spec: `spec-dw-68-playable-judge-deny-profile.md`
+location: apps/supervisor/src/hostverify.ts judgeDenyRules
+severity: medium
+reason: Review pass 2 (blind hunter): `judgeDenyRules` skips `.bmad-loop` wholesale, so no `Edit(...)`/`Write(...)` rule covers the run folder's siblings of `playable/`. Same root as the read-side deferral; denying siblings level by level along the media path is beyond the bundle intent's enumerated folders. The half about rewriting the profile itself is moot: `--settings` is loaded at session start. Deferral class (a): DW-68's read-only rule.
 status: open

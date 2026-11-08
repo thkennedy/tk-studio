@@ -61,7 +61,10 @@
  *            judge can read. On exit 0 with `verdict: pass` the judge runs: `tk-studio-playable-judge` through
  *            `invokeSkill` on the sbx tier (`deps.judge`), its model and effort from the route's `playable-verify`
  *            leg (default `claude-sonnet-5`, `medium`), reading only `report.json` and the frames; its verdict is
- *            read back from `<media>/judge.json`. Recorded as `playable: {verdict: pass | fail | skipped | inconclusive, reason?,
+ *            read back from `<media>/judge.json`. DW-68: the default judge runs under a scoped deny-only profile
+ *            written to `.bmad-loop/runs/<engine run id>/judge-deny.settings.json` (beside the media) and passed as
+ *            `--settings`: `Edit`/`Read`/`Write` denied for `plugins`, `apps`, `_bmad-output` and every top-level
+ *            entry but `.bmad-loop`; Bash stays open (best effort, not a seal). Recorded as `playable: {verdict: pass | fail | skipped | inconclusive, reason?,
  *            exit?, status?, failed?, duration_ms?, store?, media?, judge?, findings?, frames?}`. Skip reasons: `no
  *            playable`, `playable is malformed: <field>`, `no verify.engine` (Story 35.6: a declared `playable`
  *            with no `verify.engine`), `engine gate not green`. On a configured project every
@@ -100,13 +103,14 @@
  *   judge    Story 35.3: the rubric ids are the core's (`playable_judge.py rubric`, run once per judge step under
  *            the guard); a finding naming another id is refused. A judge that cannot run or answer — no sandbox, a
  *            thrown invoke, the sandbox pin failed, the auth preflight blocked (`ran: false`), no status block
- *            (`conformance_failure`), or an unreadable rubric — is `playable.verdict: inconclusive` with `reason:
+ *            (`conformance_failure`), an unreadable rubric, or (DW-68) a deny profile that cannot be written
+ *            (`infrastructure: sbx: …`) — is `playable.verdict: inconclusive` with `reason:
  *            infrastructure: <pin|sbx|status-block|auth|rubric>: <detail>`, never a rubric `fail`: the leg is not
  *            green and not red (`isInconclusive`), the run ends `partial` (`host verify inconclusive (playable):
  *            <reason>`), no finding recorded, the PR line `Playable: inconclusive — <reason>`. The judge's own
  *            `blocked` (a game cause) stays `fail`.
  */
-import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join } from "node:path";
 
@@ -762,13 +766,52 @@ async function rubricIds(
   return { ids: ids as string[] };
 }
 
+/** DW-68: the judge's deny profile file name, written beside (never inside) the media folder. */
+export const JUDGE_DENY_PROFILE = "judge-deny.settings.json";
+/** DW-68: the folders the judge's profile always denies, present or not. */
+const JUDGE_DENY_FIXED = ["plugins", "apps", "_bmad-output"];
+/** DW-68: the media's ancestor under the served root, never denied (the judge reads its frames and writes its answer there). */
+const JUDGE_MEDIA_TOP = ".bmad-loop";
+
+/** DW-68: the judge's deny rules over the served root `root`: `Edit(t)`, `Read(t)` and `Write(t)` per target `t` — the
+ * fixed folders and every top-level entry except `.bmad-loop` (a directory as `./<name>/**`, a file as `./<name>`),
+ * sorted and deduped. POSIX rule strings (resolved by Claude Code against the session cwd), never `path.join`ed.
+ * Never denies Bash, nor a bare `Edit`/`Read`/`Write` (a bare `Edit` deny also denies the Write tool, blocking the
+ * judge's `answer.json`). Throws when the root cannot be listed. */
+export function judgeDenyRules(root: string): string[] {
+  const targets = new Set(JUDGE_DENY_FIXED.map((n) => `./${n}/**`));
+  for (const name of readdirSync(root)) {
+    if (name === JUDGE_MEDIA_TOP) continue;
+    let dir = false;
+    try { dir = statSync(join(root, name)).isDirectory(); } catch { /* a dangling link: denied as a file */ }
+    targets.add(dir ? `./${name}/**` : `./${name}`);
+  }
+  return [...targets].sort().flatMap((t) => [`Edit(${t})`, `Read(${t})`, `Write(${t})`]);
+}
+
+/** DW-68: write the judge's deny-only profile atomically (tmp + rename) beside the media folder (`media` relative to
+ * `root`); answers its absolute path. Throws on any failure (the leg's judge `catch`: `inconclusive`, cause `sbx`). */
+function writeJudgeDenyProfile(root: string, media: string): string {
+  const path = join(root, dirname(media), JUDGE_DENY_PROFILE);
+  const body = JSON.stringify({ permissions: { deny: judgeDenyRules(root) } }, null, 2) + "\n";
+  mkdirSync(dirname(path), { recursive: true });
+  const tmp = `${path}.tk-studio-${process.pid}.tmp`;
+  try {
+    writeFileSync(tmp, body, { encoding: "utf-8" });
+    renameSync(tmp, path);
+  } finally { rmSync(tmp, { force: true }); }
+  return path;
+}
+
 /** The default judge: `invokeSkill` with the sandbox pinned first (`sbx run -d --name <sb>`), so a re-run on an
- * ended run (its sandbox stopped) never `sbx exec`s into a stopped sandbox; a pin failure is a `blocked` block. */
-const defaultJudge = (deps: Deps): PlayableJudge => (root, args) =>
-  invokeSkill(root, PLAYABLE_JUDGE_SKILL, args, deps.spawner ?? runProcess, {
-    vmHostRoot: root,
-    pin: (sb) => pinSandbox(sb, { ...(deps.env ? { env: deps.env } : {}), ...(deps.sbx ?? {}) }),
-  });
+ * ended run (its sandbox stopped) never `sbx exec`s into a stopped sandbox; a pin failure is a `blocked` block.
+ * DW-68: under a scoped deny profile (`--settings`, best effort, not a seal: Bash stays open). */
+const defaultJudge = (deps: Deps): PlayableJudge => async (root, args) =>
+  invokeSkill(root, PLAYABLE_JUDGE_SKILL, { ...args, deny_profile: writeJudgeDenyProfile(root, args.payload.media) },
+    deps.spawner ?? runProcess, {
+      vmHostRoot: root,
+      pin: (sb) => pinSandbox(sb, { ...(deps.env ? { env: deps.env } : {}), ...(deps.sbx ?? {}) }),
+    });
 const defaultRoute: PlayableRoute = (root, projectId) => resolveRoute(root, projectId);
 
 /** The `playable-verify` leg's `{model, effort}` from the project's route, or the shipped default (a route without

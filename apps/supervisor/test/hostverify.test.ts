@@ -6,10 +6,11 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { basename, delimiter, dirname, join } from "node:path";
 import {
-  FRAMES_DIR, gitUsrBin, guardInconclusive, hostVerify, inconclusiveReason, isInconclusive, isRed, LEG_SUITES, legGuard, legHistory, legVerdict, pathKey, playableConfig, prSection, redReason, splitCommand, suiteDurations, tail,
+  FRAMES_DIR, gitUsrBin, JUDGE_DENY_PROFILE, judgeDenyRules, guardInconclusive, hostVerify, inconclusiveReason, isInconclusive, isRed, LEG_SUITES, legGuard, legHistory, legVerdict, pathKey, playableConfig, prSection, redReason, splitCommand, suiteDurations, tail,
   redSuites, TOOL_WALL_MARGIN_S, verdictLines, verifyCommand, wallClockTrip, type HostVerifyRan, type PlayableJudge,
 } from "../src/hostverify";
 import { studioRunDir } from "../src/sandbox";
+import { toVmPath, validateDenyProfile } from "../src/server";
 import { fakeBin, gitRepo, testGit } from "./fakes";
 import { SLICE_REPORT, sliceRecorder } from "./helpers/slice";
 import { tempDir } from "./tmp";
@@ -1118,6 +1119,85 @@ describe("Story 34.3: the playable-verify step runs after a green engine gate", 
     expect(w.green).toBe(false);
     expect(isRed(w)).toBe(false);
     expect(w.playable).toMatchObject({ verdict: "inconclusive", reason: "infrastructure: pin: sbx pin failed: sbx run -d --name tk-sbx exited 1: no such sandbox" });
+  }, 30_000);
+
+  /** DW-68: a spawner whose auth preflight passes, recording every call (the worker answers no status block). */
+  function judgeSpawner() {
+    const calls: string[][] = [];
+    const spawner = async (_bin: string, args: string[]) => {
+      calls.push(args);
+      return args.includes("auth") && args.includes("status")
+        ? { exit: 0, stdout: JSON.stringify({ loggedIn: true, authMethod: "claude.ai" }), stderr: "" }
+        : { exit: 0, stdout: "", stderr: "" };
+    };
+    return { calls, spawner };
+  }
+  const pinOk = { run: async () => ({ exit: 0, stdout: "", stderr: "" }) };
+
+  test("DW-68: the default judge's worker carries `--settings` at the deny profile's VM path; the profile denies exactly the expected rules", async () => {
+    const config = base + PLAYABLE;
+    const fx = fixture(config);
+    mkdirSync(join(fx.wt, "src"), { recursive: true });
+    writeFileSync(join(fx.wt, "project.godot"), "[gd]\n", "utf-8");
+    const { calls, spawner } = judgeSpawner();
+    const { run } = recorder(config, [0, 0]);
+    await hostVerify(fx.run, 60, { env: legEnv().env, run: run as any, route, sbx: pinOk as any, spawner }) as HostVerifyRan;
+    const worker = calls.find((a) => a.includes("-p"))!;
+    expect(worker).toBeDefined();
+    const profile = join(fx.wt, ".bmad-loop", "runs", "20261027-eng", JUDGE_DENY_PROFILE);
+    expect(worker[worker.indexOf("--settings") + 1]).toBe(`${toVmPath(fx.wt).replace(/\/+$/, "")}/.bmad-loop/runs/20261027-eng/${JUDGE_DENY_PROFILE}`);
+    const deny = validateDenyProfile(profile).deny;
+    const all3 = (t: string) => [`Edit(${t})`, `Read(${t})`, `Write(${t})`];
+    // the worktree's own top level: `.git` (a worktree's file), `.gitignore`, `.tk-studio/` (the config), `src/`, `project.godot`
+    const targets = ["./.git", "./.gitignore", "./.tk-studio/**", "./_bmad-output/**", "./apps/**", "./plugins/**", "./project.godot", "./src/**"].sort();
+    expect(deny).toEqual(targets.flatMap(all3));
+    expect(existsSync(join(fx.wt, ".bmad-loop", "runs", "20261027-eng", "playable", JUDGE_DENY_PROFILE))).toBe(false); // beside, not inside
+  }, 30_000);
+
+  test("DW-68: the judge's own Bash, frame Reads and answer Write stay permitted: no Bash rule, no bare Edit/Write/Read, no rule over the media", () => {
+    const wt = tempDir("tk-sup-dw68-");
+    mkdirSync(join(wt, ".bmad-loop", "runs", "e1", "playable"), { recursive: true });
+    mkdirSync(join(wt, "src"), { recursive: true });
+    const deny = judgeDenyRules(wt);
+    expect(deny.some((r) => r === "Bash" || r.startsWith("Bash("))).toBe(false);
+    expect(deny).not.toContain("Edit");
+    expect(deny).not.toContain("Write");
+    expect(deny).not.toContain("Read");
+    expect(deny.every((r) => /^(Edit|Read|Write)\(\.\/[^/*]+(\/\*\*)?\)$/.test(r))).toBe(true); // every rule scoped to one top-level entry
+    expect(deny.filter((r) => r.includes(".bmad-loop") || r.includes("**/") || r.endsWith("(./**)"))).toEqual([]);
+  });
+
+  test("DW-68: judgeDenyRules covers a top-level dir (`./<d>/**`) and file (`./<f>`), always the fixed three, never `.bmad-loop`", () => {
+    const wt = tempDir("tk-sup-dw68-");
+    mkdirSync(join(wt, ".bmad-loop"), { recursive: true });
+    mkdirSync(join(wt, "game"), { recursive: true });
+    mkdirSync(join(wt, "apps"), { recursive: true });
+    writeFileSync(join(wt, "project.godot"), "", "utf-8");
+    expect(judgeDenyRules(wt)).toEqual(["./_bmad-output/**", "./apps/**", "./game/**", "./plugins/**", "./project.godot"]
+      .flatMap((t) => [`Edit(${t})`, `Read(${t})`, `Write(${t})`]));
+  });
+
+  test("DW-68: a deny profile that cannot be written is the judge's infrastructure (`inconclusive`, `infrastructure: sbx: …`); the worker never starts", async () => {
+    const config = base + PLAYABLE;
+    const fx = fixture(config);
+    const blocked = join(fx.wt, ".bmad-loop", "runs", "20261027-eng", JUDGE_DENY_PROFILE);
+    mkdirSync(join(blocked, "x"), { recursive: true }); // a folder where the profile goes: the rename refuses
+    const { calls, spawner } = judgeSpawner();
+    const { run } = recorder(config, [0, 0]);
+    const v = await hostVerify(fx.run, 60, { env: legEnv().env, run: run as any, route, sbx: pinOk as any, spawner }) as HostVerifyRan;
+    expect(v.playable).toMatchObject({ verdict: "inconclusive", judge: { status: "blocked" } });
+    expect(v.playable!.reason).toStartWith("infrastructure: sbx: ");
+    expect(isRed(v)).toBe(false);
+    expect(calls).toEqual([]);
+  }, 30_000);
+
+  test("DW-68: an injected `deps.judge` writes no deny profile; judge.json handling unchanged", async () => {
+    const config = base + PLAYABLE;
+    const fx = fixture(config);
+    const { run } = recorder(config, [0, 0]);
+    const v = await hostVerify(fx.run, 60, { env: legEnv().env, run: run as any, judge: fakeJudge({ verdict: "pass", findings: [] }).judge, route }) as HostVerifyRan;
+    expect(v.playable).toMatchObject({ verdict: "pass" });
+    expect(existsSync(join(fx.wt, ".bmad-loop", "runs", "20261027-eng", JUDGE_DENY_PROFILE))).toBe(false);
   }, 30_000);
 
   test("judge.json re-validated by the host: verdict, rubric ids, frames of report.json, a fail with findings; else `fail` (`judge: …`)", async () => {
