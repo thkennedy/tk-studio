@@ -302,4 +302,7 @@ Gate: Part A not-required; Part B story accepted, planned 38-5-the-pause-path-fi
 | review | 1 | 2026-11-08T07:39:56Z | 2026-11-08T08:07:22Z | bf76f03b-e0eb-470b-9531-b9f5a333da04 | claude-opus-5-5 | medium | 10115819 | 98162 | 6.9647 | completed |
 | review | 2 | 2026-11-08T08:07:22Z | 2026-11-08T08:22:26Z | 28f30a8b-2dcb-4522-a141-26f0a3c09638 | claude-opus-5-5 | medium | 9845349 | 62033 | 5.5903 | completed |
 | gate | 1 | 2026-11-08T08:22:26Z | 2026-11-08T08:25:54Z | a3a1908e-cd27-4615-becb-466d6d3b5414 | claude-opus-5-5 | medium | 2558588 | 16828 | 1.6176 | completed |
+| host-leg | 1 | 2026-11-08T08:25:58Z | 2026-11-08T09:25:12Z | — | — | — | — | — | — | green |
+| close-out | 1 | 2026-11-08T09:25:12Z | 2026-11-08T09:25:21Z | — | — | — | — | — | — | PR |
+| merge | — | 2026-11-08T09:26:02Z | 2026-11-08T09:26:02Z | — | — | — | — | — | — | merged |
 
