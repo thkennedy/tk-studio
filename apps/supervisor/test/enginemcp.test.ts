@@ -19,7 +19,7 @@ import { killRecordedWorker, processStartTime, Queue, type Owner, type QueueRun 
 import { releasePin, type SandboxDeps } from "../src/sandbox";
 import { release } from "../src/worktree";
 import type { RunResult } from "../src/server";
-import { fakeBin, fakeGh, fakeSbx, fakeStudioRoot, gitInit, RUNTIME_GITIGNORE } from "./fakes";
+import { fakeBin, fakeGh, fakeSbx, fakeStudioRoot, FIXTURE_POLICY, gitInit, RUNTIME_GITIGNORE } from "./fakes";
 import { tempDir, track } from "./tmp";
 
 // Another live driver (never this process: `ownerLive` reads a row with this pid and host as a dead predecessor).
@@ -968,6 +968,10 @@ describe.skipIf(!canRunE2E)("end to end: the definition's flag, and a drained fl
       { env: { ...process.env, TK_STUDIO_HOME: store }, encoding: "utf-8", timeout: 120_000 });
     if (reg.status !== 0) throw new Error(`register failed: ${reg.stdout}${reg.stderr}`);
     gitInit(root, { ".gitignore": RUNTIME_GITIGNORE, ...files });
+    // Story 38.5 (CAP-14): a run worktree whose checkout has no `.bmad-loop/policy.toml` is refused by name, so the
+    // fixture checkout holds the untracked policy `gitRepo` gives every fixture (the worktree copies it).
+    mkdirSync(join(root, ".bmad-loop"), { recursive: true });
+    writeFileSync(join(root, ".bmad-loop", "policy.toml"), FIXTURE_POLICY);
     return { root, projectId: basename(root) };
   }
 
