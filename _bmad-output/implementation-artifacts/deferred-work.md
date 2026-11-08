@@ -238,7 +238,8 @@ source_spec: `28-6-the-plugin-side-honours-the-queues-starter-lock-spec.md`
 location: plugins/tk-studio/lib/jobrun.py checkout match / apps/supervisor/src/queue.ts foldCase
 severity: low
 reason: apps/supervisor/src/queue.ts foldCase lowercases on win32 and darwin; the story (AC1) pins the plugin's compare as "case-folded on Windows", so folding darwin would extend the story. Supervisor hosts are the Windows agent PC and the Linux engine today. DEFERRAL DISCIPLINE (a): AC1's checkout match. Edge-case-hunter, review pass 2026-10-17.
-status: open
+status: done 2026-11-08
+resolution: resolved by sweep bundle dw-jobrun-finish-and-lock-match
 
 ### DW-28: Follow-up review still recommended for 29-3-the-office-projection-semantic-states-progress-and-its after the damping cap was spent
 origin: review-budget-followup
@@ -1100,7 +1101,8 @@ source_spec: `spec-dw-5-job-finish-idempotence.md`
 location: plugins/tk-studio/lib/jobrun.py:375
 severity: low
 reason: update_run persists the terminal state before _finalize_run; _finalize_run guards only capture, and _land_summary (write_workspace_json) can raise before the emit. Before DW-5 a repeat finish re-ran _finalize_run. The intent mandates the no-op, so the fix belongs in _finalize_run ordering or a finalized marker (deferral class b, AD-12 exactly-once).
-status: open
+status: done 2026-11-08
+resolution: resolved by sweep bundle dw-jobrun-finish-and-lock-match
 
 ### DW-129: Two concurrent finish calls on the same non-terminal run can both pass the pre-read and both emit a job-run event.
 origin: spec-deferred a597f7911645
@@ -1109,7 +1111,8 @@ location: plugins/tk-studio/lib/jobrun.py:701
 severity: low
 reason: The read_run check in finish and the write in update_run are separate, unlocked steps, and update_run accepts a same-state terminal rewrite (job.py:586). This race predates DW-5 (which only closes the sequential repeat); closing it needs a check inside update_run or a lock, which the DW-5 spec forbids changing (deferral class b, AD-12).
 decision: owner 2026-11-07 (TKSTUDIO-222): A — accept it: `finish` is single-writer and a concurrent finish on one run is not supported, written into `jobrun.py`'s docstring and the contract's §4, then closed; stays open for that docstring and contract line (the sweep bundle)
-status: open
+status: done 2026-11-08
+resolution: resolved by sweep bundle dw-jobrun-finish-and-lock-match
 
 ### DW-130: A block the operator resolved by resuming the run leaves its Jira issue in `Blocked - Awaiting User`: no resume path transitions out of the block, and the Done promotion then holds as an AD-5 conflict with the owner still tagged (hole 101).
 origin: hole 101 (Story 35.2's run, 2026-10-29 02:52Z; noticed by the owner 19:xxZ)

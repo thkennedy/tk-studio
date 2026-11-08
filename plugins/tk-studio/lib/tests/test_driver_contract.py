@@ -3800,6 +3800,30 @@ class DriverContractTestCase(unittest.TestCase):
                        "newer than the newest `go` line"):
             self.assertIn(phrase, note)
 
+    def test_0_1_34_dw_27_dw_128_dw_129_finish_single_writer_and_darwin_fold(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.34**", header)
+        self.assertNotIn("**0.1.35**", header)
+        finish_row = next(line for line in self.text.splitlines()
+                          if line.startswith("| `finish` |"))
+        self.assertIn("One `job-run` event per terminal transition (AD-12). `finish` is single-writer: "
+                      "a concurrent finish on one run is not supported (DW-129, TKSTUDIO-222 A) |", finish_row)
+        flat = " ".join(self.text.split())
+        self.assertIn("(case-folded on Windows and macOS, as the supervisor's `foldCase`)", flat)
+        self.assertNotIn("(case-folded on Windows).", flat)
+        title = "**0.1.34 (DW-27, DW-128, DW-129, clarification).**"
+        self.assertEqual(flat.count(title), 1)
+        self.assertLess(flat.index("**0.1.34 (DW-52, DW-53, additive).**"), flat.index(title))
+        note = flat[flat.index(title):]
+        note = note[:note.index("## 8. Conformance")]
+        for phrase in ("DW-27", "DW-128", "DW-129", "TKSTUDIO-222", "single-writer",
+                       "a concurrent finish on one run is not supported", "no lock",
+                       "still emits its one `job-run` event before the error propagates",
+                       "folds case on Windows and on macOS, to match the supervisor's `foldCase`",
+                       "No verb, field, route or version changes."):
+            self.assertIn(phrase, note)
+
     def test_0_1_34_dw_51_a_reapproval_drops_the_superseded_cycles_issues(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))

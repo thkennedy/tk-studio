@@ -842,7 +842,7 @@ on the harness-native substrate:
 | `resolve` | `{job_id?}` (0.1.12) | one entry — `{job_id, source: instance\|type, extends?, path, problems[], resolved}` with `resolved` the merged definition — or, with no `job_id`, `{jobs: [entry...], problems[]}` covering every declared job in config order | read-only. Type extension (an instance extending a shipped type) is applied **studio-side by the one resolver** — a driver classifies recurring work from the `trigger`/`cadence` served here and never merges or raw-reads `.tk-studio/jobs/<id>.json` (PROP-008: an instance inheriting trigger/cadence from its type read as trigger-less through the raw file). A declared job's problems ride its entry named in place — never silently dropped; an unknown id is a named refusal |
 | `cancel` | `{job_id, run_id?}` | `{cancelled: bool, reason?}` | stop scheduling; a running run terminates `partial` with reason `cancelled` |
 | `wake` | `{job_id}` | `{woken: bool, run_id?, reason?, starter_lock?}` (0.1.23) | fire a self-paced/loop job's next iteration now (the retired ClaudeOS mission-runner "tick" mapped here, historical) |
-| `finish` | `{run_id, state, reason?, status_block?, total_cost_usd?}` (0.1.18; CLI `jobrun.py finish --directory DIR --run-id RID --state STATE [--reason R] [--status-block JSON] [--total-cost-usd USD]`) | `{run_id, state, reason, capture?}` | the executing wrapper's terminal-transition verb (§2). `state` is one of `complete\|partial\|blocked\|cancelled` (the run schema's terminal states; the CLI refuses any other); `partial`, `blocked` and `cancelled` require a `reason`, refused by name otherwise. `total_cost_usd` (ST-061) is optional — the worker's `--output-format json` cost — a non-negative, finite number recorded in `run.json`; absent when not given, never zero-filled; an invalid value is refused by name before anything is written (AD-3). On a terminal state the run is finalized (`capture`) and one `job-run` event is emitted, carrying `total_cost_usd` when recorded. One `job-run` event per terminal transition (AD-12) |
+| `finish` | `{run_id, state, reason?, status_block?, total_cost_usd?}` (0.1.18; CLI `jobrun.py finish --directory DIR --run-id RID --state STATE [--reason R] [--status-block JSON] [--total-cost-usd USD]`) | `{run_id, state, reason, capture?}` | the executing wrapper's terminal-transition verb (§2). `state` is one of `complete\|partial\|blocked\|cancelled` (the run schema's terminal states; the CLI refuses any other); `partial`, `blocked` and `cancelled` require a `reason`, refused by name otherwise. `total_cost_usd` (ST-061) is optional — the worker's `--output-format json` cost — a non-negative, finite number recorded in `run.json`; absent when not given, never zero-filled; an invalid value is refused by name before anything is written (AD-3). On a terminal state the run is finalized (`capture`) and one `job-run` event is emitted, carrying `total_cost_usd` when recorded. One `job-run` event per terminal transition (AD-12). `finish` is single-writer: a concurrent finish on one run is not supported (DW-129, TKSTUDIO-222 A) |
 
 Guarantees a driver can rely on:
 
@@ -965,8 +965,8 @@ is the only starter of runs on that checkout. `submit` and `wake` honour it:
   before; only then is the lock read, and a refusal mints nothing (no run
   record, no `job-run` event, no directive).
 - **Matching lock.** `starter` is the queue's and `checkout` equals the
-  project root as canonical absolute paths (case-folded on Windows). An
-  unreadable or malformed lock (bad JSON; a missing `starter`, `checkout`
+  project root as canonical absolute paths (case-folded on Windows and
+  macOS, as the supervisor's `foldCase`). An unreadable or malformed lock (bad JSON; a missing `starter`, `checkout`
   or `supervisor_pid`; a pid that is not a positive integer; an unparsable
   `since`), a foreign `starter` or another checkout is **no lock** — it
   never refuses.
@@ -3018,6 +3018,14 @@ composes, runs `engage.py closeout`, applies `run-ended` from `in-progress` and 
 line. **The serve process:** `approve.ts` and `delivery.ts` run in serve, so the operator stops the supervisor before
 `apps/supervisor` is built and restarts it through the scheduled task after the merge. No state-table row, route or version
 changes; every other field, kind and route is unchanged.
+
+**0.1.34 (DW-27, DW-128, DW-129, clarification).** `finish` emits its event exactly once, is single-writer, and the starter
+lock folds case on macOS (TKSTUDIO-222). A terminal `finish` whose summary write raises still emits its one `job-run` event
+before the error propagates to the caller (DW-128, AD-12), so no terminal run is left without its event. `finish` is
+single-writer: a concurrent finish on one run is not supported (DW-129, TKSTUDIO-222 A) — its pre-check and the run update
+are not atomic, so two racing calls can both emit; the owner accepted this with no lock. The starter lock's matching folds
+case on Windows and on macOS, to match the supervisor's `foldCase` (DW-27): a mixed-case macOS root now matches a live lock.
+No verb, field, route or version changes.
 
 ## 8. Conformance
 
