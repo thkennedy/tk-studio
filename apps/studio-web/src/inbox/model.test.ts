@@ -1,11 +1,12 @@
 // Story 31.6: the Inbox screen's rules from the fixture without a browser: only the open items, in the order served,
 // per project in the order given, each with project, key, title, priority, waited and the reason's first line; the
 // nav count; the fetch (never throws, names the supervisor's error, reads the CSRF header) and the refetch key.
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { createOfficeStore } from "../live/store";
 import { NONE } from "../office/model";
 import { inboxAnswer, NOW } from "./fixture";
-import { EMPTY_TEXT, fetchInbox, fetchInboxRows, firstLine, inboxNotice, inboxRefetchKey, inboxRows, LOADING_TEXT, inboxUrl, navCount, reasonLine, waitedText, type FetchLike } from "./model";
+import { EMPTY_TEXT, fetchInbox, INBOX_COLUMNS, fetchInboxRows, firstLine, inboxNotice, inboxRefetchKey, inboxRows, LOADING_TEXT, inboxUrl, navCount, reasonLine, waitedText, type FetchLike } from "./model";
 
 const answering = (status: number, body: unknown, headers: Record<string, string> = {}): FetchLike & { urls: string[] } => {
   const urls: string[] = [];
@@ -21,11 +22,33 @@ describe("the inbox rows (Story 31.6)", () => {
   it("only the open items, in the order served, with project, key, title, priority, waited and the reason's first line", () => {
     const rows = inboxRows([inboxAnswer()], NOW);
     expect(rows).toEqual([
-      { project: "p", key: "TKS-3", title: "Gamma", priority: "Highest", waited: "5m", reason: "Blocked: which spec wins?" },
-      { project: "p", key: "TKS-5", title: NONE, priority: NONE, waited: "2d", reason: "the token expired" },
-      { project: "p", key: "TKS-7", title: NONE, priority: "Medium", waited: "3h", reason: NONE },
+      { project: "p", key: "TKS-3", title: "Gamma", priority: "Highest", waited: "5m", reason: "Blocked: which spec wins?", state: "open", kind: "block" },
+      { project: "p", key: "TKS-5", title: NONE, priority: NONE, waited: "2d", reason: "the token expired", state: "open", kind: "block" },
+      { project: "p", key: "TKS-7", title: NONE, priority: "Medium", waited: "3h", reason: NONE, state: "open", kind: "block" },
     ]);
     expect(navCount(rows)).toBe(rows.length);
+  });
+
+  it("Story 38.4: decision items are listed open and resolved (answered, awaiting the ingest), with state and kind", () => {
+    const base = inboxAnswer().items[0]!;
+    const items = [
+      { ...base, issue: "TKS-30", title: "Decision: DW-5 — keep?", decision: { ids: ["DW-5"] }, state: "open" },
+      { ...base, issue: "TKS-31", title: "Decisions: DW-7, DW-8 — drop?", decision: { ids: ["DW-7", "DW-8"] }, state: "resolved" },
+      { ...base, issue: "TKS-32", state: "resolved" },
+    ];
+    const rows = inboxRows([{ project: "p", items }], NOW);
+    expect(rows.map((r) => [r.key, r.kind, r.state, r.title])).toEqual([
+      ["TKS-30", "decision", "open", "Decision: DW-5 — keep?"],
+      ["TKS-31", "decision", "resolved", "Decisions: DW-7, DW-8 — drop?"],
+    ]);
+    expect(navCount(rows)).toBe(2);
+  });
+
+  it("Story 38.4: the table's header names one column per row cell, State after the title", () => {
+    expect(INBOX_COLUMNS).toEqual(["Project", "Issue", "Title", "State", "Priority", "Waited", "Reason"]);
+    const screen = readFileSync(new URL("./InboxScreen.tsx", import.meta.url), { encoding: "utf-8" });
+    expect(screen.match(/<td\b/g)?.length).toBe(INBOX_COLUMNS.length);
+    expect(screen).toContain("INBOX_COLUMNS.map(");
   });
 
   it("projects concatenate in the order given; an empty inbox shows no count", () => {

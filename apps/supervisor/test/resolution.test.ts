@@ -238,6 +238,16 @@ describe("Story 31.7: the resolution pass queues validate-resolution once per bl
     expect(validationRuns(q2).length).toBe(1);
   });
 
+  test("Story 38.4: a sweep decision item (resolved or validating) never queues validate-resolution", async () => {
+    const dec = (state: string) => ({ ...item(state), issue: "TKS-50", entity: undefined, decision: { ids: ["DW-5"] }, title: "Decision: DW-5 — keep?" });
+    const q = newQueue(), root = project({ items: [dec("resolved"), dec("validating")] });
+    expect(await resolutionPass(q, deps(root).d)).toEqual({ queued: [], resumed: [] });
+    expect(validationRuns(q)).toEqual([]);
+    expect(q.serviceEvents("validate-queued")).toEqual([]);
+    const q2 = newQueue(), both = project({ items: [dec("resolved"), item()] });
+    expect((await resolutionPass(q2, deps(both).d)).queued.length).toBe(1);
+  });
+
   test("no paused run, no routing file: queued with null paused_run and spec, the job's own routing (no model)", async () => {
     const q = newQueue(), root = project({ items: [item("resolved", null)] });
     const { d } = deps(root);

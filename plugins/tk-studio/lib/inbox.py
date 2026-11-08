@@ -3,7 +3,8 @@
 `_bmad-output/tracking/inbox.json`, version 1:
 
     {inbox_version: 1, generated_at, project_key,
-     items: [{issue, entity?, engagement?, title?, priority, blocked_since,
+     items: [{issue, entity?, engagement?, decision?, title?, priority,
+              blocked_since,
               reason_comment: {id, body, created} | null,
               state: open | resolved | validating}]}
 
@@ -28,6 +29,14 @@ DW-151; AD-6), so the item is read from the name.
                   `tk-studio-track block --engagement`); its `title` is the
                   summary; kept from the previous item when the summary
                   was not pulled
+  decision        Story 38.4: `{ids: [<DW ids>]}` when the pulled labels hold
+                  `tk-studio-decision` (a sweep decision issue, `tk-studio-
+                  track block --source sweep`): the ids from its entry in
+                  `_bmad-output/tracking/decisions-jira.json`, else the
+                  `DW-N` tokens of its summary; its `title` is the summary;
+                  kept from the previous item when the labels were not
+                  pulled. The tick's `sweepdecisions.ingest` reads the
+                  `resolved` ones; the supervisor's resolution pass skips them
   priority        the Jira `priority.name` as pulled; else the canonical
                   `priority` mapped (P0 Highest, P1 High, P2 Medium,
                   P3 Low); else null
@@ -56,6 +65,7 @@ from datetime import datetime
 from pathlib import Path
 
 import jirabackend
+import sweepdecisions
 import syncback
 
 INBOX_VERSION = 1
@@ -121,9 +131,22 @@ def sort_key(item: dict) -> tuple:
             str(item.get("issue")))
 
 
+def _decision(root: Path, key: str, labels, summary) -> dict | None:
+    """Story 38.4: `{ids}` for a pulled `tk-studio-decision` label, else
+    None (no labels pulled: None too, the caller keeps the previous)."""
+    if not isinstance(labels, list) or sweepdecisions.LABEL not in labels:
+        return None
+    entry = sweepdecisions.load_record(root)["issues"].get(key)
+    ids = sweepdecisions.entry_ids(entry) if entry is not None else []
+    if not ids and isinstance(summary, str):
+        ids = sorted({m.upper() for m in sweepdecisions.DW_RE.findall(summary)},
+                     key=sweepdecisions.dw_number)
+    return {"ids": ids}
+
+
 def _item(root: Path, key: str, status: str, pulled_priority,
           front: dict | None, previous: dict | None, now: datetime,
-          summary=None) -> dict:
+          summary=None, labels=None) -> dict:
     state = STATES[status]
     if state == "resolved" and (previous or {}).get("state") == "validating":
         state = "validating"
@@ -133,7 +156,16 @@ def _item(root: Path, key: str, status: str, pulled_priority,
     item = {"issue": key}
     engagement = ENGAGEMENT_SUMMARY_RE.match(summary) \
         if isinstance(summary, str) else None
-    if front:
+    decision = _decision(root, key, labels, summary)
+    if decision is None and labels is None and (previous or {}).get("decision"):
+        decision = previous["decision"]
+    if decision is not None:
+        item["decision"] = decision
+        if isinstance(summary, str) and summary:
+            item["title"] = summary
+        elif (previous or {}).get("title"):
+            item["title"] = previous["title"]
+    elif front:
         item["entity"] = front.get("id")
         if front.get("title"):
             item["title"] = front["title"]
@@ -170,7 +202,7 @@ def derive(root: Path, result: dict, project_key: str, plan_dir: Path,
         if name in STATES:
             items[key] = _item(root, key, name, fields.get("priority"),
                                fronts.get(key), previous.get(key), now,
-                               fields.get("summary"))
+                               fields.get("summary"), fields.get("labels"))
     for key, item in previous.items():
         if key not in latest:
             items[key] = item

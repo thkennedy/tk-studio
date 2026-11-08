@@ -1061,6 +1061,86 @@ class LedgerResolveTests(PlanSyncTestCase):
         self.assertEqual(path.read_bytes(), before)
 
 
+class LedgerDecideTests(PlanSyncTestCase):
+    """Story 38.4: `plansync.py ledger-decide` writes the owner's decision
+    line directly after the entry's `status:` line, idempotently."""
+
+    def _ledger(self, text: str = LEDGER_DOC) -> Path:
+        path = self.impl / "deferred-work.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8", newline="\n")
+        return path
+
+    def _cli(self, *args: str) -> tuple[int, dict]:
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = plansync.main(["ledger-decide", "--directory", str(self.root), *args])
+        return code, json.loads(out.getvalue())
+
+    def test_the_line_lands_after_status_once_then_unchanged(self):
+        path = self._ledger()
+        args = ("--id", "DW-2", "--letter", "B", "--text", "Close  it\n— fine",
+                "--issue", "TKSTUDIO-230", "--date", "2026-11-08")
+        code, out = self._cli(*args)
+        self.assertEqual(code, 0)
+        self.assertEqual(list(out)[-4:], ["status", "intent", "artifacts", "reason"])
+        self.assertEqual((out["status"], out["decided"], out["unchanged"]), ("complete", True, False))
+        line = "decision: B — Close it — fine (TKSTUDIO-230, 2026-11-08)"
+        self.assertEqual(out["line"], line)
+        self.assertEqual(out["written"], ["_bmad-output/implementation-artifacts/deferred-work.md"])
+        text = path.read_text(encoding="utf-8")
+        self.assertIn("### DW-2: second\norigin: spec-deferred bbb\nstatus: open\n" + line + "\n\n", text)
+        before = path.read_bytes()
+        code, again = self._cli(*args)
+        self.assertEqual(code, 0)
+        self.assertEqual((again["decided"], again["unchanged"], again["written"]), (False, True, []))
+        self.assertEqual(path.read_bytes(), before)
+        # the same answer re-ingested on another UTC date is the same decision
+        code, later = self._cli("--id", "DW-2", "--letter", "B", "--text", "Close  it\n— fine",
+                                "--issue", "TKSTUDIO-230", "--date", "2026-11-10")
+        self.assertEqual(code, 0)
+        self.assertEqual((later["decided"], later["unchanged"], later["written"], later["line"]),
+                         (False, True, [], line))
+        self.assertEqual(path.read_bytes(), before)
+        # a second, different decision line is kept beside the first (the engine's own too)
+        code, other = self._cli("--id", "DW-2", "--letter", "A", "--text", "Build",
+                                "--issue", "TKSTUDIO-231", "--date", "2026-11-09")
+        self.assertEqual(code, 0)
+        self.assertEqual(path.read_text(encoding="utf-8").count("decision: "), 2)
+
+    def test_refusals_write_nothing(self):
+        path = self._ledger()
+        before = path.read_bytes()
+        for args, why in (
+                (("--id", "DW-x", "--letter", "A", "--text", "t", "--issue", "TKSTUDIO-1"), "--id"),
+                (("--id", "DW-2", "--letter", "ab", "--text", "t", "--issue", "TKSTUDIO-1"), "--letter"),
+                (("--id", "DW-2", "--letter", "A", "--text", "t", "--issue", "nope"), "--issue"),
+                (("--id", "DW-2", "--letter", "A", "--text", "t", "--issue", "TKSTUDIO-1",
+                  "--date", "11/08"), "--date"),
+                (("--id", "DW-9", "--letter", "A", "--text", "t", "--issue", "TKSTUDIO-1"),
+                 "LedgerMissingId: DW-9 not in the ledger")):
+            code, out = self._cli(*args)
+            self.assertEqual(code, 2, why)
+            self.assertEqual(out["status"], "blocked")
+            self.assertIn(why, out["reason"])
+            self.assertNotIn("retryable", out)
+        self.assertEqual(path.read_bytes(), before)
+        self._ledger(LEDGER_DOC + "\n### DW-2: again\nstatus: open\n")
+        code, out = self._cli("--id", "DW-2", "--letter", "A", "--text", "t", "--issue", "TKSTUDIO-1")
+        self.assertEqual(code, 2)
+        self.assertIn("LedgerDuplicateId", out["reason"])
+
+    def test_a_dry_run_writes_nothing(self):
+        path = self._ledger()
+        before = path.read_bytes()
+        code, out = self._cli("--id", "DW-1", "--letter", "A", "--text", "t",
+                              "--issue", "TKSTUDIO-1", "--dry-run")
+        self.assertEqual(code, 0)
+        self.assertTrue(out["decided"])
+        self.assertEqual(out["written"], [])
+        self.assertEqual(path.read_bytes(), before)
+
+
 class StageFromRunTests(PlanSyncTestCase):
     """Story 38.3 (DW-165): `plansync.py stage --from-run` answers a sweep's
     bundles' engine passes as Stage Log rows, read only."""

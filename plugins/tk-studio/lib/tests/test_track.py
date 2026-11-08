@@ -455,6 +455,58 @@ class TransientTests(TrackTestCase):
         self.assertTrue(json.loads(out.getvalue())["retry"])
 
 
+class SweepSourceCliTests(TrackTestCase):
+    """Story 38.4: `block --source sweep` — each flag mix refused by name
+    (exit 2, no call), its own flags refused elsewhere, the dry run."""
+
+    def setUp(self):
+        super().setUp()
+        self.triage = self.root / "triage.json"
+        self.triage.write_text(json.dumps({"decisions": [{
+            "id": "DW-5", "question": "keep?", "context": "c", "recommendation": "1",
+            "options": [{"key": "1", "label": "Keep", "effect": "keep-open"},
+                        {"key": "2", "label": "Drop", "effect": "close"}]}]}),
+            encoding="utf-8")
+
+    def main(self, *argv):
+        out = io.StringIO()
+        with unittest.mock.patch.object(jirabackend, "client_for",
+                                        _client_with(self.fake)), \
+                contextlib.redirect_stdout(out):
+            code = track.main(["block", "--directory", str(self.root), *argv])
+        return code, json.loads(out.getvalue())
+
+    def test_each_mix_is_refused_by_name(self):
+        for extra, name in ((["--story", "ST-001"], "--story"),
+                            (["--engagement", "ENG-001"], "--engagement"),
+                            (["--reason", "r"], "--reason"),
+                            (["--resolves", "r"], "--resolves"),
+                            (["--kind", "cap"], "--kind")):
+            code, out = self.main("--source", "sweep", "--triage", str(self.triage),
+                                  "--run-id", "r1", *extra)
+            self.assertEqual(code, 2)
+            self.assert_track_block(out, "blocked")
+            self.assertIn(f"exclusive with {name}", out["reason"])
+        code, out = self.main("--story", "ST-001", "--reason", "r", "--resolves", "s",
+                              "--triage", str(self.triage))
+        self.assertEqual(code, 2)
+        self.assertIn("--source sweep's", out["reason"])
+        self.assertIn("not --story", track.block(self.root, "ST-001", "r", "s",
+                                                 source="sweep")["reason"])
+        self.assertEqual(self.fake.calls, [])
+
+    def test_the_dry_run_names_what_it_would_post(self):
+        code, out = self.main("--source", "sweep", "--triage", str(self.triage),
+                              "--run-id", "r1", "--dry-run")
+        self.assertEqual(code, 0)
+        self.assert_track_block(out, "partial")
+        self.assertEqual((out["source"], out["run_id"]), ("sweep", "r1"))
+        self.assertEqual(out["issues"], [{"issue": None, "ids": ["DW-5"], "created": False,
+                                          "transitioned": False, "commented": False}])
+        self.assertTrue(out["notes"][0].startswith('dry run: would create "Decision: DW-5 — keep?"'))
+        self.assertEqual(self.writes(), [])
+
+
 def _client_with(transport):
     real = jirabackend.client_for
 
@@ -1926,6 +1978,18 @@ class UnblockTests(TrackTestCase):
                        self.unblock(story="nonsense")):
             self.assertEqual(result["status"], "blocked")
         self.assertEqual(self.fake.calls, [])
+
+    def test_source_sweep_has_no_unblock_and_makes_no_call(self):
+        """Story 38.4 follow-up review patch 4: `sweep` joined SOURCES for
+        `block`; `unblock --source sweep` stays refused before any call."""
+        self.block("ST-001")
+        self.fake.calls.clear()
+        result = self.unblock(source="sweep")
+        self.assert_track_block(result, "blocked")
+        self.assertIn("--source sweep has no unblock", result["reason"])
+        self.assertIn("no Atlassian call made", result["reason"])
+        self.assertEqual(self.fake.calls, [])
+        self.assertEqual(self.fake.status[f"{KEY}-1"], BLOCKED)
 
     def test_dry_run_writes_nothing(self):
         self.block("ST-001")

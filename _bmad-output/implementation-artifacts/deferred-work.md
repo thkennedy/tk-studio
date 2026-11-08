@@ -1,6 +1,6 @@
 # Deferred Work
 
-<!-- deferred-work counter: last minted DW-187; mint through plansync.py deferred mint -->
+<!-- deferred-work counter: last minted DW-188; mint through plansync.py deferred mint -->
 
 ### DW-124: Contract §4 `submit` admitted a full job definition but the CLI/skill surface was id-only
 origin: migrated from legacy ledger ("Deferred from: code review of feat/tk-studio-connector (2026-08-06)"), 2026-10-29
@@ -1442,7 +1442,8 @@ source_spec: `apps/supervisor/README.md` (the `run-sweep` paragraph: decisions "
 location: plugins/tk-studio/lib/track.py `block` (no `--source sweep`); plugins/tk-studio/lib/launch.py `sweep` (the triage's `decisions [{id, question}]` carry no options or default); apps/supervisor/src/sweep.ts (the `sweep-triage` event); the inbox tick (syncback.py / inbox.py: a `Block Resolved` decision item has no ingest); `_bmad-output/tracking/decisions-jira.json` (the hand-posted mapping, local)
 severity: medium
 reason: The triage names each decision as a bare question, the engine skips it, the PR lists it, and nothing asks the owner anywhere he answers; the October sweeps left 68 unanswered and the fourth sweep is gated on them. On 2026-11-05 the 71 ids were re-verified against `main` (47 live, 24 resolved since; three subagents, evidence per entry), grouped into 19 related decisions, each with lettered options and a recommended default, and posted as Tasks TKSTUDIO-206 to 224 (label `tk-studio-decision`, assignee the owner, `Blocked - Awaiting User`, the mention comment) by a scratch script. Fix to make (beside Story 37.5, before the fourth sweep): the triage carries `options[]` and `default` per decision; `track.py block --source sweep` posts one issue per related group from the run's `triage.json` in the engagement-questions shape; the inbox tick ingests a decision item at `Block Resolved` (`<id>: <letter>` lines, `all:`, `default`), writes `decision:` onto the ledger entry and answers `bmad-loop decisions` in the sandbox, replies naming what is still open and re-blocks when a line is missing; the studio web's inbox shows the same items. The nineteen hand-posted issues are ingested by hand on their answers until the verb exists.
-status: open
+resolution: Story 38.4 (contract 0.1.34): triage decisions lettered with a default (`sweepdecisions`, `triage_summary`, `parseTriage`); `track.py block --source sweep` from the sweep's close-out on a bound project (one `tk-studio-decision` Task per related group, the record `_bmad-output/tracking/decisions-jira.json`, the PR body listing the keys); the sync-back ingest (`decision:` lines through `plansync.py ledger-decide`, the reply, Done or a re-block); the engine answered at the close-out; the inbox `decision` item and the web rows; the promote's block edge (a)
+status: resolved 2026-11-08 by Story 38.4 (the owner's decisions have a source and a sink: `track.py block --source sweep`, the tick's ingest, `ledger-decide`, the engine answer at the close-out, the inbox decision rows; TKSTUDIO-220..224 ingested by the verb when they return)
 
 ### DW-172: DW-150's remainder: the planner's test guidance does not name the 30 000 ms host figure, so fixture-heavy tests and widened drive filters are still planned on the Linux gate's timings.
 origin: DW-150's resolution (Story 37.2 review pass 1, 2026-11-05)
@@ -1573,4 +1574,12 @@ source_spec: `kb/agent-pc-setup-runbook.md` fixes row "hole 115"; `handoff-phase
 location: plugins/tk-studio/lib/plansync.py plan-status (the Jira call behind the `in-progress` sync); apps/supervisor/src/planstatus.ts (the pass that records the answer)
 severity: low
 reason: At launch the pass read `ok: false, error: blocked, reason: "cannot reach api.atlassian.com: <urlopen error [WinError 10060] A connection attempt failed …"` and the story's `in-progress` never reached Jira; the end-of-run pass at 06:12:47Z synced fine (TKSTUDIO-228 `Done`), so the record healed itself, but a `blocked` written on a single transient refusal is a false alarm the operator reads past, and a launch whose only Jira write is this one leaves the issue `Backlog` for the run's whole length. Fix to make: retry a connection-level error (`URLError`, socket timeouts) a bounded number of times with a short back-off before writing `blocked`, and name the retry count in the reason when it still fails.
+status: open
+
+### DW-188: Follow-up review still recommended for 38-4-the-owners-decisions-have-a-source-and-a-sink after the damping cap was spent
+origin: review-budget-followup
+source_spec: `38-4-the-owners-decisions-have-a-source-and-a-sink-spec.md`
+location: n/a
+severity: low
+reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261108-062538-196e; this entry preserves the lingering recommendation for a deliberate later review.
 status: open

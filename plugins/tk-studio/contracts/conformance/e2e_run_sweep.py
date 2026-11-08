@@ -9,7 +9,9 @@ spawned, nothing leaves the temp folders):
                    `state.json` and a valid `triage.json` (two bundles, one
                    blocked, one decision): the block is `complete`, its
                    reason names all three, one `sweep-triage` ledger event
-                   lands (in a throwaway store)
+                   lands (in a throwaway store); Story 38.4: the decision's
+                   two options come back lettered `A`, `B` with the
+                   recommendation's letter as `default`
     dirty tree     an untracked file: the CLI's block is `blocked` naming it,
                    nothing spawned
     ledger-resolve a fixture ledger: the engine's `done` entry becomes
@@ -45,7 +47,7 @@ from _budget import bun_test_args, suite_bound  # the sibling helper: the suite'
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[2]
 SUITES = ["test/sweep.test.ts"]
-FILTER = "Story 35.7|Story 36.1|Story 36.2|Story 37.5|Story 38.3"
+FILTER = "Story 35.7|Story 36.1|Story 36.2|Story 37.5|Story 38.3|Story 38.4"
 TYPE_ID = "run-sweep"
 INSTALL_BOUND_S = 40
 # The filtered suite runs about 80 s on the win32 host's git (hole 108); under 60 s on the Linux gate.
@@ -69,10 +71,18 @@ TRIAGE = {
     "blocked": [{"id": "DW-4", "blocker": "a later story"}],
     "skip": [],
     "decisions": [{"id": "DW-5", "question": "keep or drop?", "context": "c",
-                   "options": [], "recommendation": "1"}],
+                   "options": [{"key": "1", "label": "Keep", "effect": "keep-open"},
+                               {"key": "2", "label": "Drop", "effect": "close",
+                                "resolution": "nothing reads it"}],
+                   "recommendation": "2"}],
     "escalations": [],
 }
 REASON = "bundles: a (DW-1, DW-2); b (DW-3); blocked: DW-4; decisions: DW-5"
+# Story 38.4: the decision's shape the triage projection answers
+DECISION = {"id": "DW-5", "question": "keep or drop?", "context": "c",
+            "options": [{"letter": "A", "text": "Keep", "key": "1", "effect": "keep-open"},
+                        {"letter": "B", "text": "Drop — nothing reads it", "key": "2", "effect": "close"}],
+            "default": "B"}
 
 LEDGER = """# Deferred Work
 
@@ -157,6 +167,9 @@ def lib_steps() -> list[dict]:
               and "--no-prompt" in fake.spawned[0])
         steps.append({"step": "sweep", "ok": bool(ok),
                       "detail": f"{block['status']}: {block['reason']}; sweep-triage events {len(events)}"})
+        decisions = (block.get("triage") or {}).get("decisions")
+        steps.append({"step": "decision shape", "ok": decisions == [DECISION],
+                      "detail": json.dumps(decisions, ensure_ascii=False)[:300]})
 
         (root / "stray.txt").write_text("x", encoding="utf-8")
         before = len(fake.spawned)

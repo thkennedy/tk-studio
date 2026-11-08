@@ -18,6 +18,7 @@ import {
   emitTriage, engineCostOf, isSweep, ledgerRemedyText, ledgerResolveCommand, stopEngine, sweepStageLogText, SWEEP_ENGINE_PROBE, SWEEP_LEDGER_WAIT_MS, SWEEP_STOP_DEADLINE_MS, sweepRecord, sweepStopPastDeadline, LEDGER_LEASE, LEDGER_RESOLVE, ledgerFingerprint, ledgerPass, recordTriage, summaryFromRecord, SWEEP_ENGINE_STOP, SWEEP_JOB_TYPE, SWEEP_TRIAGE, sweepCostText,
   sweepEndState, sweepSection, sweepTotalCost, withEngineCost, type SweepSummary,
 } from "../src/sweep";
+import { answerDecisions, parseTriage, postDecisions, SWEEP_DECISIONS_ANSWERED, SWEEP_DECISIONS_POSTED, sweepSummary } from "../src/sweep";
 import { launchedCloseOutInput, prBody, prepareWorktree, releaseHeldEngines, sweepEngines, wipMessage, type WorktreeDeps } from "../src/worktree";
 import { fakeGh, gitRepo, testGit } from "./fakes";
 import { tempDir } from "./tmp";
@@ -61,6 +62,10 @@ async function sweepFixture(opts: { prefix?: string; sandbox?: string } = {}) {
     emit: { exit: 0, stdout: JSON.stringify({ ok: true }), stderr: "" } as RunResult,
     /** Story 38.3: `plansync.py stage --from-run`'s answer (default: refused, the body says the Stage Log was not read). */
     stageRows: { exit: 2, stdout: JSON.stringify({ ok: false, error: "no stage rows here" }), stderr: "" } as RunResult,
+    /** Story 38.4: `track.py block --source sweep`'s answer (default: refused). */
+    track: { exit: 2, stdout: JSON.stringify({ ok: false, status: "blocked", reason: "track refused: no binding here" }), stderr: "" } as RunResult,
+    /** Story 38.4: any other `sbx exec` (the engine's `decisions` verb), answered here when set. */
+    sbx: undefined as ((args: string[]) => RunResult | undefined) | undefined,
   };
   const env = { ...process.env, TK_SUPERVISOR_WORK: work, GH_BIN: gh.bin, TK_STUDIO_ROOT: "/studio-root", TK_STUDIO_HOME: home };
   const sbxCalls: string[][] = [];
@@ -73,7 +78,7 @@ async function sweepFixture(opts: { prefix?: string; sandbox?: string } = {}) {
         sbxCalls.push(args);
         if (sbxLaunch(args) === "status") return { exit: 0, stdout: JSON.stringify(answers.launch), stderr: "" };
         if (sbxLaunch(args) === "stop") return answers.stop;
-        return { exit: 0, stdout: "", stderr: "" };
+        return answers.sbx?.(args) ?? { exit: 0, stdout: "", stderr: "" };
       },
       stopEngineMcp: async (_q: Queue, runId: string) => { mcpStops.push(runId); return true; },
     } } : {}),
@@ -91,6 +96,7 @@ async function sweepFixture(opts: { prefix?: string; sandbox?: string } = {}) {
       if (script.endsWith("meter.py") && args[0] === "price-run") return answers.price;
       if (script.endsWith("plansync.py") && args[0] === "stage" && args[1] === "--from-run") return answers.stageRows;
       if (script.endsWith("ledger.py") && args[0] === "emit") return answers.emit;
+      if (script.endsWith("track.py") && args[0] === "block") return answers.track;
       return { exit: 2, stdout: "", stderr: "unexpected script" };
     },
     verbs: async (_root, args) => { verbs.push(args); return { ok: true, state: args[args.indexOf("--state") + 1] }; },
@@ -160,7 +166,7 @@ describe("Story 35.7: the run-sweep job type", () => {
     expect(notes[0]!.detail).toEqual({
       engine_run_id: "E1", path: copy, ledger: "emitted",
       bundles: [{ name: "a", dw_ids: ["DW-1", "DW-2"] }, { name: "b", dw_ids: ["DW-3"] }],
-      blocked: [{ id: "DW-4", blocker: "Story 36.1 must land first" }], decisions: [{ id: "DW-5", question: "keep or drop?" }],
+      blocked: [{ id: "DW-4", blocker: "Story 36.1 must land first" }], decisions: [{ id: "DW-5", question: "keep or drop?", context: "c", options: [], default: null }],
       already_resolved: ["DW-6"], skip: [],
     });
     expect(JSON.parse(readFileSync(copy, "utf-8"))).toEqual(TRIAGE);
@@ -1947,5 +1953,206 @@ describe("Story 38.3: the sweep's path cleared", () => {
     expect((fx.queue.events(fx.id).findLast((e) => e.kind === "ended")!.detail as Record<string, any>).sweep.stage_error).toBe("no stage rows here");
     expect(sweepStageLogText(summary([true, false]))).toBeUndefined();
     expect(prBody({ runId: "r", commits: [], sweep: summary([true]) })).not.toContain("## Stage Log");
+  });
+});
+
+describe("Story 38.4: the owner's decisions have a source and a sink", () => {
+  const opts = (rec = "2") => ({
+    options: [{ key: "1", label: "Keep", effect: "keep-open" }, { key: "2", label: "Drop", effect: "close", resolution: "nothing reads it" }], recommendation: rec,
+  });
+  const TRIAGE38 = { ...TRIAGE, decisions: [{ id: "DW-5", question: "keep or drop?", context: "c", ...opts() }] };
+  const bind = (root: string) => {
+    mkdirSync(join(root, ".tk-studio"), { recursive: true });
+    writeFileSync(join(root, ".tk-studio", "config.yaml"), "planning:\n  jira:\n    project_key: TKSTUDIO\n");
+  };
+  const trackCalls = (fx: Awaited<ReturnType<typeof sweepFixture>>) =>
+    fx.studio.filter((c) => c.script.endsWith("track.py") && c.args[0] === "block" && c.args.includes("--source") && c.args[c.args.indexOf("--source") + 1] === "sweep");
+
+  test("parseTriage letters the skill's options and the default; a lettered note re-parses unchanged", () => {
+    const t = parseTriage({ decisions: [{ id: "DW-7", question: "q", context: "ctx", options: [
+      { key: "a", label: "Build  it", effect: "build", intent: "add\nthe flag" }, { key: "b", label: "Close", effect: "close" }], recommendation: "b" }] })!;
+    expect(t.decisions).toEqual([{ id: "DW-7", question: "q", context: "ctx", options: [
+      { letter: "A", text: "Build it — add the flag", key: "a", effect: "build" }, { letter: "B", text: "Close", key: "b", effect: "close" }], default: "B" }]);
+    expect(parseTriage(t)!.decisions).toEqual(t.decisions);
+    expect(parseTriage({ decisions: [{ id: "DW-8", question: "q", options: [] }] })!.decisions[0]).toMatchObject({ options: [], default: null });
+  });
+
+  test("a bound project: the close-out posts once, the PR body lists the keys, the record keeps them", async () => {
+    const fx = await sweepFixture();
+    bind(fx.root);
+    fx.triage(TRIAGE38);
+    fx.landed("a");
+    fx.commit("a.txt", "sweep bundle dw-a");
+    fx.answers.track = { exit: 0, stdout: JSON.stringify({ ok: true, status: "complete", source: "sweep", issues: [{ issue: "TKSTUDIO-230", ids: ["DW-5"], created: true }], skipped: [] }), stderr: "" };
+    fx.answers.launch = { ok: true, run: { status: "finished" } };
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.id]);
+    const calls = trackCalls(fx);
+    expect(calls).toHaveLength(1);
+    const a = calls[0]!.args;
+    expect(a.slice(0, 5)).toEqual(["block", "--directory", fx.root, "--source", "sweep"]);
+    expect(resolve(a[a.indexOf("--triage") + 1]!)).toBe(resolve(join(fx.runDir, "triage.json")));
+    expect(a[a.indexOf("--run-id") + 1]).toBe("run-sweep-20261029T101010Z");
+    expect(calls[0]!.root).toBe(fx.root);
+    const body = fx.gh.calls().find((c) => c.argv[0] === "pr" && c.argv[1] === "create")!.body!;
+    expect(body).toContain("### Human decisions\n\n- TKSTUDIO-230: DW-5\n\nAsked in Jira");
+    expect(body).not.toContain("- DW-5: keep or drop?");
+    const posted = fx.queue.events(fx.id).filter((e) => e.kind === SWEEP_DECISIONS_POSTED);
+    expect(posted.map((e) => e.detail)).toEqual([{ engine_run_id: "E1", ok: true, status: "complete", issues: [{ issue: "TKSTUDIO-230", ids: ["DW-5"] }], skipped: [] }]);
+    const ended = fx.queue.events(fx.id).findLast((e) => e.kind === "ended")!;
+    expect((ended.detail as Record<string, any>).sweep.decision_issues).toEqual([{ issue: "TKSTUDIO-230", ids: ["DW-5"] }]);
+    // a re-run's body rebuilds the keys from the record
+    expect(sweepSection(summaryFromRecord(fx.queue.events(fx.id))!).join("\n")).toContain("- TKSTUDIO-230: DW-5");
+  });
+
+  test("a partial post: the issue lines are asked in Jira, the bare questions keep the unattended line", async () => {
+    const fx = await sweepFixture();
+    bind(fx.root);
+    fx.triage({ ...TRIAGE, decisions: [{ id: "DW-5", question: "keep or drop?", context: "c", ...opts() },
+      { id: "DW-9", question: "other?", context: "c", ...opts() }] });
+    const s = sweepSummary(fx.queue, fx.get());
+    const text = sweepSection({ ...s, decision_issues: [{ issue: "TKSTUDIO-230", ids: ["DW-5"] }] }).join("\n");
+    expect(text).toContain("- TKSTUDIO-230: DW-5\n- DW-9: other?\n\n"
+      + "The issue lines: asked in Jira (`tk-studio-decision`, `Blocked - Awaiting User`): the owner answers there and the sync-back ingests the answers.\n"
+      + "The bare questions (no issue): skipped unattended (`--no-prompt`): `bmad-loop decisions` answers them.");
+    // every decision in an issue: the Jira footer alone
+    const all = sweepSection({ ...s, decision_issues: [{ issue: "TKSTUDIO-230", ids: ["DW-5", "DW-9"] }] }).join("\n");
+    expect(all).toContain("- TKSTUDIO-230: DW-5, DW-9\n\nAsked in Jira (`tk-studio-decision`");
+    expect(all).not.toContain("skipped unattended");
+    // a re-asked id's issue (the verb's `already re-asked on KEY`) is named in the body
+    fx.answers.track = { exit: 0, stdout: JSON.stringify({ ok: true, status: "complete", issues: [],
+      skipped: ["DW-5: already re-asked on TKSTUDIO-231", "DW-9: already asked on TKSTUDIO-230"] }), stderr: "" };
+    const out = await postDecisions(fx.queue, fx.get(), s, fx.deps, ["DW-5"]);
+    expect(out.decision_issues).toEqual([{ issue: "TKSTUDIO-231", ids: ["DW-5"] }, { issue: "TKSTUDIO-230", ids: ["DW-9"] }]);
+  });
+
+  test("an unbound root makes no call and keeps the bare questions; a failed post keeps them too, noted", async () => {
+    const fx = await sweepFixture();
+    fx.triage(TRIAGE38);
+    fx.landed("a");
+    fx.commit("a.txt", "sweep bundle dw-a");
+    fx.answers.launch = { ok: true, run: { status: "finished" } };
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.id]);
+    expect(trackCalls(fx)).toHaveLength(0);
+    expect(fx.queue.events(fx.id).filter((e) => e.kind === SWEEP_DECISIONS_POSTED)).toHaveLength(0);
+    const body = fx.gh.calls().find((c) => c.argv[0] === "pr" && c.argv[1] === "create")!.body!;
+    expect(body).toContain("- DW-5: keep or drop?\n\nSkipped unattended (`--no-prompt`): `bmad-loop decisions` answers them.");
+
+    const fx2 = await sweepFixture();
+    bind(fx2.root);
+    fx2.triage(TRIAGE38);
+    const s = sweepSummary(fx2.queue, fx2.get());
+    const out = await postDecisions(fx2.queue, fx2.get(), s, fx2.deps);
+    expect(out.decision_issues).toBeUndefined();
+    expect(sweepSection(out).join("\n")).toContain("- DW-5: keep or drop?");
+    const note = fx2.queue.events(fx2.id).findLast((e) => e.kind === SWEEP_DECISIONS_POSTED)!;
+    expect(note.detail).toMatchObject({ ok: false, status: "blocked", error: "track refused: no binding here" });
+    // retried on a later close-out: the verb skips what it asked, the earlier issue still named in the body
+    fx2.answers.track = { exit: 0, stdout: JSON.stringify({ ok: true, status: "complete", issues: [], skipped: ["DW-5: already asked on TKSTUDIO-230"] }), stderr: "" };
+    const again = await postDecisions(fx2.queue, fx2.get(), s, fx2.deps, ["DW-9"]);
+    expect(again.decision_issues).toEqual([{ issue: "TKSTUDIO-230", ids: ["DW-5"] }]);
+    expect(trackCalls(fx2).at(-1)!.args.slice(-2)).toEqual(["--ask", "DW-9"]);
+    // an injected bound check that says no: no call
+    const before = trackCalls(fx2).length;
+    await postDecisions(fx2.queue, fx2.get(), s, fx2.deps, [], () => false);
+    expect(trackCalls(fx2)).toHaveLength(before);
+  });
+
+  test("answerDecisions feeds the engine the leading matched keys in the sandbox; a changed option goes to --ask", async () => {
+    const fx = await sweepFixture({ sandbox: "sb-1" });
+    fx.triage({ ...TRIAGE, decisions: [
+      { id: "DW-5", question: "a?", ...opts() },
+      { id: "DW-7", question: "b?", options: [{ key: "1", label: "Renamed", effect: "keep-open" }, { key: "2", label: "Drop", effect: "build", intent: "x" }], recommendation: "1" },
+      { id: "DW-8", question: "c?", ...opts() }] });
+    const record = { version: 1, issues: {}, answers: {
+      "DW-5": { letter: "B", text: "Drop — nothing reads it", key: "2", label: "Drop", effect: "close", issue: "TKSTUDIO-230", date: "2026-11-08" },
+      "DW-7": { letter: "A", text: "Keep", key: "1", label: "Keep", effect: "keep-open", issue: "TKSTUDIO-231", date: "2026-11-08" },
+      "DW-8": { letter: "A", text: "Keep", key: "1", label: "Keep", effect: "keep-open", issue: "TKSTUDIO-232", date: "2026-11-08" } } };
+    mkdirSync(join(fx.root, "_bmad-output", "tracking"), { recursive: true });
+    writeFileSync(join(fx.root, "_bmad-output", "tracking", "decisions-jira.json"), JSON.stringify(record));
+    let pending = ["DW-5", "DW-8", "DW-7"];
+    const execs: string[][] = [];
+    fx.answers.sbx = (args) => {
+      if (args[0] !== "exec" || args[2] !== "sh") return undefined;
+      execs.push(args);
+      if (args[4]!.includes("decisions --json")) {
+        return { exit: 0, stdout: JSON.stringify({ schema_version: 1, decisions: pending.map((id) => ({ id, options: [{ key: "1" }, { key: "2" }] })) }), stderr: "" };
+      }
+      pending = pending.filter((id) => id !== "DW-5" && id !== "DW-8");
+      return { exit: 1, stdout: "", stderr: "EOFError" };
+    };
+    const s = sweepSummary(fx.queue, fx.get());
+    const ask = await answerDecisions(fx.queue, fx.get(), s, fx.deps);
+    expect(ask).toEqual(["DW-7"]);
+    const vm = toVmPath(fx.served);
+    expect(execs.map((a) => a[4])).toEqual([
+      `"$HOME/.local/bin/bmad-loop" decisions --json --project '${vm}'`,
+      `printf "%s\\n" 2 1 | "$HOME/.local/bin/bmad-loop" decisions --project '${vm}'`,
+      `"$HOME/.local/bin/bmad-loop" decisions --json --project '${vm}'`,
+    ]);
+    expect(execs[0]!.slice(0, 4)).toEqual(["exec", "sb-1", "sh", "-c"]);
+    const notes = fx.queue.events(fx.id).filter((e) => e.kind === SWEEP_DECISIONS_ANSWERED);
+    expect(notes.map((e) => e.detail)).toEqual([{ engine_run_id: "E1", answered: ["DW-5", "DW-8"], left: [], ok: true }]);
+    // once per engine run
+    await answerDecisions(fx.queue, fx.get(), s, fx.deps);
+    expect(execs).toHaveLength(3);
+  });
+
+  test("answerDecisions matches a hand-posted answer by its lettered text; an unreadable triage asks nothing", async () => {
+    const fx = await sweepFixture({ sandbox: "sb-3" });
+    fx.triage({ ...TRIAGE, decisions: [
+      { id: "DW-5", question: "a?", ...opts() },
+      { id: "DW-8", question: "c?", ...opts() },
+      { id: "DW-9", question: "d?", ...opts() }] });
+    mkdirSync(join(fx.root, "_bmad-output", "tracking"), { recursive: true });
+    writeFileSync(join(fx.root, "_bmad-output", "tracking", "decisions-jira.json"), JSON.stringify({ version: 1, issues: {}, answers: {
+      // a legacy issue's answer: no key, no effect, the label the whole option line
+      "DW-5": { letter: "B", text: "Drop  — nothing reads it", key: "", label: "drop — Nothing reads it", effect: "", issue: "TKSTUDIO-220" },
+      "DW-8": { letter: "A", text: "Keep", key: "", label: "KEEP", effect: "", issue: "TKSTUDIO-220" },
+      "DW-9": { letter: "C", text: "Other", key: "", label: "Something else", effect: "", issue: "TKSTUDIO-220" } } }));
+    let pending = ["DW-5", "DW-8", "DW-9"];
+    const execs: string[][] = [];
+    fx.answers.sbx = (args) => {
+      if (args[0] !== "exec" || args[2] !== "sh") return undefined;
+      execs.push(args);
+      if (args[4]!.includes("decisions --json")) {
+        return { exit: 0, stdout: JSON.stringify({ decisions: pending.map((id) => ({ id, options: [{ key: "1" }, { key: "2" }] })) }), stderr: "" };
+      }
+      pending = pending.filter((id) => id !== "DW-5" && id !== "DW-8");
+      return { exit: 1, stdout: "", stderr: "EOFError" };
+    };
+    const s = sweepSummary(fx.queue, fx.get());
+    expect(await answerDecisions(fx.queue, fx.get(), s, fx.deps)).toEqual(["DW-9"]);
+    expect(execs.map((a) => a[4]).find((c) => c!.startsWith("printf"))).toBe(`printf "%s\\n" 2 1 | "$HOME/.local/bin/bmad-loop" decisions --project '${toVmPath(fx.served)}'`);
+
+    // the run dir's triage files gone: no id is matched, none goes to --ask
+    const fx2 = await sweepFixture({ sandbox: "sb-4" });
+    fx2.triage({ ...TRIAGE, decisions: [{ id: "DW-5", question: "a?", ...opts() }] });
+    mkdirSync(join(fx2.root, "_bmad-output", "tracking"), { recursive: true });
+    writeFileSync(join(fx2.root, "_bmad-output", "tracking", "decisions-jira.json"), JSON.stringify({ version: 1, issues: {}, answers: {
+      "DW-5": { letter: "B", key: "2", label: "Drop", effect: "close", issue: "TKSTUDIO-230" } } }));
+    const s2 = sweepSummary(fx2.queue, fx2.get());
+    expect(s2.triage?.decisions.map((d) => d.id)).toEqual(["DW-5"]);
+    rmSync(join(fx2.runDir, "triage.json"));
+    const calls: string[][] = [];
+    fx2.answers.sbx = (args) => { calls.push(args); return undefined; };
+    expect(await answerDecisions(fx2.queue, fx2.get(), s2, fx2.deps)).toEqual([]);
+    expect(calls.filter((a) => a[2] === "sh")).toEqual([]);
+  });
+
+  test("answerDecisions skips a key failing the check: the walk stops, nothing piped", async () => {
+    const fx = await sweepFixture({ sandbox: "sb-2" });
+    fx.triage({ ...TRIAGE, decisions: [{ id: "DW-5", question: "a?", options: [{ key: "1;rm", label: "Keep", effect: "keep-open" }, { key: "2", label: "Drop", effect: "close" }], recommendation: "2" }] });
+    mkdirSync(join(fx.root, "_bmad-output", "tracking"), { recursive: true });
+    writeFileSync(join(fx.root, "_bmad-output", "tracking", "decisions-jira.json"), JSON.stringify({ version: 1, issues: {}, answers: {
+      "DW-5": { letter: "A", key: "1;rm", label: "Keep", effect: "keep-open", issue: "TKSTUDIO-230" } } }));
+    const execs: string[][] = [];
+    fx.answers.sbx = (args) => {
+      if (args[2] !== "sh") return undefined;
+      execs.push(args);
+      return { exit: 0, stdout: JSON.stringify({ decisions: [{ id: "DW-5", options: [{ key: "1;rm" }, { key: "2" }] }] }), stderr: "" };
+    };
+    expect(await answerDecisions(fx.queue, fx.get(), sweepSummary(fx.queue, fx.get()), fx.deps)).toEqual([]);
+    expect(execs.some((a) => a[4]!.startsWith("printf"))).toBe(false);
+    expect(fx.queue.events(fx.id).findLast((e) => e.kind === SWEEP_DECISIONS_ANSWERED)!.detail).toEqual({ engine_run_id: "E1", answered: [], left: ["DW-5"], ok: true });
   });
 });

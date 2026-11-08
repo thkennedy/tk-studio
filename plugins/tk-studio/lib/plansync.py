@@ -144,6 +144,19 @@ answer but a refusal (no ledger, a malformed `--pr` or id); the result
 names `resolved[]`, `pending[]`, `unchanged[]` and ends with the AD-11
 status block (`partial` while anything is pending).
 
+`ledger-decide` (Story 38.4, hole 112) writes the owner's answer to a sweep
+decision onto its ledger entry: `decision: <letter> — <text> (<KEY>,
+<YYYY-MM-DD>)` (the text on one line, clipped to 200) inserted directly after
+the entry's `status:` line, one atomic write; a line with the same letter,
+text and KEY already on the entry, whatever its date, is `unchanged` (no
+write; `line` is the existing one), and the entry's `status:` is never touched.
+The result is `{ok, ledger, id, line, decided, unchanged, dry_run, written}`
+with the AD-11 status block; a bad id, letter, key or date, a duplicate
+heading, a missing id (`LedgerMissingId`, as `ledger-resolve`'s) or no ledger
+is refused (`blocked`, exit 2). The sync-back's decision ingest
+(`sweepdecisions.ingest`) calls `ledger_decide` in process, one call per
+answered id.
+
 `deferred mint` (Story 37.1, DW-149) is the one id source for the ledger: it
 answers `ids` from `next.deferred-work` in the counter and bumps it in one
 atomic write, seeding an absent key first (the migration) as one past the
@@ -3604,6 +3617,71 @@ def ledger_resolve(project_root: Path, pr: str, ids: list[str], date: str | None
     return result
 
 
+# ------------------------------------------- Story 38.4: the owner's decision line
+
+_DECISION_LETTER_RE = re.compile(r"^[A-Z]$")
+_ISSUE_KEY_RE = re.compile(r"^[A-Z][A-Z0-9]+-\d+$")
+DECISION_TEXT_MAX = 200
+
+
+def decision_line(letter: str, text: str, issue: str, date: str) -> str:
+    """`decision: <letter> — <text, one line, clipped> (<KEY>, <date>)`."""
+    text = " ".join(str(text or "").split())
+    if len(text) > DECISION_TEXT_MAX:
+        text = text[:DECISION_TEXT_MAX - 1].rstrip() + "…"
+    return f"decision: {letter} — {text} ({issue}, {date})"
+
+
+def ledger_decide(project_root: Path, dw: str, letter: str, text: str, issue: str,
+                  date: str | None = None, dry_run: bool = False) -> dict:
+    """The owner's decision onto one ledger entry (see the module docstring)."""
+    root = Path(project_root)
+    if not _DW_ID_RE.match(dw or ""):
+        raise PlanSyncError(f"ledger-decide: --id must be DW-N: {dw!r}")
+    if not _DECISION_LETTER_RE.match(letter or ""):
+        raise PlanSyncError(f"ledger-decide: --letter must be one capital letter: {letter!r}")
+    if not _ISSUE_KEY_RE.match(issue or ""):
+        raise PlanSyncError(f"ledger-decide: --issue must be a Jira key: {issue!r}")
+    if date is None:
+        date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", date):
+        raise PlanSyncError(f"ledger-decide: --date must be YYYY-MM-DD: {date!r}")
+    path = root / LEDGER_REL
+    if not path.is_file():
+        raise PlanSyncError(f"ledger-decide: no ledger at {LEDGER_REL.as_posix()}")
+    ledger = path.read_text(encoding="utf-8")
+    span = _ledger_spans(ledger).get(dw)
+    if not span:
+        try:
+            tail = f"(the counter's next id: DW-{_deferred_next(root, ledger, load_counter(root))})"
+        except Exception as exc:  # a counter that cannot be read still names the missing id
+            tail = f"(the counter unreadable: {exc})"
+        raise dwledger.LedgerMissingId(f"LedgerMissingId: {dw} not in the ledger {tail}")
+    line = decision_line(letter, text, issue, date)
+    body = ledger[span[0]:span[1]]
+    # the same letter, text and KEY on any date is the same decision (a
+    # re-ingest on another UTC date writes no second line)
+    head = line[:-len(f"{date})")]
+    same = [ln for ln in body.splitlines()
+            if ln.startswith(head) and re.fullmatch(r"\d{4}-\d{2}-\d{2}\)", ln[len(head):])]
+    unchanged = bool(same)
+    if unchanged:
+        line = same[0]
+    rel = LEDGER_REL.as_posix()
+    if not unchanged:
+        status_m = _DW_STATUS_RE.search(body)
+        if not status_m:
+            raise PlanSyncError(f"ledger-decide: {dw} has no status: line")
+        at = span[0] + status_m.end()
+        ledger = ledger[:at] + "\n" + line + ledger[at:]
+        if not dry_run:
+            _atomic_write(path, ledger)
+    result = {"ok": True, "ledger": rel, "id": dw, "line": line, "decided": not unchanged,
+              "unchanged": unchanged, "dry_run": dry_run,
+              "written": [rel] if not unchanged and not dry_run else []}
+    return _finish_stage(result, "complete", None)
+
+
 DEFERRED_KEY = "deferred-work"
 
 
@@ -3728,6 +3806,14 @@ def main(argv: list[str] | None = None) -> int:
     lrs.add_argument("--ids", required=True, help="comma-separated DW ids")
     lrs.add_argument("--date", default=None, help="YYYY-MM-DD (default: the engine's done date)")
     lrs.add_argument("--dry-run", action="store_true")
+    lde = sub.add_parser("ledger-decide")
+    lde.add_argument("--directory", required=True, help="the owner root (walks up to the nearest)")
+    lde.add_argument("--id", required=True, dest="dw", help="the DW id")
+    lde.add_argument("--letter", required=True, help="the answered option's letter")
+    lde.add_argument("--text", required=True, help="the option's text")
+    lde.add_argument("--issue", required=True, help="the decision issue's Jira key")
+    lde.add_argument("--date", default=None, help="YYYY-MM-DD (default: today, UTC)")
+    lde.add_argument("--dry-run", action="store_true")
     dfr = sub.add_parser("deferred")
     dfr_sub = dfr.add_subparsers(dest="deferred_command", required=True)
     mnt = dfr_sub.add_parser("mint")
@@ -3748,6 +3834,8 @@ def main(argv: list[str] | None = None) -> int:
         return _stage_main(args)
     if args.command == "ledger-resolve":
         return _ledger_resolve_main(args)
+    if args.command == "ledger-decide":
+        return _ledger_decide_main(args)
     if args.command == "deferred":
         return _deferred_main(args)
     # --directory walks up to the nearest project root (driver contract
@@ -3806,6 +3894,27 @@ def _ledger_resolve_main(args) -> int:
     except Exception as exc:  # never a traceback: the caller retries
         result = _finish_stage({"written": []}, "blocked",
                                f"ledger-resolve: {type(exc).__name__}: {exc}")
+        result["error"] = result["reason"]
+        result["retryable"] = True
+    block = {k: result.pop(k) for k in ("status", "intent", "artifacts", "reason")}
+    result.update(block)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0 if result.get("ok") else 2
+
+
+def _ledger_decide_main(args) -> int:
+    """`ledger-decide`: every answer ends in the JSON status block (AD-11);
+    a refusal exits 2."""
+    root = configlib.find_project_root(Path(args.directory))
+    try:
+        result = ledger_decide(root, args.dw, args.letter, args.text, args.issue,
+                               date=args.date, dry_run=args.dry_run)
+    except (PlanSyncError, dwledger.LedgerDuplicateId, dwledger.LedgerMissingId) as exc:
+        result = _finish_stage({"written": []}, "blocked", str(exc))
+        result["error"] = str(exc)
+    except Exception as exc:  # never a traceback
+        result = _finish_stage({"written": []}, "blocked",
+                               f"ledger-decide: {type(exc).__name__}: {exc}")
         result["error"] = result["reason"]
         result["retryable"] = True
     block = {k: result.pop(k) for k in ("status", "intent", "artifacts", "reason")}

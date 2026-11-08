@@ -535,7 +535,7 @@ describe("Story 35.1: the re-run is a whole leg — the PR body, both flips, the
     const ended = fx.queue.events(fx.id).find((e) => e.kind === "ended")!;
     const merged: SweepSummary = {
       triage: { bundles: [{ name: "a", dw_ids: ["DW-1"], cycle: 1 }, { name: "c", dw_ids: ["DW-7"], cycle: 2 }], already_resolved: [], skip: [],
-        blocked: [{ id: "DW-4", blocker: "cycle one" }, { id: "DW-10", blocker: "cycle two" }], decisions: [{ id: "DW-11", question: "cycle two?" }] },
+        blocked: [{ id: "DW-4", blocker: "cycle one" }, { id: "DW-10", blocker: "cycle two" }], decisions: [{ id: "DW-11", question: "cycle two?", context: "", options: [], default: null }] },
       bundles: [{ name: "a", dw_ids: ["DW-1"], cycle: 1, key: "dw-a", landed: true, cost_usd: 1, source: "metered" }, { name: "c", dw_ids: ["DW-7"], cycle: 2, key: "dw2-c", landed: true, cost_usd: 1, source: "metered" }],
       engine_cost_usd: 2,
     };
