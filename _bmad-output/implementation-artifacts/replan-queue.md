@@ -618,3 +618,10 @@
 - What no longer holds: "the live `setup` ask gated on 37.4 being on `main`" (plans/37-7.md Settled shape 3) still holds, but the ask's expected answer is now one of three: `ok`, `partial` with `refused_transitions`, or the site's refusal.
 - Suggested adjustment: Have the CAP-16 ask run `--dry-run` first and record the answer verbatim, `refused_transitions` included. A non-empty `refused_transitions` is a named residual for the owner, not a 37.7 fix.
 - Status: closed — applied to the unstarted entry's invoke_dev_with by the 37-4 gate session (2026-11-06)
+
+## 38-5-the-pause-path-finished — scope: stories — from 38-2-a-run-that-does-no-work-says-so — 2026-11-08
+
+- What changed: `findSpec` (with `frontmatter`, `blockingCondition`, `snapshotFolders`, `snapshotReady`, `renderSignature`, `stashedSpec`) now lives in `apps/supervisor/src/worktree.ts` (`findSpec` :1032). `closeout.ts:272` re-exports it, so `closeout.findSpec` still resolves.
+- What no longer holds: plans/38-5.md Files: "`apps/supervisor/src/closeout.ts` (modify) — … `findSpec`'s rule"; Code Map: "`closeout.ts findSpec` :166-181"
+- Suggested adjustment: invoke_dev_with: edit `findSpec`'s split-spec rule in `worktree.ts` (already in Files), not `closeout.ts`; tests may import it from either module. This is no deviation from the Files list. Also re-grep 38-5's `worktree.ts` anchors, which moved from 1346 to 1689 lines.
+- Status: closed — applied to the unstarted 38-5 entry's invoke_dev_with by the 38-2 gate session (2026-11-08)

@@ -2967,6 +2967,24 @@ def _session_transcript(run_dir: Path, task_key: str,
     return None, copy_dir
 
 
+_RESULT_SUCCESS = ("done", "in-review", "ready-for-dev")
+
+
+def _session_outcome(session: dict):
+    """Story 38.2 (CAP-6, DW-180): a session's Stage Log outcome — its
+    status, unless the adapter answered `completed` for a session whose
+    `result_json.status` is a word other than a success (`done`,
+    `in-review`, `ready-for-dev`): that word (`halted`, `blocked`), so a
+    halted attempt's row never reads `completed`."""
+    status = session.get("status")
+    result = session.get("result_json")
+    word = result.get("status") if isinstance(result, dict) else None
+    if (status == "completed" and isinstance(word, str) and word.strip()
+            and word.strip() not in _RESULT_SUCCESS):
+        return word.strip()
+    return status
+
+
 def _backfill_rows(worktree: Path, run_dir: Path, task_key: str,
                    sessions: list[dict], doc: "_StageDoc",
                    recorded: dict[str, str], gates: set[str],
@@ -3031,7 +3049,7 @@ def _backfill_rows(worktree: Path, run_dir: Path, task_key: str,
             "effort": _routing_effort(worktree, stage),
             "tokens_in": tokens_in if metered else None,
             "tokens_out": tokens_out if metered else None,
-            "cost_usd": cost, "outcome": session.get("status")}))
+            "cost_usd": cost, "outcome": _session_outcome(session)}))
         on_record.add(sid)
     return rows
 
@@ -3060,7 +3078,9 @@ def stage_from_pass(worktree: Path, run_dir: Path, story: str,
     attempt whose row the rollback's reset reverted, or whose hook never
     wrote) is backfilled first, its outcome its own status (`timeout`), its
     tokens from its transcript else its state.json `usage`, its cost by
-    `meter.price` else `meter._session_usd` (`—` when unpriced)."""
+    `meter.price` else `meter._session_usd` (`—` when unpriced). Story 38.2
+    (CAP-6): every row's outcome is `_session_outcome` — a `completed`
+    session whose result reads `halted` writes `outcome: halted`."""
     worktree, run_dir = Path(worktree), Path(run_dir)
     state = _read_json_file(run_dir / "state.json")
     if state is None:
@@ -3131,7 +3151,7 @@ def stage_from_pass(worktree: Path, run_dir: Path, story: str,
         "effort": _routing_effort(worktree, stage),
         "tokens_in": tokens_in if metered else None,
         "tokens_out": tokens_out if metered else None,
-        "cost_usd": cost, "outcome": current.get("status")}))
+        "cost_usd": cost, "outcome": _session_outcome(current)}))
 
     on_record = [r for r in doc.rows() if r["stage"] == "consult"]
     seen_ids = {r["session_id"] for r in on_record}

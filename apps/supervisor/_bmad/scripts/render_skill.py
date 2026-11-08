@@ -296,6 +296,77 @@ def _verify_existing(destination: Path, manifest: dict[str, Any]) -> None:
             raise RenderError(f"generation output hash mismatch: {destination / name}")
 
 
+def _manifest_bytes(manifest: dict[str, Any]) -> bytes:
+    return (
+        json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8")
+        + b"\n"
+    )
+
+
+def _reread(destination: Path, expected: dict[str, bytes]) -> None:
+    for name, content in expected.items():
+        path = destination / name
+        os.stat(path)
+        if path.read_bytes() != content:
+            raise OSError(f"content differs after the write: {path}")
+
+
+def _verify_published(
+    destination: Path, outputs: dict[str, bytes], manifest: dict[str, Any]
+) -> None:
+    # tk-studio base patch render-skill-reread-fresh-destination: a stale sandbox view can follow the
+    # staging rename across the sbx mount (hole 65/114): every output and the manifest are stat-ed and
+    # re-read; on a failure the generation is removed (else renamed onto a fresh `.stale-<pid>` name; a
+    # destination the view does not show at all, gone on the removal, skips the rename) and the outputs
+    # written straight into a fresh destination (the manifest last), then re-read once more.
+    # Any OSError of the fallback (the rename, the mkdir, a write, the re-read) is a RenderError.
+    expected = {**outputs, "manifest.json": _manifest_bytes(manifest)}
+    try:
+        _reread(destination, expected)
+        return
+    except OSError:
+        pass
+    current = destination
+    try:
+        unseen = False
+        try:
+            shutil.rmtree(destination)
+        except FileNotFoundError:
+            if os.path.lexists(destination):
+                os.rename(destination, _fresh_stale_name(destination, os.getpid()))
+            else:
+                unseen = True
+        except OSError:
+            os.rename(destination, _fresh_stale_name(destination, os.getpid()))
+        # An unseen destination that reappears is written over: every byte is re-read below.
+        destination.mkdir(parents=True, exist_ok=unseen)
+        for name, content in expected.items():
+            if name == "manifest.json":
+                continue
+            current = destination / name
+            current.parent.mkdir(parents=True, exist_ok=True)
+            current.write_bytes(content)
+        current = destination / "manifest.json"
+        current.write_bytes(expected["manifest.json"])
+        for name in expected:
+            current = destination / name
+            _reread(destination, {name: expected[name]})
+    except OSError as error:
+        raise RenderError(f"failed to verify {current} after a direct write: {error}") from error
+
+
+def _fresh_stale_name(destination: Path, pid: int) -> Path:
+    # A name nothing holds yet (`.stale-<pid>`, then `-1`, `-2`, ...): a rename never lands on an
+    # existing folder (WinError 183).
+    base = f"{destination.name}.stale-{pid}"
+    candidate = destination.with_name(base)
+    counter = 0
+    while os.path.lexists(candidate):
+        counter += 1
+        candidate = destination.with_name(f"{base}-{counter}")
+    return candidate
+
+
 def _publish(destination: Path, outputs: dict[str, bytes], manifest: dict[str, Any]) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists():
@@ -333,6 +404,7 @@ def _publish(destination: Path, outputs: dict[str, bytes], manifest: dict[str, A
                 _verify_existing(destination, manifest)
             else:
                 raise
+        _verify_published(destination, outputs, manifest)
     finally:
         if staging.exists():
             shutil.rmtree(staging, ignore_errors=True)

@@ -40,6 +40,14 @@
  *              command and opens the PR as a draft carrying the failures (an open PR: `gh pr ready --undo` and
  *              `gh pr edit`, never ready); green or skipped on an open PR: `gh pr ready` and `gh pr edit` (the body
  *              regenerated with its `## Host verify`). A `host-verify` already recorded for the completion is reused, never re-run.
+ *              Story 38.2 (CAP-4, hole 114): such an end with no commit ahead of `base_ref` (`commitsAhead`, factored from the
+ *              close-out; a failed probe runs the leg as before) skips the leg (`host-verify {skipped: true, reason: "no changes"}`,
+ *              before the leg's lease); when the journal's current segment (else, a resumed engine's segment with none, the whole
+ *              journal) started a story whose spec (or the engine's stashed
+ *              copy) is not `done`, the run ends `partial` with `noStoryEnd`'s reason (`no story landed: story <key> ended <word>
+ *              after <n> dev attempt(s): <HALT text>; engine ended '<status>'`), its rows carried first (`stage-carry`); a spec
+ *              carrying the render signature over a ready snapshot (CAP-5) is paused instead (`paused_stage: "no-story"`) for
+ *              the paused-run pass's one relaunch. `finish` carries the close-out's cost, else the worker's `accounted` one.
  *              On the ended path the studio run is finished then (operator-decisions §2: not at
  *              launch return): `jobrun finish` with the deferred state and reason, the launch status
  *              block (the PR among its artifacts) and the metered cost. A close-out whose transition
@@ -85,9 +93,10 @@
  * origin's repository (`GH_REPO`, parsed from `git remote get-url origin`). Credentials never reach an
  * event: a failing command's output is clipped and any URL userinfo redacted.
  */
-import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { load as loadYaml } from "js-yaml";
 import { stopEngineMcp } from "./enginemcp";
 import { notifier, WorkDirMissing, workDir } from "./env";
 import { canonicalPr, isWithin, sendText } from "./hygiene";
@@ -624,6 +633,10 @@ export const engineState = (prefix?: string | null): string[] =>
 /** Story 37.3 (DW-148): the skipped leg's reason on a paused run whose worktree holds uncommitted work. */
 export const PAUSED_DIRTY = "paused: dirty tree";
 
+/** Story 38.2 (CAP-4): the skipped leg's reason on an engine end whose branch holds no commit ahead of its base (the tree
+ * equals the base: nothing for the leg to vouch for). */
+export const NO_CHANGES_SKIP = "no changes";
+
 /** Story 37.3 (DW-148): the engine's protected BMAD artifact folder (`_protected_relpaths`: `output_folder`, holding
  * `implementation_artifacts` and `planning_artifacts` in this layout), the last character bracketed as `ENGINE_STATE`. */
 const BMAD_ARTIFACTS = ":(exclude,glob)_bmad-outpu[t]/**";
@@ -716,6 +729,24 @@ export async function markPrDraft(deps: WorktreeDeps, cwd: string, pr: string): 
   } catch (e) { return `gh pr ready --undo: ${clip(message(e))}`; }
 }
 
+/** Story 38.2 (CAP-4, factored from `closeOut`): `git log --oneline <base_ref>..HEAD` in the worktree (`..<run branch>` from
+ * the checkout once the worktree is gone): the commits ahead of the base, or the failure. Never throws. */
+async function logAhead(run: Pick<QueueRun, "run_id" | "root" | "worktree" | "base_ref">, gone: boolean, deps: WorktreeDeps): Promise<{ commits: string[] } | { error: string }> {
+  try {
+    const r = await git(deps, gone ? run.root : run.worktree!, ["log", "--oneline", `${run.base_ref ?? ""}..${gone ? runBranch(run.run_id) : "HEAD"}`]);
+    if (r.exit !== 0) return { error: `git log ${failed(r)}` };
+    return { commits: r.stdout.split(/\r?\n/).map((l) => l.trim()).filter(Boolean) };
+  } catch (e) { return { error: `git log: ${clip(message(e))}` }; }
+}
+
+/** Story 38.2 (CAP-4): the commits a run's branch holds ahead of its `base_ref`, read as the close-out reads them
+ * (`logAhead`); undefined when no worktree or base is recorded or the probe failed (the leg then runs as before). */
+export async function commitsAhead(run: Pick<QueueRun, "run_id" | "root" | "worktree" | "base_ref">, deps: WorktreeDeps = {}): Promise<string[] | undefined> {
+  if (!run.worktree || !run.base_ref) return undefined;
+  const log = await logAhead(run, !existsSync(run.worktree), deps);
+  return "commits" in log ? log.commits : undefined;
+}
+
 /** The close-out of a run's worktree (see the header). Never throws: a failure is `error`. */
 export async function closeOut(
   run: Pick<QueueRun, "run_id" | "job_id" | "root" | "worktree" | "base_ref" | "prefix">,
@@ -790,11 +821,9 @@ export async function closeOut(
       proof = { frames: done.frames.map((f) => `${prefix}${f}`), ...(web ? { sheetUrl: `${web}/blob/${done.head}/${prefix}${done.sheet}?raw=true` } : {}) };
     } catch (e) { out.error = `host commit: ${clip(message(e))}`; return finish(); }
   }
-  try {
-    const r = await git(deps, at, ["log", "--oneline", `${base}..${gone ? branch : "HEAD"}`]);
-    if (r.exit !== 0) { out.error = `git log ${failed(r)}`; return finish(); }
-    out.commits = r.stdout.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-  } catch (e) { out.error = `git log: ${clip(message(e))}`; return finish(); }
+  const log = await logAhead(run, gone, deps);
+  if ("error" in log) { out.error = log.error; return finish(); }
+  out.commits = log.commits;
   if (!out.commits.length && !input.existingPr) { out.no_changes = true; return finish(); }
   if (out.commits.length) {
     try {
@@ -977,6 +1006,167 @@ export function closeOutDetail(c: CloseOut): Record<string, unknown> {
   };
 }
 
+// ------------------------------------------------------------ Story 38.2: the story's spec and the render signature
+
+// Lifted from `closeout.ts` (which re-exports each, as it does `engineState`): the engine-end sweep reads the story's spec
+// and the render failure's signature too, and `closeout.ts` already imports this module, so the edge stays one-way.
+
+/** A markdown file's leading `---` frontmatter, parsed as YAML (`js-yaml`: comments, quotes, null/`~`, block
+ * scalars as YAML reads them). `{}`: no frontmatter, unterminated, unparseable, or not a mapping. */
+export function frontmatter(text: string): Record<string, unknown> {
+  const lines = text.replace(/^\ufeff/, "").split(/\r?\n/);
+  if (lines[0]?.trim() !== "---") return {};
+  const end = lines.findIndex((l, i) => i > 0 && l.trim() === "---");
+  if (end < 0) return {};
+  try {
+    const doc = loadYaml(lines.slice(1, end).join("\n"));
+    return doc && typeof doc === "object" && !Array.isArray(doc) ? (doc as Record<string, unknown>) : {};
+  } catch { return {}; }
+}
+
+/** A frontmatter value as a trimmed non-empty string; anything else is missing. */
+const fmWord = (v: unknown): string | undefined => (typeof v === "string" && v.trim() ? v.trim() : undefined);
+
+/** A story's spec in the worktree (`reconcile.md` §1): `_bmad-output/implementation-artifacts/spec-<key>.md`,
+ * else the single match of `_bmad-output/specs/<any>/stories/<key>-*.md`. Undefined: none, or several. */
+export function findSpec(worktree: string, key: string): string | undefined {
+  if (!key || /[\\/]/.test(key) || key.includes("..")) return undefined;
+  const direct = join(worktree, "_bmad-output", "implementation-artifacts", `spec-${key}.md`);
+  if (existsSync(direct)) return direct;
+  const specs = join(worktree, "_bmad-output", "specs");
+  const hits: string[] = [];
+  let folders: string[] = [];
+  try { folders = readdirSync(specs); } catch { return undefined; }
+  for (const f of folders) {
+    let names: string[] = [];
+    try { names = readdirSync(join(specs, f, "stories")); } catch { continue; }
+    for (const n of names) if (n.startsWith(`${key}-`) && n.endsWith(".md")) hits.push(join(specs, f, "stories", n));
+  }
+  return hits.length === 1 ? hits[0] : undefined;
+}
+
+/** Story 38.2: the copy of a deferred story's spec the engine stashed (`_stash_deferred_artifacts`: the single `.md` under
+ * `<served>/.bmad-loop/runs/<engine id>/deferred/<key>/`); undefined when there is none, or several. */
+export function stashedSpec(served: string, engineRunId: string | null | undefined, key: string): string | undefined {
+  if (!engineRunId || !key || /[\\/]/.test(key) || key.includes("..")) return undefined;
+  const dir = join(served, ".bmad-loop", "runs", engineRunId, "deferred", key);
+  try {
+    const mds = readdirSync(dir).filter((n) => n.endsWith(".md"));
+    return mds.length === 1 ? join(dir, mds[0]!) : undefined;
+  } catch { return undefined; }
+}
+
+/** The spec's last `Blocking condition:` line, clipped; undefined when absent, empty or `none`. */
+export function blockingCondition(text: string): string | undefined {
+  const hits = [...text.matchAll(/^[ \t>*-]*Blocking condition:[ \t]*(.*)$/gim)];
+  const value = clip(hits.at(-1)?.[1] ?? "");
+  return value && value.toLowerCase().replace(/[.\s]+$/, "") !== "none" ? value : undefined;
+}
+
+/** Story 38.2: a spec's `## Auto Run Result` section (the heading's line to the next `## ` heading), "" when it has none. */
+export function autoRunResult(text: string): string {
+  const lines = text.split(/\r?\n/);
+  const at = lines.findIndex((l) => /^##\s+Auto Run Result\s*$/i.test(l.trim()));
+  if (at < 0) return "";
+  const next = lines.findIndex((l, i) => i > at && /^##\s/.test(l));
+  return lines.slice(at, next < 0 ? undefined : next).join("\n");
+}
+
+/** `render_skill.py` `_verify_existing`'s messages a stale view of an existing generation produces. */
+export const RENDER_HALT_MESSAGES = [
+  "corrupt existing generation", "generation contains unexpected or missing files", "failed to verify", "generation output hash mismatch",
+] as const;
+
+/** Story 38.2 (CAP-5): an unreadable generation entry as the sandbox shows it (`ls -la`'s `-?????????`) or an OS read failure. */
+export const RENDER_UNREADABLE_RE = /\?{9}|No such file or directory|Permission denied|ENOENT|EACCES|cannot (?:access|open|read)|unreadable/i;
+
+/** `_bmad/render/<skill>/<slug>/<generation>`, any separator (a path running on to a file is cut to the folder), `_bmad`
+ * at the start, after a separator or after any other character outside `[A-Za-z0-9_.-]`. */
+const SNAPSHOT_RE = /(?<![A-Za-z0-9_.-])_bmad[\\/]+render[\\/]+([A-Za-z0-9._-]+)[\\/]+([A-Za-z0-9._-]+)[\\/]+([A-Za-z0-9._-]+)/g;
+
+/** The distinct snapshot folders a reason names (`<skill>/<slug>/<generation>`); undefined when one names a `.` or
+ * `..` segment. */
+export function snapshotFolders(reason: string): string[] | undefined {
+  const out = new Set<string>();
+  for (const m of reason.matchAll(SNAPSHOT_RE)) {
+    // A path ending a sentence (`…/<generation>.`) is the folder: the generation's trailing dots are dropped.
+    const segs = [m[1]!, m[2]!, m[3]!.replace(/\.+$/, "")];
+    if (segs.some((s) => s === "" || s === "." || s === "..")) return undefined;
+    out.add(segs.join("/"));
+  }
+  // Story 36.3: a failed first render's reason names `.staging-*` and its generation: one snapshot, the generation.
+  const all = [...out], named = all.filter((f) => !isStaging(f));
+  return all.filter((f) => !isStaging(f) || !named.some((n) => parentOf(n) === parentOf(f)));
+}
+
+const isStaging = (folder: string): boolean => folder.slice(folder.lastIndexOf("/") + 1).startsWith(".staging-");
+const parentOf = (folder: string): string => folder.slice(0, folder.lastIndexOf("/"));
+
+/** Story 36.3: the `.staging-*` folders a reason names beside `generation` (`<skill>/<slug>/<generation>`). */
+function stagingFolders(reason: string, generation: string): string[] {
+  const out = new Set<string>();
+  for (const m of reason.matchAll(SNAPSHOT_RE)) {
+    const folder = `${m[1]!}/${m[2]!}/${m[3]!.replace(/\.+$/, "")}`;
+    if (isStaging(folder) && parentOf(folder) === parentOf(generation)) out.add(folder);
+  }
+  return [...out];
+}
+
+/** Story 38.2 (CAP-5): the render failure's signature, whatever status word the session wrote: the text (a paused reason
+ * and the spec's `## Auto Run Result` section) names exactly one snapshot folder and quotes a renderer message,
+ * `render_skill.py` or an unreadable entry (`RENDER_UNREADABLE_RE`). */
+export function renderSignature(text: string): boolean {
+  const folders = snapshotFolders(text);
+  if (!folders || folders.length !== 1) return false;
+  return RENDER_HALT_MESSAGES.some((m) => text.includes(m)) || text.includes("render_skill.py") || RENDER_UNREADABLE_RE.test(text);
+}
+
+/** A render snapshot a text names: relative to the served root (`/` separators), its folder, and (Story 36.3) the
+ * staging folders named beside the generation. */
+export interface RenderSnapshot { snapshot: string; dir: string; staging?: string[] }
+
+/** Story 38.2: the one snapshot folder `text` names, resolved under `<served>/_bmad/render/`; undefined when the text names
+ * none, several, or one that resolves elsewhere. */
+export function renderSnapshot(served: string, text: string): RenderSnapshot | undefined {
+  const folders = snapshotFolders(text);
+  if (!folders || folders.length !== 1) return undefined;
+  const base = resolve(served, "_bmad", "render"), dir = resolve(base, ...folders[0]!.split("/"));
+  if (!isWithin(base, dir) || dir === base) return undefined;
+  const staging = stagingFolders(text, folders[0]!).map((f) => resolve(base, ...f.split("/"))).filter((p) => isWithin(base, p));
+  return { snapshot: relative(served, dir).split("\\").join("/"), dir, ...(staging.length ? { staging } : {}) };
+}
+
+/** Story 36.3 (DW-110, hole 95): a failed first render: the reason names a staging folder and the generation beside it
+ * is empty or absent, so nothing of the snapshot's can be read as complete; it counts as the one snapshot. A reason
+ * naming a staging folder alone names no generation (`dir` is that folder): never one. */
+export function failedFirstRender(s: Pick<RenderSnapshot, "dir" | "staging">): boolean {
+  if (!s.staging?.length || isStaging(basename(s.dir))) return false;
+  try { return !existsSync(s.dir) || (lstatSync(s.dir).isDirectory() && readdirSync(s.dir).length === 0); } catch { return false; }
+}
+
+/** The auto-resume's folder check: a complete snapshot, or a failed first render. */
+export const snapshotReady = (s: Pick<RenderSnapshot, "dir" | "staging">): boolean => snapshotComplete(s.dir) || failedFirstRender(s);
+
+/** Story 33.6: the host sees the snapshot complete — `manifest.json` parses to an object whose `outputs` is a
+ * non-empty object, and each of its keys is a relative path inside `dir` naming a non-empty regular file. No hash
+ * is compared. */
+export function snapshotComplete(dir: string): boolean {
+  try {
+    const manifest = JSON.parse(readFileSync(join(dir, "manifest.json"), "utf-8"));
+    const outputs = manifest?.outputs;
+    if (!outputs || typeof outputs !== "object" || Array.isArray(outputs)) return false;
+    const names = Object.keys(outputs);
+    if (names.length === 0) return false;
+    for (const name of names) {
+      const path = resolve(dir, name);
+      if (!name || isAbsolute(name) || !isWithin(dir, path) || path === resolve(dir)) return false;
+      const st = lstatSync(path);
+      if (!st.isFile() || st.size <= 0) return false;
+    }
+    return true;
+  } catch { return false; }
+}
+
 // ------------------------------------------------------------ the engine-end sweep
 
 /** The engine statuses that end its life (launch.py TERMINAL_STATUSES). */
@@ -998,8 +1188,15 @@ export function engineEndState(status: unknown, storyDone = false): TerminalStat
  * segment's latest `story-start`/`story-done` entry is a `story-done` with a non-empty `story_key`. A missing
  * or unreadable journal answers false. Never throws. */
 export function storyLandedBeforeStop(journalDir: string): boolean {
+  const last = journalSegment(journalDir).findLast((e) => e.kind === "story-start" || e.kind === "story-done");
+  return last?.kind === "story-done" && typeof last.story_key === "string" && last.story_key.trim() !== "";
+}
+
+/** The engine journal's parsed entries (`<journalDir>/journal.jsonl`, read only; unparsable lines skipped); `[]` when
+ * missing or unreadable. */
+function journalEntries(journalDir: string): Record<string, unknown>[] {
   let text: string;
-  try { text = readFileSync(join(journalDir, "journal.jsonl"), "utf8"); } catch { return false; }
+  try { text = readFileSync(join(journalDir, "journal.jsonl"), "utf8"); } catch { return []; }
   const entries: Record<string, unknown>[] = [];
   for (const line of text.split(/\r?\n/)) {
     if (!line.trim()) continue;
@@ -1008,9 +1205,123 @@ export function storyLandedBeforeStop(journalDir: string): boolean {
       if (e && typeof e === "object" && !Array.isArray(e)) entries.push(e as Record<string, unknown>);
     } catch { /* an unparsable line is skipped */ }
   }
+  return entries;
+}
+
+/** The engine journal's current segment (`journalEntries`): the entries after the latest `run-start` or `run-resume` (the
+ * whole file when there is none); `[]` when missing or unreadable. */
+function journalSegment(journalDir: string, entries = journalEntries(journalDir)): Record<string, unknown>[] {
   const start = entries.findLastIndex((e) => e.kind === "run-start" || e.kind === "run-resume");
-  const last = entries.slice(start + 1).findLast((e) => e.kind === "story-start" || e.kind === "story-done");
-  return last?.kind === "story-done" && typeof last.story_key === "string" && last.story_key.trim() !== "";
+  return entries.slice(start + 1);
+}
+
+/** Story 38.2 (CAP-4): what an engine end with no story landed says — the story it drove, the status word its spec (or the
+ * session) ended on, its dev attempts, the HALT text, and the run's reason. `text`: the spec read (the stashed copy too). */
+export interface NoStory { story_key: string; word: string; attempts: number; halt: string; reason: string; spec?: string; text: string;
+  /** The HALT text unclipped (the render signature is read over it: a clip inside a path could name a second folder). */
+  haltText: string }
+
+/** One line, clipped (the reason's HALT text). */
+const flat = (s: string, n = 300) => clip(s.replace(/\s*\r?\n\s*/g, " "), n);
+
+/** Story 38.2 (CAP-4): the engine's last record for the story its journal's current segment started last — else, a resumed
+ * engine's segment holding no `story-start` (`resolve --resume` re-arms the story without journaling one), the story the
+ * whole journal started last (read before the close-out removes the worktree): its spec (`findSpec`, else the copy the
+ * engine stashed on the defer) and frontmatter `status`, else the last session's `result_json.status` (`state.json`), else
+ * `unknown`; the HALT text (the spec's last `Blocking condition:`, else the first line of its `## Auto Run Result` that is
+ * not `Status:`, else the last `dev-decision` reason); the attempts (the `dev-decision`s for the key in the segment, or, on
+ * the whole-journal fallback, from that `story-start` onward, so the pre-resume attempts count). Undefined: no
+ * `story-start` anywhere, or the spec reads `done`. Never throws. */
+export function noStoryEnd(served: string, engineRunId: string, engineStatus: string): NoStory | undefined {
+  try {
+    const runDir = join(served, ".bmad-loop", "runs", engineRunId);
+    const entries = journalEntries(runDir);
+    const isStart = (e: Record<string, unknown>) => e.kind === "story-start" && typeof e.story_key === "string" && e.story_key.trim() !== "";
+    let segment = journalSegment(runDir, entries);
+    let start = segment.findLast(isStart);
+    if (!start) {
+      const at = entries.findLastIndex(isStart);
+      if (at < 0) return undefined;
+      segment = entries.slice(at);
+      start = entries[at];
+    }
+    if (!start) return undefined;
+    const key = String(start.story_key).trim();
+    const spec = findSpec(served, key) ?? stashedSpec(served, engineRunId, key);
+    let text = "";
+    if (spec) { try { text = readFileSync(spec, "utf-8"); } catch { /* unreadable: the session's word */ } }
+    let session: string | undefined;
+    try {
+      const state = JSON.parse(readFileSync(join(runDir, "state.json"), "utf-8"));
+      const task = state?.tasks?.[key] ?? state?.tasks?.[key.replace(/-spec$/, "")];
+      const last = Array.isArray(task?.sessions) ? task.sessions.at(-1) : undefined;
+      session = fmWord(last?.result_json?.status);
+    } catch { /* no state.json: no session word */ }
+    const word = fmWord(frontmatter(text).status) ?? session ?? "unknown";
+    if (word === "done") return undefined;
+    const decisions = segment.filter((e) => e.kind === "dev-decision" && e.story_key === key);
+    const section = autoRunResult(text).split(/\r?\n/).slice(1).map((l) => l.trim()).find((l) => l && !/^[-*>\s]*Status:/i.test(l));
+    const lastReason = decisions.at(-1)?.reason;
+    // The HALT text whole (the last `Blocking condition:` line read unclipped), clipped only into the reason.
+    const blocking = [...text.matchAll(/^[ \t>*-]*Blocking condition:[ \t]*(.*)$/gim)].at(-1)?.[1]?.trim();
+    const haltText = (blockingCondition(text) ? blocking : undefined) ?? section ?? (typeof lastReason === "string" && lastReason.trim() ? lastReason : "no HALT text recorded");
+    const halt = flat(haltText);
+    const reason = `no story landed: story ${key} ended ${word} after ${decisions.length} dev attempt(s): ${halt}; engine ended '${engineStatus}'`;
+    return { story_key: key, word, attempts: decisions.length, halt, reason, ...(spec ? { spec } : {}), text, haltText };
+  } catch { return undefined; }
+}
+
+/** Story 38.2 (CAP-6): the queue event of the halted rows' carry. */
+export const STAGE_CARRY = "stage-carry";
+
+/** Story 38.2 (CAP-6): a no-story end's Stage Log rows carried out of the worktree before the close-out removes it: the 37.3
+ * timeout row's path run once on the host against the run's root (`plansync.py stage --from-pass --run-dir <served>/.bmad-loop/
+ * runs/<eid> --story <key> --worktree <root>`), which backfills every session and writes the current one into the root's
+ * buffer (the spec is absent there) until the story's spec lands. One `stage-carry {story_key, ok, rows?, buffered?, error?}`
+ * per engine completion (after the latest `launched`); never blocks. Never throws. */
+async function stageCarry(queue: Queue, run: QueueRun, key: string, deps: WorktreeDeps): Promise<void> {
+  try {
+    const events = queue.events(run.run_id);
+    const since = events.findLastIndex((e) => e.kind === "launched");
+    if (events.slice(since + 1).some((e) => e.kind === STAGE_CARRY && e.detail?.story_key === key)) return;
+    const runDir = join(servedRoot(run)!, ".bmad-loop", "runs", run.engine_run_id!);
+    let r: RunResult;
+    try {
+      r = await uvRunner(deps)(run.root, studioScript(deps, "lib", "plansync.py"), ["stage", "--from-pass", "--run-dir", runDir, "--story", key, "--worktree", run.root], 120);
+    } catch (e) { queue.note(run.run_id, STAGE_CARRY, { story_key: key, ok: false, error: `plansync.py stage: ${clip(message(e))}` }); return; }
+    const out = lastJsonObject(r.stdout) as Record<string, any> | null;
+    if (r.exit === 0 && out?.ok === true) {
+      queue.note(run.run_id, STAGE_CARRY, { story_key: key, ok: true, rows: Array.isArray(out.rows) ? out.rows : [], buffered: out.buffered === true });
+    } else queue.note(run.run_id, STAGE_CARRY, { story_key: key, ok: false, error: out?.error ? clip(String(out.error)) : `plansync.py stage ${failed(r)}` });
+  } catch { /* not recorded: the carry never blocks the end */ }
+}
+
+/** Story 38.2 (CAP-5): is a story's spec untracked in the served root? One argv-only `git ls-files --error-unmatch -- <rel>`:
+ * exit 1 is untracked; 0 (tracked), 128, a timeout, a throw or anything else is not (never removed, never paused for). Shared by
+ * the engine-end sweep's halt pause and `closeout.ts` `staleRenderView`, so the sweep pauses only what the pass will act on. */
+export async function specUntracked(served: string, spec: string, deps: WorktreeDeps = {}): Promise<boolean> {
+  const rel = relative(served, spec).split("\\").join("/");
+  try {
+    const r = await runner(deps)("git", ["-C", served, "ls-files", "--error-unmatch", "--", rel], { cwd: served, timeoutS: 30 });
+    return r.exit === 1;
+  } catch { return false; }
+}
+
+/** Story 38.2 (CAP-5): a no-story end the supervisor pauses itself so the paused-run pass relaunches it once: the spec's
+ * text carries the render signature (the unclipped HALT text and its `## Auto Run Result`), the snapshot it names resolves under the
+ * served root and passes `snapshotReady`, the spec was found and is untracked (the pass's `staleRenderView` refuses any other:
+ * paused, it would sit with nobody told), and the story has no `auto-resume` `attempt: 1` — or one with no `attempt: 2`
+ * after it (the second occurrence, which the pass records for the operator). */
+async function haltedOnRender(events: readonly QueueEvent[], served: string, s: NoStory, deps: WorktreeDeps): Promise<boolean> {
+  if (!s.spec) return false;
+  const signed = `${s.haltText}\n${autoRunResult(s.text)}`;
+  if (!renderSignature(signed)) return false;
+  const snap = renderSnapshot(served, signed);
+  if (!snap || !snapshotReady(snap)) return false;
+  // `closeout.ts` AUTO_RESUME (a literal here: this module never imports `closeout.ts`).
+  const first = events.findIndex((e) => e.kind === "auto-resume" && e.detail?.story_key === s.story_key && e.detail?.attempt === 1);
+  if (first >= 0 && events.slice(first + 1).some((e) => e.kind === "auto-resume" && e.detail?.story_key === s.story_key && e.detail?.attempt === 2)) return false;
+  return specUntracked(served, s.spec, deps);
 }
 
 export type EnginePhase = { phase: "ended" | "paused" | "running" | "unknown"; detail: Record<string, unknown> };
@@ -1238,6 +1549,21 @@ export async function sweepEngines(queue: Queue, deps: WorktreeDeps = {}): Promi
         verify = { skipped: true, reason: PAUSED_DIRTY };
         queue.note(run.run_id, "host-verify", verify as Record<string, unknown>);
       }
+      // Story 38.2 (CAP-4): an engine that ended on its own (not paused, not a sweep, not killed, no PR open) with no commit
+      // ahead of its base: the tree equals the base, so the leg is skipped (one `host-verify`, before the leg's lease is
+      // noted); a failed probe runs the leg as before. The story it drove is read now, before the close-out removes the
+      // worktree: its end is `partial` (below), its halted rows carried out (`stageCarry`), and a render halt paused for the
+      // pass's one relaunch (`haltedOnRender`).
+      const ahead = st.phase === "ended" && !sweep && notKilled && !existingPr ? await commitsAhead(run, deps) : undefined;
+      const noChanges = ahead !== undefined && ahead.length === 0;
+      if (!verify && noChanges) {
+        verify = { skipped: true, reason: NO_CHANGES_SKIP };
+        queue.note(run.run_id, "host-verify", verify as Record<string, unknown>);
+      }
+      const servedAt = servedRoot(run);
+      const noStory = noChanges && run.engine_run_id && servedAt && existsSync(servedAt) ? noStoryEnd(servedAt, run.engine_run_id, String(st.detail.status ?? "unknown")) : undefined;
+      if (noStory) await stageCarry(queue, run, noStory.story_key, deps);
+      const haltPause = !!noStory && await haltedOnRender(queue.events(run.run_id), servedAt!, noStory, deps);
       if (!verify && notKilled) {
         // Story 38.1 (CAP-1): the leg's own guard, never the worker's; the close-out's lease noted first (CAP-3).
         const g = legGuard(queue.definition(run));
@@ -1267,14 +1593,27 @@ export async function sweepEngines(queue: Queue, deps: WorktreeDeps = {}): Promi
       const summary = sweep ? withEngineCost(sweepSummary(queue, run, st.phase === "paused" ? st.detail : undefined), await engineCostOf(run, deps)) : undefined;
       // Story 36.3 (DW-64): a kill with no recorded leg (the leg a kill skips) stays a draft; so does a sweep's WIP or unanswered stop.
       const forceDraft = (!notKilled && !verify) || !!wip?.committed || !!wip?.error || stopUnanswered;
-      const c = await closeOut(run, { paused, ...input, engineRunId: run.engine_run_id, ...(existingPr ? { existingPr } : {}), ...(verify ? { verify } : {}), ...(slice ? { slice } : {}), ...(legs.length ? { legs } : {}), ...(summary ? { sweep: summary } : {}), ...(forceDraft ? { killed: true } : {}), ...(wip?.error || stopUnanswered ? { keepWorktree: true } : {}) }, deps);
+      const c = await closeOut(run, { paused: paused || haltPause, ...input, engineRunId: run.engine_run_id, ...(existingPr ? { existingPr } : {}), ...(verify ? { verify } : {}), ...(slice ? { slice } : {}), ...(legs.length ? { legs } : {}), ...(summary ? { sweep: summary } : {}), ...(forceDraft ? { killed: true } : {}), ...(wip?.error || stopUnanswered ? { keepWorktree: true } : {}) }, deps);
       let next: PendingTransition;
       if (paused) next = { phase: "paused", detail: { engine: st.detail, ...closeOutDetail(c) } };
-      else {
+      else if (haltPause && noStory && c.no_changes) {
+        // Story 38.2 (CAP-5): the ended engine's render halt, paused by the supervisor (`paused_stage: "no-story"`): the
+        // paused-run pass removes the snapshot and relaunches the epic once (`closeout.ts` `autoResume`).
+        next = { phase: "paused", detail: {
+          engine: { ...st.detail, paused_story_key: noStory.story_key, paused_stage: "no-story", paused_reason: noStory.reason },
+          // `halt_text`: the HALT text unclipped, which the pass signs in place of the clipped `paused_reason` (a clip inside
+          // the generation path would name a second folder and the pass would never recognise the pause).
+          no_story: { story_key: noStory.story_key, word: noStory.word, attempts: noStory.attempts, halt_text: noStory.haltText }, ...closeOutDetail(c),
+        } };
+      } else {
         const end = (launched.end ?? {}) as { state?: TerminalState; reason?: string | null; detail?: Record<string, unknown>; stop?: any };
         const engineEnd = resumed || relaunched ? String(st.detail.status ?? "unknown") : undefined;
         let state: TerminalState = engineEnd !== undefined ? engineEndState(engineEnd, storyDone) : end.state ?? "complete";
         let reason: string | null = engineEnd !== undefined ? (state === "complete" ? null : `${resumed ? "resumed" : "relaunched"} engine ended '${engineEnd}'`) : end.reason ?? null;
+        // Story 38.2 (CAP-4): no commit ahead (the probe's, so a close-out that errored counts too; a halt pause whose
+        // close-out did not report `no_changes` lands here as well) and the story's spec not `done`: a `complete` end becomes
+        // `partial`, the engine's last record the reason; a `failed`/`cancelled` end (or a leg override below) is kept.
+        if (noStory && state === "complete") { state = "partial"; reason = noStory.reason; }
         // A red host verify ends the run `partial` naming the command, whatever end was computed (`ended` and `finish`).
         if (isRed(verify)) { state = "partial"; reason = redReason(verify); }
         // Story 35.3: the judge's infrastructure failed (`inconclusive`): `partial`, never a rubric fail.
@@ -1303,7 +1642,9 @@ export async function sweepEngines(queue: Queue, deps: WorktreeDeps = {}): Promi
         }
         // Story 34.3: the playable-verify judge's cost, its own ledger line (and counted in the total).
         const judgeCost = verify && !verify.skipped ? verify.playable?.judge?.cost_usd : undefined;
-        const finish = await finishStudio(run, state, reason, launched.status_block, c.pr, sweepTotalCost(summary, input.costUsd), deps,
+        // Story 38.2 (CAP-4): the cost `finish` carries is the close-out's, else the worker's `accounted` figure (`cancelCostUsd`'s rule).
+        const workerUsd = input.costUsd ?? (summary ? undefined : queue.accountedCost(run.run_id, "worker"));
+        const finish = await finishStudio(run, state, reason, launched.status_block, c.pr, sweepTotalCost(summary, workerUsd), deps,
           typeof judgeCost === "number" && Number.isFinite(judgeCost) && judgeCost >= 0 ? judgeCost : undefined);
         next = { phase: "ended", state, reason, detail: { ...(end.detail ?? {}), engine: st.detail, ...closeOutDetail(c), finish,
           ...(summary ? { sweep: sweepRecord(summary) } : {}), ...(summary?.engine_cost_usd !== undefined ? { engine_cost_usd: summary.engine_cost_usd } : {}),

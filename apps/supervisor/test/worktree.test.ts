@@ -6,14 +6,16 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync }
 import { hostname, tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { cancelRun, closeOutOrphans, endAfterDriveFailure, finishRun, mirror, resolveCheckout, type Started } from "../src/cli";
-import { closeOutPaused, engineState, harvestMessage, type PausedDeps } from "../src/closeout";
+import { AUTO_RESUME, closeOutPaused, engineState, harvestMessage, type PausedDeps } from "../src/closeout";
 import { checkoutKey, Queue, selfOwner, servedRoot } from "../src/queue";
 import { invokeSkill, runProcess, toVmPath, type RunResult, type Spawner } from "../src/server";
 import {
   baseBranch, closeOut, closeOutDetail, COPIED_RUNTIME, engineStatus, isDefaultBranch, launchedCloseOutInput, openPrUrl, originRepo, prBody, prepareWorktree, runBranch, sweepEngines, worktreePath, WorktreeFailed, type WorktreeDeps,
   driftingPlanes, worktreeClean, editPrBody, markPrDraft, markPrReady, proofCommit, proofCommitDue, treeClean, withRunWorktreeRollback,
+  commitsAhead, NO_CHANGES_SKIP, noStoryEnd, STAGE_CARRY,
 } from "../src/worktree";
 import { FRAMES_DIR, legVerdict, type HostVerifyResult, type PlayableJudge } from "../src/hostverify";
+import { endNotice, noticeText } from "../src/hygiene";
 import { fakeGh, fakeSbx, gitRepo, LEG_GUARD_ROWS, testGit } from "./fakes";
 import { sliceRecorder } from "./helpers/slice";
 import { tempDir, track } from "./tmp";
@@ -2898,3 +2900,313 @@ describe("Story 35.1: the re-run's shared motions — the `Legs:` line, the lift
     await expect(proofCommit({ run_id: fx.run.run_id, worktree: path, prefix: null }, v, fx.deps)).rejects.toThrow(/not the run branch/);
   });
 });
+
+// Story 38.2 (hole 114, DW-180): the first 37.6 run's shape — two dev attempts halted on a stale render snapshot (five of the
+// generation's ten files `-?????????` from inside the sandbox), the engine deferred the story and stopped, no commit landed.
+describe("Story 38.2: a run that does no work says so", () => {
+  const KEY = "37-6-one-stop-path-and-the-gates-blind-spots";
+  const GEN = "_bmad/render/bmad-build-auto/wt-ac68fc677deb/f1a1d5587ffb3976eb54";
+  const FILES = ["manifest.json", "compile-epic-context.md", "spec-template.md", "step-01-clarify-and-route.md", "step-04-review.md",
+    "workflow.md", "step-02-plan.md", "step-03-implement.md", "references/a.md", "references/b.md"];
+  const HALT = `the rendered skill is unreadable from inside the sandbox: ls -la /home/agent/w/${GEN}/ shows ${FILES.slice(0, 5).map((f) => `-????????? ? ? ? ? ? ${f}`).join(", ")}`;
+  const specOf = (halt: string) => `---\ntitle: 'One stop path'\nstatus: 'halted'\n---\n\n# body\n\n## Auto Run Result\n\nStatus: halted\nBlocking condition: ${halt}\n`;
+  const REASON = `no story landed: story ${KEY} ended halted after 2 dev attempt(s): ${HALT.slice(0, 300)}; engine ended 'stopped'`;
+
+  /** An engine `eid` that drove KEY twice to a halt and deferred it: its journal, its state.json and the spec the engine stashed. */
+  function haltedEngine(wt: string, eid: string, o: { journal?: boolean; halt?: string; spec?: boolean; decision?: string } = {}) {
+    const runDir = join(wt, ".bmad-loop", "runs", eid);
+    mkdirSync(join(runDir, "deferred", KEY), { recursive: true });
+    const lines = [{ kind: "run-start" }, ...(o.journal === false ? [] : [{ kind: "story-start", story_key: KEY },
+      { kind: "dev-decision", story_key: KEY, attempt: 1, session_status: "completed", action: "retry", reason: `spec status is 'halted', expected 'done'` },
+      { kind: "dev-decision", story_key: KEY, attempt: 2, session_status: "completed", action: "defer", reason: o.decision ?? `spec status is 'halted', expected 'done'` },
+      { kind: "deferred-artifacts-stashed", story_key: KEY }, { kind: "story-deferred", story_key: KEY }])];
+    writeFileSync(join(runDir, "journal.jsonl"), lines.map((l) => JSON.stringify(l) + "\n").join(""), "utf-8");
+    writeFileSync(join(runDir, "state.json"), JSON.stringify({ tasks: { [KEY]: { story_key: KEY, sessions: [
+      { task_id: "t1", role: "dev", status: "completed", result_json: { status: "halted" } }, { task_id: "t1", role: "dev", status: "completed", result_json: { status: "halted" } }] } } }));
+    if (o.journal !== false && o.spec !== false) writeFileSync(join(runDir, "deferred", KEY, `${KEY}-spec.md`), specOf(o.halt ?? HALT), "utf-8");
+    return runDir;
+  }
+
+  /** The snapshot as the host sees it: complete (the sandbox's view is the stale one). */
+  function writeSnapshot(wt: string) {
+    const dir = join(wt, ...GEN.split("/"));
+    const outputs = Object.fromEntries(FILES.filter((f) => f !== "manifest.json").map((f) => [f, "0".repeat(64)]));
+    for (const f of Object.keys(outputs)) { mkdirSync(join(dir, f, ".."), { recursive: true }); writeFileSync(join(dir, f), `# ${f}\n`); }
+    writeFileSync(join(dir, "manifest.json"), JSON.stringify({ outputs }));
+    return dir;
+  }
+
+  /** A launched run (the worker's cost `cost`, or none) whose engine E1 halted twice; `plansync.py stage` answered (recorded). */
+  async function launchedHalted(o: { cost?: number | null; snapshot?: boolean; journal?: boolean; halt?: string; spec?: boolean; decision?: string; state?: "complete" | "blocked"; reason?: string } = {}) {
+    const fx = await fixture({ baseRef: "main" });
+    const wt = await prepareWorktree(fx.queue, fx.run, "proj", fx.repo.checkout, fx.deps);
+    fx.queue.markVerbStarted(fx.run.run_id, "wake", [], { target: "skill", definition: fx.defn });
+    const cost = o.cost === undefined ? 1.22 : o.cost;
+    await mirror(fx.queue, fx.run.run_id, { jobId: "j", defn: fx.defn }, {
+      ok: (o.state ?? "complete") === "complete", job_id: "j", run_id: "j-20261106T102330Z", target: "skill", state: o.state ?? "complete", ...(o.reason ? { reason: o.reason } : {}), finish_deferred: true,
+      status_block: { status: "complete", intent: "tk-studio-launch", artifacts: [".bmad-loop/runs/E1"] }, ...(cost !== null ? { total_cost_usd: cost } : {}),
+    }, async () => ({}), fx.deps);
+    const runDir = haltedEngine(wt, "E1", o);
+    const snap = o.snapshot ? writeSnapshot(wt) : join(wt, ...GEN.split("/"));
+    const carried: string[][] = [];
+    const uv = fx.deps.uv!;
+    fx.deps.uv = async (root, script, args, t) => {
+      if (!script.endsWith("plansync.py")) return uv(root, script, args, t);
+      carried.push(args);
+      return { exit: 0, stdout: JSON.stringify({ ok: true, story: KEY, spec: null, buffered: true, appended: 3, rows: ["dev|1|a", "dev|2|b", "dev|2|c"] }), stderr: "" };
+    };
+    fx.answers.launch = { ok: true, run: { status: "stopped" } };
+    const ev = (kind: string) => fx.queue.events(fx.run.run_id).filter((e) => e.kind === kind);
+    return { ...fx, wt, runDir, snap, carried, ev };
+  }
+
+  test("CAP-4: no commit, the spec halted: `partial` naming the engine's last record, no leg (one `no changes` skip, no lease), the notice, the worker's cost", async () => {
+    const fx = await launchedHalted();
+    expect(await commitsAhead(fx.get(), fx.deps)).toEqual([]);
+    expect(noStoryEnd(fx.wt, "E1", "stopped")).toMatchObject({ story_key: KEY, word: "halted", attempts: 2, reason: REASON });
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
+    expect(fx.get()).toMatchObject({ state: "partial", reason: REASON });
+    expect(fx.ev("host-verify").map((e) => e.detail)).toEqual([{ skipped: true, reason: NO_CHANGES_SKIP }]);
+    expect(NO_CHANGES_SKIP).toBe("no changes");
+    expect(fx.ev("host-verify-leg")).toEqual([]); // the skip notes no lease
+    const ended = fx.ev("ended")[0]!;
+    expect(ended.detail).toMatchObject({ no_changes: true, closeout: { result: "no changes", worktree: "removed", host_verify: expect.anything() } });
+    expect(fx.verbs).toEqual([["finish", "--directory", fx.repo.checkout, "--run-id", "j-20261106T102330Z", "--state", "partial", "--reason", REASON,
+      "--status-block", JSON.stringify({ status: "complete", intent: "tk-studio-launch", artifacts: [".bmad-loop/runs/E1"] }), "--total-cost-usd", "1.22"]]);
+    const text = noticeText(endNotice(fx.queue, fx.get()));
+    expect(text).toContain(`supervisor: run ${fx.run.run_id} ended partial`);
+    expect(text).toContain("reason: no story landed: ");
+    // CAP-6: the halted rows carried out before the worktree went, into the checkout's buffer.
+    expect(fx.carried).toEqual([["stage", "--from-pass", "--run-dir", fx.runDir, "--story", KEY, "--worktree", fx.repo.checkout]]);
+    expect(fx.ev(STAGE_CARRY).map((e) => e.detail)).toEqual([{ story_key: KEY, ok: true, rows: ["dev|1|a", "dev|2|b", "dev|2|c"], buffered: true }]);
+    const k = fx.queue.events(fx.run.run_id).map((e) => e.kind);
+    expect(k.indexOf(STAGE_CARRY)).toBeLessThan(k.indexOf("ended"));
+    expect(existsSync(fx.wt)).toBe(false);
+    expect(fx.gh.calls().some((c) => c.argv[0] === "pr")).toBe(false);
+  });
+
+  test("CAP-4: no worker figure on `launched`: `finish` carries the worker's `accounted` cost", async () => {
+    const fx = await launchedHalted({ cost: null });
+    fx.queue.note(fx.run.run_id, "accounted", { cost_usd: 1.22 });
+    await sweepEngines(fx.queue, fx.deps);
+    const finish = fx.verbs[0]!;
+    expect(finish[finish.indexOf("--total-cost-usd") + 1]).toBe("1.22");
+  });
+
+  test("CAP-4: a commit ahead of the base: the leg runs as before (no `no changes` skip), the launch's end", async () => {
+    const fx = await launchedHalted();
+    commitIn(fx.wt, "a.txt", "engine: a story");
+    await sweepEngines(fx.queue, fx.deps);
+    expect(fx.ev("host-verify").map((e) => e.detail?.reason)).not.toContain(NO_CHANGES_SKIP);
+    expect(fx.ev("host-verify-leg")).toHaveLength(1);
+    expect(fx.get()).toMatchObject({ state: "complete" });
+    expect(fx.ev(STAGE_CARRY)).toEqual([]);
+  });
+
+  test("CAP-4: no `story-start` in the segment: today's end, the leg still skipped, nothing carried", async () => {
+    const fx = await launchedHalted({ journal: false });
+    await sweepEngines(fx.queue, fx.deps);
+    expect(fx.get()).toMatchObject({ state: "complete", reason: null });
+    expect(fx.ev("host-verify").map((e) => e.detail)).toEqual([{ skipped: true, reason: NO_CHANGES_SKIP }]);
+    expect(fx.carried).toEqual([]);
+  });
+
+  test("CAP-4: a resumed engine whose segment journals no `story-start` (`resolve --resume`): the story from the whole journal, its pre-resume attempts counted, `partial`", async () => {
+    const fx = await launchedHalted();
+    const lines = [{ kind: "run-start" }, { kind: "story-start", story_key: KEY }, { kind: "dev-decision", story_key: KEY, attempt: 1, reason: "first" },
+      { kind: "run-paused", story_key: KEY }, { kind: "run-resume" }, { kind: "dev-decision", story_key: KEY, attempt: 2, reason: "second" }];
+    writeFileSync(join(fx.runDir, "journal.jsonl"), lines.map((l) => JSON.stringify(l) + "\n").join(""), "utf-8");
+    fx.answers.launch = { ok: true, run: { status: "finished" } };
+    expect(noStoryEnd(fx.wt, "E1", "finished")).toMatchObject({ story_key: KEY, word: "halted", attempts: 2 });
+    await sweepEngines(fx.queue, fx.deps);
+    expect(fx.get()).toMatchObject({ state: "partial", reason: expect.stringContaining(`no story landed: story ${KEY} ended halted after 2 dev attempt(s)`) });
+    expect(fx.carried).toHaveLength(1);
+  });
+
+  test("CAP-4: a segment with its own `story-start`: the attempts are the segment's alone (the pre-resume ones not counted)", async () => {
+    const fx = await launchedHalted();
+    const lines = [{ kind: "run-start" }, { kind: "story-start", story_key: KEY }, { kind: "dev-decision", story_key: KEY, attempt: 1, reason: "first" },
+      { kind: "run-resume" }, { kind: "story-start", story_key: KEY }, { kind: "dev-decision", story_key: KEY, attempt: 1, reason: "second" }];
+    writeFileSync(join(fx.runDir, "journal.jsonl"), lines.map((l) => JSON.stringify(l) + "\n").join(""), "utf-8");
+    expect(noStoryEnd(fx.wt, "E1", "finished")).toMatchObject({ story_key: KEY, attempts: 1 });
+  });
+
+  test("CAP-5: the render signature over a ready snapshot pauses the ended run (`no-story`); the pass relaunches once; a second halt stays paused for the operator", async () => {
+    const fx = await launchedHalted({ snapshot: true });
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
+    expect(fx.get()).toMatchObject({ state: "paused", worktree: fx.wt });
+    const paused = fx.ev("paused").at(-1)!.detail!;
+    expect(paused).toMatchObject({
+      engine: { run_id: "E1", status: "stopped", paused_story_key: KEY, paused_stage: "no-story", paused_reason: REASON },
+      no_story: { story_key: KEY, word: "halted", attempts: 2 }, no_changes: true, closeout: { result: "no changes", worktree: "kept" },
+    });
+    expect(fx.ev("host-verify").map((e) => e.detail)).toEqual([{ skipped: true, reason: NO_CHANGES_SKIP }]);
+    expect(fx.ev(STAGE_CARRY)).toHaveLength(1);
+    expect(fx.verbs).toEqual([]); // paused: never finished
+    expect(existsSync(fx.wt)).toBe(true);
+
+    const relaunched: string[] = [], sent: string[] = [];
+    const run0 = fx.deps.run!;
+    const deps: PausedDeps = {
+      ...fx.deps, self: me,
+      run: (bin, args, o) => bin === "bmad-loop" ? Promise.resolve({ exit: 0, stdout: "archived", stderr: "" }) : run0(bin, args, o),
+      relaunch: async (q, run) => async () => { relaunched.push(run.run_id); q.markLaunched(run.run_id, "E2", { end: {} }); },
+      hygiene: { env: { TK_SUPERVISOR_NOTIFY: "ntfy", TK_SUPERVISOR_NTFY_URL: "https://ntfy.example/t" }, fetch: async (_u, init) => { sent.push(String(init?.body ?? "")); return new Response("ok"); } },
+    };
+    expect(await closeOutPaused(fx.queue, deps)).toEqual({ closed: [], awaiting: [] });
+    expect(relaunched).toEqual([fx.run.run_id]);
+    expect(fx.get()).toMatchObject({ state: "running", engine_run_id: "E2" });
+    expect(existsSync(fx.snap)).toBe(false);
+    expect(existsSync(join(fx.runDir, "deferred", KEY, `${KEY}-spec.md`))).toBe(false);
+    const co = fx.ev("close-out").at(-1)!.detail!;
+    expect(co).toMatchObject({ reason: "stale-render-view", halted_story: KEY, archive: "archived" });
+    expect(co.story_key).toBeUndefined(); // `finishedStories` never counts the halted story
+    expect(fx.ev(AUTO_RESUME).map((e) => e.detail)).toEqual([expect.objectContaining({ attempt: 1, story_key: KEY, engine_run_id: "E1", resumed: true, via: "relaunch", status_word: "halted" })]);
+    expect(sent).toHaveLength(1);
+
+    // The relaunched engine halts on the same render: paused again, the pass records attempt 2 and relaunches nothing.
+    haltedEngine(fx.wt, "E2");
+    writeSnapshot(fx.wt);
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
+    expect(fx.get()).toMatchObject({ state: "paused" });
+    expect(await closeOutPaused(fx.queue, deps)).toEqual({ closed: [], awaiting: [] });
+    expect(await closeOutPaused(fx.queue, deps)).toEqual({ closed: [], awaiting: [] });
+    expect(relaunched).toHaveLength(1);
+    expect(fx.ev(AUTO_RESUME).map((e) => [e.detail!.attempt, e.detail!.resumed])).toEqual([[1, true], [2, false]]);
+    expect(sent.at(-1)).toContain("stays paused for the operator");
+    expect(fx.get()).toMatchObject({ state: "paused" });
+  });
+
+  test("CAP-5: no ready snapshot (the host sees it incomplete): no pause, the `partial` end", async () => {
+    const fx = await launchedHalted({ snapshot: true });
+    writeFileSync(join(fx.snap, "workflow.md"), "");
+    await sweepEngines(fx.queue, fx.deps);
+    expect(fx.get()).toMatchObject({ state: "partial", reason: REASON });
+  });
+
+  /** `git log --oneline` answered by `answer(n)` on its n-th call (1-based; undefined: the real git). */
+  function failLog(fx: Awaited<ReturnType<typeof launchedHalted>>, answer: (n: number) => RunResult | undefined) {
+    const run0 = fx.deps.run!;
+    let n = 0;
+    fx.deps.run = (bin, args, o) => {
+      if (bin === "git" && args[0] === "log" && args[1] === "--oneline") { const r = answer(++n); if (r) return Promise.resolve(r); }
+      return run0(bin, args, o);
+    };
+  }
+  const LOG_FAILED: RunResult = { exit: 128, stdout: "", stderr: "fatal: bad revision" };
+
+  test("CAP-4: a failed `commitsAhead` probe (git log exits non-zero): the leg runs as before, no `no changes` skip", async () => {
+    const fx = await launchedHalted();
+    failLog(fx, (n) => n === 1 ? LOG_FAILED : undefined);
+    await sweepEngines(fx.queue, fx.deps);
+    expect(fx.ev("host-verify").map((e) => e.detail?.reason)).not.toContain(NO_CHANGES_SKIP);
+    expect(fx.ev("host-verify-leg")).toHaveLength(1);
+    expect(fx.ev(STAGE_CARRY)).toEqual([]);
+    expect(fx.get()).toMatchObject({ state: "complete" });
+  });
+
+  test("CAP-4: a close-out that errors with zero commits ahead (the probe answered `[]`): still `partial` with the no-story reason", async () => {
+    const fx = await launchedHalted();
+    failLog(fx, (n) => n === 2 ? LOG_FAILED : undefined); // the probe answers, the close-out's own read fails
+    await sweepEngines(fx.queue, fx.deps);
+    const ended = fx.ev("ended")[0]!;
+    expect(ended.detail!.no_changes).toBeUndefined();
+    expect(ended.detail).toMatchObject({ closeout: { result: "failed", error: expect.stringContaining("git log exit 128") } });
+    expect(fx.get()).toMatchObject({ state: "partial", reason: REASON });
+    expect(fx.ev("host-verify").map((e) => e.detail)).toEqual([{ skipped: true, reason: NO_CHANGES_SKIP }]);
+  });
+
+  test("CAP-4: the no-story override replaces only a `complete` end: a `blocked` end keeps its state and reason", async () => {
+    const fx = await launchedHalted({ state: "blocked", reason: "the worker blocked: guard tripped" });
+    await sweepEngines(fx.queue, fx.deps);
+    expect(fx.get()).toMatchObject({ state: "blocked", reason: "the worker blocked: guard tripped" });
+    expect(fx.ev("host-verify").map((e) => e.detail)).toEqual([{ skipped: true, reason: NO_CHANGES_SKIP }]);
+  });
+
+  test("CAP-5: the halt pause whose close-out does not report `no_changes`: never `complete`, `partial` with the no-story reason", async () => {
+    const fx = await launchedHalted({ snapshot: true });
+    failLog(fx, (n) => n === 2 ? LOG_FAILED : undefined);
+    await sweepEngines(fx.queue, fx.deps);
+    expect(fx.get()).toMatchObject({ state: "partial", reason: REASON });
+    expect(fx.ev("paused")).toEqual([]);
+  });
+
+  test("CAP-5: a HALT text longer than 300 characters whose generation path straddles character 300: the signature holds, the reason alone is clipped", async () => {
+    const lead = "the rendered skill is unreadable from inside the sandbox: ";
+    const tail = `/home/agent/w/${GEN}/`;
+    const pad = "p".repeat(300 - lead.length - 1 - tail.length + 10);
+    const long = `${lead}${pad} ${tail} shows ${FILES.slice(0, 5).map((f) => `-????????? ? ? ? ? ? ${f}`).join(", ")}`;
+    const cut = long.slice(0, 300);
+    expect(cut).toContain(GEN.slice(0, GEN.length - 10)); // the clip falls inside the generation segment
+    expect(cut).not.toContain(GEN);
+    const fx = await launchedHalted({ snapshot: true, halt: long });
+    const reason = `no story landed: story ${KEY} ended halted after 2 dev attempt(s): ${cut}; engine ended 'stopped'`;
+    expect(noStoryEnd(fx.wt, "E1", "stopped")).toMatchObject({ halt: cut, reason, haltText: long });
+    await sweepEngines(fx.queue, fx.deps);
+    expect(fx.get()).toMatchObject({ state: "paused" });
+    expect(fx.ev("paused").at(-1)!.detail).toMatchObject({ engine: { paused_stage: "no-story", paused_reason: reason }, no_story: { halt_text: long } });
+    // The pass signs the unclipped HALT text the pause carries (the clipped reason names a second, truncated folder): it
+    // recognises the pause the sweep wrote and relaunches it once.
+    const relaunched: string[] = [];
+    const run0 = fx.deps.run!;
+    const deps: PausedDeps = {
+      ...fx.deps, self: me,
+      run: (bin, args, o) => bin === "bmad-loop" ? Promise.resolve({ exit: 0, stdout: "archived", stderr: "" }) : run0(bin, args, o),
+      relaunch: async (q, run) => async () => { relaunched.push(run.run_id); q.markLaunched(run.run_id, "E2", { end: {} }); },
+      hygiene: { env: {}, fetch: async () => new Response("ok") },
+    };
+    expect(await closeOutPaused(fx.queue, deps)).toEqual({ closed: [], awaiting: [] });
+    expect(relaunched).toEqual([fx.run.run_id]);
+    expect(fx.get()).toMatchObject({ state: "running", engine_run_id: "E2" });
+    expect(fx.ev(AUTO_RESUME).map((e) => e.detail)).toEqual([expect.objectContaining({ attempt: 1, story_key: KEY, resumed: true, via: "relaunch", snapshot: GEN })]);
+  });
+
+  test("CAP-5: the signature carried by the dev-decision reason alone, no spec found: never paused (the pass would refuse it), the `partial` end", async () => {
+    const fx = await launchedHalted({ snapshot: true, spec: false, decision: HALT });
+    expect(noStoryEnd(fx.wt, "E1", "stopped")).toMatchObject({ story_key: KEY, haltText: HALT });
+    expect(noStoryEnd(fx.wt, "E1", "stopped")!.spec).toBeUndefined();
+    await sweepEngines(fx.queue, fx.deps);
+    expect(fx.ev("paused")).toEqual([]);
+    expect(fx.get()).toMatchObject({ state: "partial", reason: expect.stringContaining(`no story landed: story ${KEY} ended halted`) });
+  });
+
+  test("CAP-5: a tracked spec (in the index): never paused (the pass would refuse it), the `partial` end", async () => {
+    const fx = await launchedHalted({ snapshot: true });
+    testGit(fx.wt, "add", "-f", "--", `.bmad-loop/runs/E1/deferred/${KEY}/${KEY}-spec.md`);
+    await sweepEngines(fx.queue, fx.deps);
+    expect(fx.ev("paused")).toEqual([]);
+    expect(fx.get()).toMatchObject({ state: "partial", reason: REASON });
+  });
+
+  describe("noStoryEnd's fallbacks", () => {
+    /** A served root whose engine `eid` started KEY: `decisions` dev-decision reasons, an optional state.json word and spec. */
+    function served(o: { decisions?: string[]; session?: string; spec?: string } = {}) {
+      const root = tempDir("tk-sup-wt-nostory-");
+      const runDir = join(root, ".bmad-loop", "runs", "E1");
+      mkdirSync(runDir, { recursive: true });
+      const lines = [{ kind: "run-start" }, { kind: "story-start", story_key: KEY }, ...(o.decisions ?? []).map((reason, i) => ({ kind: "dev-decision", story_key: KEY, attempt: i + 1, reason }))];
+      writeFileSync(join(runDir, "journal.jsonl"), lines.map((l) => JSON.stringify(l) + "\n").join(""), "utf-8");
+      if (o.session !== undefined) writeFileSync(join(runDir, "state.json"), JSON.stringify({ tasks: { [KEY]: { sessions: [{ result_json: { status: "completed" } }, { result_json: { status: o.session } }] } } }), "utf-8");
+      if (o.spec !== undefined) { mkdirSync(join(runDir, "deferred", KEY), { recursive: true }); writeFileSync(join(runDir, "deferred", KEY, `${KEY}-spec.md`), o.spec, "utf-8"); }
+      return root;
+    }
+
+    test("no spec: the word from the last session's `result_json.status`, the HALT text from the last `dev-decision` reason", () => {
+      const root = served({ decisions: ["first reason", "spec status is 'halted', expected 'done'"], session: "halted" });
+      expect(noStoryEnd(root, "E1", "stopped")).toMatchObject({ story_key: KEY, word: "halted", attempts: 2, halt: "spec status is 'halted', expected 'done'",
+        reason: `no story landed: story ${KEY} ended halted after 2 dev attempt(s): spec status is 'halted', expected 'done'; engine ended 'stopped'` });
+    });
+
+    test("no spec and no session word: `unknown`; no reason either: `no HALT text recorded`", () => {
+      expect(noStoryEnd(served({ decisions: ["the dev session timed out"] }), "E1", "stopped")).toMatchObject({ word: "unknown", attempts: 1, halt: "the dev session timed out" });
+      expect(noStoryEnd(served(), "E1", "stopped")).toMatchObject({ word: "unknown", attempts: 0, halt: "no HALT text recorded" });
+    });
+
+    test("a spec with no `Blocking condition:`: the HALT text from the first Auto Run Result line that is not `Status:`", () => {
+      const spec = `---\nstatus: halted\n---\n\n## Auto Run Result\n\nStatus: halted\n\nThe renderer could not read workflow.md.\nA second line.\n\n## Next\n`;
+      expect(noStoryEnd(served({ decisions: ["a dev-decision reason"], session: "completed", spec }), "E1", "stopped"))
+        .toMatchObject({ word: "halted", halt: "The renderer could not read workflow.md." });
+    });
+  });
+});
+

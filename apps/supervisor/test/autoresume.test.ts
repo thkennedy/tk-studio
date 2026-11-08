@@ -160,7 +160,7 @@ describe("Story 33.6: the recognition", () => {
     expect(await staleRenderView(fx.run(), withReason(fx, win), deps)).toMatchObject({ snapshot: SNAP, dir: fx.snap });
   });
 
-  test("not recognised: two folders, `..`, outside `_bmad/render/`, another stage, no dev-session prefix, no renderer message", async () => {
+  test("not recognised: two folders, `..`, outside `_bmad/render/`, no renderer message; Story 38.2: another stage or no dev-session prefix is recognised on the signature", async () => {
     const fx = await pausedRun();
     const { deps } = passDeps(fx);
     const other = SANDBOX_PATH.replace("172e0a66eabaf094fb43", "99990a66eabaf094fb43");
@@ -170,14 +170,18 @@ describe("Story 33.6: the recognition", () => {
       withReason(fx, devReason("generation contains unexpected or missing files: /home/agent/w/_bmad/render/a/../b")),
       withReason(fx, devReason("generation contains unexpected or missing files: /home/agent/w/_bmad/other/a/b/c")),
       withReason(fx, devReason("generation contains unexpected or missing files: /home/agent/w/_bmad/render/a/b")),
-      withReason(fx, REASON, "dev"),
-      withReason(fx, REASON, "pre_commit"),
-      withReason(fx, REASON.replace("CRITICAL escalation from dev session", "CRITICAL escalation from review session")),
-      withReason(fx, `HALT: generation contains unexpected or missing files: ${SANDBOX_PATH}`),
       withReason(fx, `CRITICAL escalation from dev session: the snapshot ${SANDBOX_PATH} looked wrong`),
     ];
     for (const events of not) expect(await staleRenderView(fx.run(), events, deps)).toBeUndefined();
     expect(snapshotFolders("_bmad/render/./b/c")).toBeUndefined();
+    // Story 38.2 (CAP-5): the signature keys it, whatever the stage or the escalation's prefix.
+    const signed = [
+      withReason(fx, REASON, "dev"),
+      withReason(fx, REASON, "pre_commit"),
+      withReason(fx, REASON.replace("CRITICAL escalation from dev session", "CRITICAL escalation from review session")),
+      withReason(fx, `HALT: generation contains unexpected or missing files: ${SANDBOX_PATH}`),
+    ];
+    for (const events of signed) expect(await staleRenderView(fx.run(), events, deps)).toMatchObject({ story_key: KEY, snapshot: SNAP, dir: fx.snap });
   });
 
   test("each renderer message alone (no render_skill.py mention) is recognised; neither is not", async () => {
@@ -243,12 +247,14 @@ describe("Story 33.6: the recognition", () => {
     expect(await staleRenderView({ worktree: bare, prefix: null }, fx.events(), { ...deps, run })).toBeUndefined();
   });
 
-  test("not recognised: a tracked spec, or a spec that is not `blocked`", async () => {
+  test("not recognised: a tracked spec, or a `done` spec; Story 38.2: any other status word (`halted` included) is recognised", async () => {
     const tracked = await pausedRun({ tracked: true });
     expect(await staleRenderView(tracked.run(), tracked.events(), passDeps(tracked).deps)).toBeUndefined();
-    for (const status of ["in-progress", "in-review", "done"]) {
+    const done = await pausedRun({ status: "done" });
+    expect(await staleRenderView(done.run(), done.events(), passDeps(done).deps)).toBeUndefined();
+    for (const status of ["in-progress", "in-review", "halted"]) {
       const fx = await pausedRun({ status });
-      expect(await staleRenderView(fx.run(), fx.events(), passDeps(fx).deps)).toBeUndefined();
+      expect(await staleRenderView(fx.run(), fx.events(), passDeps(fx).deps)).toMatchObject({ story_key: KEY, snapshot: SNAP, spec: fx.specFile });
     }
   });
 });
@@ -311,7 +317,7 @@ describe("Story 33.6: attempt 1 removes, resumes once, records and notifies", ()
     const rec = ev(fx, AUTO_RESUME);
     expect(rec).toHaveLength(1);
     expect(rec[0]!.detail).toEqual({
-      reason: "stale-render-view", snapshot: SNAP, story_key: KEY, engine_run_id: E1, attempt: 1, resumed: true, notify: { ok: true, via: "ntfy" },
+      reason: "stale-render-view", snapshot: SNAP, story_key: KEY, engine_run_id: E1, attempt: 1, resumed: true, via: "resume", status_word: "blocked", notify: { ok: true, via: "ntfy" },
     });
     expect(p.sent).toEqual([`supervisor: run ${fx.id} auto-resumed: story ${KEY} halted on a stale render view of ${SNAP} (attempt 1)`]);
     expect(p.tracks).toHaveLength(0);
@@ -339,7 +345,7 @@ describe("Story 33.6: attempt 1 removes, resumes once, records and notifies", ()
     expect(await closeOutPaused(fx.queue, p.deps)).toEqual({ closed: [], awaiting: [] });
     const error = "ResumeFailed: sbx exec claude-p printenv HOME exit 1: no sandbox";
     expect(ev(fx, AUTO_RESUME)[0]!.detail).toEqual({
-      reason: "stale-render-view", snapshot: SNAP, story_key: KEY, engine_run_id: E1, attempt: 1, resumed: false, error, notify: { ok: true, via: "ntfy" },
+      reason: "stale-render-view", snapshot: SNAP, story_key: KEY, engine_run_id: E1, attempt: 1, resumed: false, via: "resume", status_word: "blocked", error, notify: { ok: true, via: "ntfy" },
     });
     expect(p.sent).toEqual([`supervisor: run ${fx.id} stays paused: auto-resume of story ${KEY} after a stale render view of ${SNAP} refused: ${error}`]);
     expect(fx.run()).toMatchObject({ state: "paused", owner_pid: null });

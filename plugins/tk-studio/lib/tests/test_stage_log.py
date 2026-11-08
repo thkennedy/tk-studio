@@ -478,6 +478,92 @@ class EnginePassTests(StageFixture):
         self.assertFalse((self.root / "_bmad-output/specs/spec-epic-35/stages" / f"{KEY}.jsonl").exists())
 
 
+class HaltedRowTests(StageFixture):
+    """Story 38.2 (CAP-6, DW-180): a dev attempt that ended halted keeps its
+    Stage Log row (`outcome: halted`), through the 37.3 timeout row's path,
+    and the rows survive a no-PR end: carried into a root with no spec
+    (buffered), then flushed once the spec lands there."""
+
+    def _halt(self, index=-1):
+        self.state["tasks"][KEY]["sessions"][index]["result_json"] = {"status": "halted"}
+        self._save_state()
+
+    def test_story_38_2_the_outcome_rule(self):
+        outcome = plansync._session_outcome
+        self.assertEqual(outcome({"status": "completed", "result_json": {"status": "halted"}}), "halted")
+        self.assertEqual(outcome({"status": "completed", "result_json": {"status": "blocked"}}), "blocked")
+        for word in ("done", "in-review", "ready-for-dev", "", None):
+            self.assertEqual(outcome({"status": "completed", "result_json": {"status": word}}), "completed")
+        self.assertEqual(outcome({"status": "completed"}), "completed")
+        self.assertEqual(outcome({"status": "timeout", "result_json": {"status": "halted"}}), "timeout")
+
+    def test_story_38_2_a_halted_pass_writes_its_row_outcome_halted(self):
+        self.spec.write_text(SPEC_TEXT, encoding="utf-8", newline="\n")
+        self.add_pass("dev", "dev", "2026-11-06T10:25:20Z", "2026-11-06T10:47:30Z",
+                      [usage_line("h1", inp=10_000, out=1_000)])
+        self._halt()
+        self.assertEqual(self.from_pass("dev", "dev-running")["appended"], 1)
+        row = self.table()[0]
+        self.assertEqual((row["stage"], row["pass"], row["session_id"], row["outcome"]),
+                         ("dev", "1", "sess-dev-1", "halted"))
+        self.assertEqual((row["started"], row["ended"]), ("2026-11-06T10:25:20Z", "2026-11-06T10:47:30Z"))
+        self.assertEqual((row["tokens_in"], row["tokens_out"]), ("10000", "1000"))
+
+    def test_story_38_2_the_halted_attempt_backfilled_beside_its_halted_retry(self):
+        """The first halted attempt's row never written (its worktree gone):
+        backfilled by the retry's pass, `outcome: halted`, its tokens and cost
+        from the session record."""
+        import meter
+        self.spec.write_text(SPEC_TEXT, encoding="utf-8", newline="\n")
+        self.add_pass("dev", "dev", "2026-11-06T10:25:20Z", "2026-11-06T10:47:30Z",
+                      [usage_line("h1", inp=1, out=1)])
+        first = self.state["tasks"][KEY]["sessions"][0]
+        Path(first["transcript_path"]).unlink()
+        first["usage"] = {"input_tokens": 100_000, "output_tokens": 50_000,
+                          "cache_read_tokens": 1_000_000, "cache_creation_tokens": 200_000}
+        self._halt(0)
+        self.add_pass("dev", "dev", "2026-11-06T10:48:00Z", "2026-11-06T10:56:00Z",
+                      [usage_line("h2", inp=10_000, out=1_000)])
+        self._halt()
+        self.assertEqual(self.from_pass("dev", "dev-running")["appended"], 2)
+        rows = self.table()
+        self.assertEqual([(r["pass"], r["session_id"], r["outcome"]) for r in rows],
+                         [("1", "sess-dev-1", "halted"), ("2", "sess-dev-2", "halted")])
+        self.assertEqual((rows[0]["tokens_in"], rows[0]["tokens_out"]), (str(1_300_000), "50000"))
+        expected = meter._session_usd(KEY, first, meter.load_prices(None), {})
+        self.assertEqual(rows[0]["cost_usd"], f"{expected:.4f}")
+
+    def test_story_38_2_the_carry_into_a_root_with_no_spec_buffers_then_flushes(self):
+        """The supervisor's carry at a no-story end: `--from-pass --worktree
+        <checkout>` with no spec there (and no `spec_folder` in state.json)
+        buffers both halted rows under the derived spec folder; the merge
+        pass's append flushes them into the spec once it lands."""
+        del self.state["spec_folder"]
+        self.add_pass("dev", "dev", "2026-11-06T10:25:20Z", "2026-11-06T10:47:30Z",
+                      [usage_line("h1", inp=10, out=1)])
+        self._halt()
+        self.add_pass("dev", "dev", "2026-11-06T10:48:00Z", "2026-11-06T10:56:00Z",
+                      [usage_line("h2", inp=20, out=2)])
+        self._halt()
+        checkout = self.tmp / "checkout"
+        checkout.mkdir()
+        result = plansync.stage_from_pass(checkout, self.run_dir, KEY)
+        self.assertEqual((result["buffered"], result["appended"], result["spec"]), (True, 2, None))
+        buffer = checkout / "_bmad-output" / "specs" / "spec-epic-35" / "stages" / f"{KEY}.jsonl"
+        self.assertTrue(buffer.is_file())
+        self.assertEqual([json.loads(line)["outcome"] for line in buffer.read_text(encoding="utf-8").splitlines()],
+                         ["halted", "halted"])
+        spec = checkout / "_bmad-output" / "specs" / "spec-epic-35" / "stories" / f"{KEY}-spec.md"
+        spec.parent.mkdir(parents=True)
+        spec.write_text(SPEC_TEXT, encoding="utf-8", newline="\n")
+        flushed = plansync.stage_append(checkout, [], story=KEY)
+        self.assertEqual(flushed["flushed"], 2)
+        rows = plansync.parse_stage_log(spec.read_text(encoding="utf-8"))
+        self.assertEqual([(r["session_id"], r["outcome"]) for r in rows],
+                         [("sess-dev-1", "halted"), ("sess-dev-2", "halted")])
+        self.assertFalse(buffer.exists())
+
+
 class NestedPipelineCopyTests(unittest.TestCase):
     """Fix 7: the apps/supervisor copy of the plugin writes engine rows too."""
 

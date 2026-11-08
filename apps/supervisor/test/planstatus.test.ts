@@ -30,11 +30,13 @@ function write(root: string, files: Record<string, string>): void {
 
 /** A real repo (`main` holding `base` files, a spec already done there), a terminal queue run with a worktree
  * recorded, its run branch carrying `branch` files, a plan directory at `plan` (the own project's, by default). */
-async function fixture(opts: { base?: Record<string, string>; branch?: Record<string, string>; plan?: Record<string, string> | null; ended?: Record<string, unknown>; registry?: Record<string, string>; alive?: string[] } = {}) {
+async function fixture(opts: { base?: Record<string, string>; branch?: Record<string, string>; plan?: Record<string, string> | null; ended?: Record<string, unknown>; registry?: Record<string, string>; alive?: string[]; end?: { state: "complete" | "partial"; reason: string | null }; earlier?: boolean } = {}) {
   const repo = gitRepo({ "_bmad-output/specs/spec-epic-27/stories/27-1-done-before-spec.md": spec("done"), ...opts.base });
   const gh = fakeGh();
   const plansync = fakePlansync();
   const queue = new Queue(":memory:", { ownerAlive: (o) => o.nonce === me.nonce || (opts.alive ?? []).includes(o.nonce), engineLive: async () => ({ live: false, run_ids: [] }) });
+  // Story 38.2: a run created before this one (`queue.runs()` order), for the cross-run draft guards.
+  const earlierId = opts.earlier ? queue.enqueue({ jobId: "j0", root: repo.checkout, projectId: "proj", definition: { id: "j0", target: { skill: "tk-studio-launch" } }, owner: me, base_ref: "main" }).run.run_id : undefined;
   const queued = queue.enqueue({ jobId: "j", root: repo.checkout, projectId: "proj", definition: { id: "j", target: { skill: "tk-studio-launch" } }, owner: me, base_ref: "main" }).run;
   const claim = await queue.claim(queued.run_id, me);
   if (!claim.claimed) throw new Error("not claimed");
@@ -47,13 +49,13 @@ async function fixture(opts: { base?: Record<string, string>; branch?: Record<st
   testGit(repo.checkout, "commit", "-q", "--allow-empty", "-m", "the run's work");
   testGit(repo.checkout, "checkout", "-q", "main");
   if (opts.plan !== null) write(repo.checkout, opts.plan ?? { "_bmad-output/planning-artifacts/plan/ST-097.md": entity("ST-097", "27.5"), "_bmad-output/planning-artifacts/plan/ST-093.md": entity("ST-093", "27.1") });
-  queue.end(runId, "complete", null, { detail: opts.ended ?? { pr: PR } });
+  queue.end(runId, opts.end?.state ?? "complete", opts.end?.reason ?? null, { detail: opts.ended ?? { pr: PR } });
   const deps: PlanStatusDeps = {
     env: { ...process.env, TK_STUDIO_ROOT: plansync.root, GH_BIN: gh.bin },
     registry: async (id) => opts.registry?.[id],
   };
   const plan = (q: Queue = queue): QueueEvent[] => q.events(runId).filter((e) => e.kind === "plan-status");
-  return { repo, gh, plansync, queue, runId, deps, plan };
+  return { repo, gh, plansync, queue, runId, deps, plan, earlierId };
 }
 
 describe("the pieces", () => {
@@ -1697,3 +1699,108 @@ describe("Story 36.6: the story being built reads In Progress; the launch arms t
     finish({ exit: 0, stdout: "", stderr: "" });
   }, 60_000);
 });
+
+// Story 38.2 (CAP-5, hole 114): a run that ended without a PR holds no story, so each story it marked `in-progress` returns
+// to `draft` with the halt note; a run with a PR never does.
+describe("Story 38.2: a story no run holds returns to Draft", () => {
+  const KEY = "27-5-the-plan-follows-the-run";
+  const REASON = `no story landed: story ${KEY} ended halted after 2 dev attempt(s): the render snapshot is unreadable; engine ended 'stopped'`;
+  /** A terminal run with no PR (`ended` carries none), ended `partial` with REASON, its story marked `in-progress`. */
+  async function noPr(o: { pr?: boolean; ended?: Record<string, unknown>; earlier?: boolean } = {}) {
+    const fx = await fixture({ ended: o.ended ?? (o.pr ? { pr: PR } : { no_changes: true }), end: { state: "partial", reason: REASON }, earlier: o.earlier });
+    fx.queue.note(fx.runId, "plan-status", { phase: "in-progress", story_key: KEY, owner: "proj", directory: fx.repo.checkout, id: "ST-097", ok: true, previous_status: "draft" });
+    const status = () => fx.plansync.calls().filter((a) => a[0] === "status");
+    return { ...fx, status };
+  }
+
+  test("one `draft` call for the in-progress story, its note naming the run and its reason; one record; never asked again", async () => {
+    const fx = await noPr();
+    await reviewPass(fx.queue, fx.deps);
+    await reviewPass(fx.queue, fx.deps);
+    expect(fx.status()).toEqual([["status", "--directory", fx.repo.checkout, "--id", "ST-097", "--status", "draft",
+      "--note", `run ${fx.runId} ended without a PR: ${REASON.slice(0, 200)}`, "--caller", "tk-studio-supervisor"]]);
+    const drafts = fx.plan().filter((e) => e.detail?.phase === "draft");
+    expect(drafts.map((e) => e.detail)).toEqual([{ phase: "draft", story_key: KEY, id: "ST-097", owner: "proj", directory: fx.repo.checkout, ok: true, previous_status: "draft" }]);
+    // the per-story lease, let go of settled
+    const leases = fx.queue.events(fx.runId).filter((e) => e.kind === "plan-lease" && e.detail?.phase === `draft:${KEY}`);
+    expect(leases.at(-1)!.detail).toMatchObject({ owner: null, settled: true });
+    expect(fx.plan().some((e) => e.detail?.phase === "review")).toBe(false);
+  }, 60_000);
+
+  test("a run with a PR: no `draft` call (the review pass as before)", async () => {
+    const fx = await noPr({ pr: true });
+    await reviewPass(fx.queue, fx.deps);
+    expect(fx.status().map((a) => a[a.indexOf("--status") + 1])).toEqual(["review"]);
+    expect(fx.plan().some((e) => e.detail?.phase === "draft")).toBe(false);
+  }, 60_000);
+
+  test("no `in-progress` story (or only a refused one): nothing called, nothing recorded", async () => {
+    const fx = await fixture({ ended: { no_changes: true } });
+    fx.queue.note(fx.runId, "plan-status", { phase: "in-progress", story_key: KEY, owner: "proj", directory: fx.repo.checkout, id: "ST-097", ok: false, error: "refused" });
+    await reviewPass(fx.queue, fx.deps);
+    expect(fx.plansync.calls().filter((a) => a[0] === "status")).toEqual([]);
+    expect(fx.plan().some((e) => e.detail?.phase === "draft")).toBe(false);
+  }, 60_000);
+
+  test("a transient failure records nothing and is asked again; bounded by PLAN_RETRY_LIMIT, then one give-up", async () => {
+    const fx = await noPr();
+    fx.plansync.answer("crash");
+    for (let i = 0; i < PLAN_RETRY_LIMIT; i++) {
+      await reviewPass(fx.queue, fx.deps);
+      expect(fx.plan().some((e) => e.detail?.phase === "draft")).toBe(false);
+    }
+    await reviewPass(fx.queue, fx.deps);
+    const drafts = fx.plan().filter((e) => e.detail?.phase === "draft");
+    expect(drafts).toHaveLength(1);
+    expect(drafts[0]!.detail).toMatchObject({ phase: "draft", story_key: KEY, ok: false, skipped: true, gave_up: true });
+    await reviewPass(fx.queue, fx.deps);
+    expect(fx.status()).toHaveLength(PLAN_RETRY_LIMIT + 1);
+  }, 60_000);
+
+  // The consult ruling's three guards, each pinned where it alone suppresses the call.
+  test("guard (iii), the 37.6 shape: the no-PR `no_changes` run's story was later reviewed through another run: no call", async () => {
+    const fx = await noPr({ earlier: true });
+    // the other run (created before this one, so guard (ii) does not apply) reviewed the story after this run ended
+    fx.queue.note(fx.earlierId!, "plan-status", { phase: "review", pr: PR, owner: "proj", directory: fx.repo.checkout, story_key: KEY, id: "ST-097", ok: true, previous_status: "in-progress" });
+    await reviewPass(fx.queue, fx.deps);
+    expect(fx.status()).toEqual([]);
+    expect(fx.plan().some((e) => e.detail?.phase === "draft")).toBe(false);
+  }, 60_000);
+
+  test("guard (ii): a run created after this one marked the same story `in-progress` (ok): no call", async () => {
+    const fx = await noPr();
+    const later = fx.queue.enqueue({ jobId: "j2", root: fx.repo.checkout, projectId: "proj", definition: { id: "j2", target: { skill: "tk-studio-launch" } }, owner: me, base_ref: "main" }).run.run_id;
+    fx.queue.note(later, "plan-status", { phase: "in-progress", story_key: KEY, owner: "proj", directory: fx.repo.checkout, id: "ST-097", ok: true, previous_status: "draft" });
+    await reviewPass(fx.queue, fx.deps);
+    expect(fx.status()).toEqual([]);
+    expect(fx.plan().some((e) => e.detail?.phase === "draft")).toBe(false);
+  }, 60_000);
+
+  test("guard (i): a no-PR run with commits (its close-out reports no `no_changes`, or `no_changes: false`): no call", async () => {
+    for (const ended of [{ closeout: { result: "failed", commits: ["abc1234 the run's work"], error: "git push failed", worktree: "kept" } }, { no_changes: false }]) {
+      const fx = await noPr({ ended });
+      await reviewPass(fx.queue, fx.deps);
+      expect(fx.status()).toEqual([]);
+      expect(fx.plan().some((e) => e.detail?.phase === "draft")).toBe(false);
+    }
+  }, 60_000);
+
+  test("the draft pass skips an `external` run (an `external` event, or `ended.detail.external`): no call", async () => {
+    // a queue run whose end is flagged external
+    const flagged = await noPr({ ended: { no_changes: true, external: true } });
+    await reviewPass(flagged.queue, flagged.deps);
+    expect(flagged.status()).toEqual([]);
+    expect(flagged.plan().some((e) => e.detail?.phase === "draft")).toBe(false);
+    // a run started outside the queue, no PR, its story marked in-progress, its close-out `no_changes`
+    const fx = await fixture({ ended: { no_changes: true }, end: { state: "partial", reason: REASON } });
+    const ext = fx.queue.recordExternal("j", fx.repo.checkout, "j-20261107T101010Z", "running")!;
+    fx.queue.db.run("UPDATE runs SET worktree = ?, base_ref = 'main' WHERE run_id = ?", [join(tmpdir(), "tk-sup-ps-ext-draft-gone"), ext.run_id]);
+    fx.queue.note(ext.run_id, "plan-status", { phase: "in-progress", story_key: KEY, owner: "proj", directory: fx.repo.checkout, id: "ST-097", ok: true, previous_status: "draft" });
+    fx.queue.endExternal(ext.run_id, "partial");
+    fx.queue.note(ext.run_id, "closed_out", { no_changes: true, closeout: { result: "no changes", commits: [], worktree: "removed" } });
+    await reviewPass(fx.queue, fx.deps);
+    expect(fx.queue.events(ext.run_id).some((e) => e.kind === "plan-status" && e.detail?.phase === "draft")).toBe(false);
+    expect(fx.queue.events(ext.run_id).some((e) => e.kind === "plan-lease")).toBe(false);
+  }, 60_000);
+});
+

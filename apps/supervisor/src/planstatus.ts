@@ -8,6 +8,12 @@
  *
  *   {phase: "review"|"done", pr, owner, directory, story_key, id, ok, previous_status?, error?, blocked?, skipped?, reason?, stage?}
  *
+ *   draft     Story 38.2 (CAP-5, hole 114): `{phase: "draft", story_key, id, owner, directory, ok, ...}` once per story a terminal
+ *             run with no PR (never `external`) marked `in-progress` (`ok`), under the per-story lease `draft:<key>`, on the entity
+ *             its `in-progress` event names, the note `run <id> ended without a PR: <the run's reason, clipped to 200>`; a
+ *             transient failure is retried, bounded by `PLAN_RETRY_LIMIT` (see `storiesToDraft`). A plan entry never reads
+ *             `in-progress` for a story no run holds. Only for a run whose last close-out reports `no_changes`, and a story
+ *             no later run marked `in-progress`/`review`/`done` and no run at all marked `review`/`done` (`heldElsewhere`).
  *   in-progress Story 36.6 (hole 104): `{phase: "in-progress", story_key, id, ...}` once per story of a running launched
  *             run that runs stories (`runsStories`, Story 37.4: by the job's `target`, not its type — `run-epic`,
  *             `run-vertical-slice`), from the launched path, the resume and `launchedPass` (see `storyInProgress`).
@@ -135,7 +141,7 @@ export interface PlanStatusDeps extends WorktreeDeps {
   now?: () => number;
 }
 
-export type Phase = "in-progress" | "review" | "done";
+export type Phase = "in-progress" | "review" | "done" | "draft";
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const clip = (s: string, n = 300) => s.replace(/\/\/[^/@\s]+@/g, "//[redacted]@").trim().slice(0, n);
@@ -334,7 +340,12 @@ export async function reviewPass(queue: Queue, deps: PlanStatusDeps = {}): Promi
       if (planEvents(events, "review").length) continue;
       if (events.some((e) => e.kind === "external") || events.findLast((e) => e.kind === "ended")?.detail?.external === true) continue;
       const pr = runPr(events);
-      if (!pr) continue;
+      if (!pr) {
+        // Story 38.2 (CAP-5): a run that ended without a PR and without a commit (its close-out `no_changes`) gives back each
+        // story it marked `in-progress`, unless a later run took the story up or any run landed it (`storiesToDraft`).
+        if (await storiesToDraft(queue, run, deps)) out.push(run.run_id);
+        continue;
+      }
       if (await leased(queue, run.run_id, "review", deps, () => reviewRun(queue, run, pr, deps))) out.push(run.run_id);
     } catch { /* the next tick tries again */ }
   }
@@ -391,6 +402,61 @@ async function reviewRun(queue: Queue, run: QueueRun, pr: string, deps: PlanStat
     await tellConflict(queue, run, entity.id, "review", res, deps);
     any = record(queue, run.run_id, { ...at, story_key: s.story_key, id: entity.id, ...shown(res) }) || any;
   }
+  return any;
+}
+
+// ------------------------------------------------------------ Story 38.2: a story no run holds returns to Draft
+
+/** Story 38.2: a `plan-status` event's story key in one spelling (events before 37.4 may carry the `-spec` suffix). */
+const storyKeyOf = (v: unknown): string | undefined => (typeof v === "string" && v.trim() ? v.trim().replace(/-spec$/, "") : undefined);
+
+/** Story 38.2 (consult ruling): another run holds or landed `key` — a run created after `run` (`queue.runs()` order) with an
+ * `ok` `plan-status` `in-progress`, `review` or `done` event for it, or any run at all with an `ok` `review`/`done` one. Read
+ * across the queue's runs (never `finishedStories`, which is per run). */
+function heldElsewhere(queue: Queue, run: QueueRun, key: string): boolean {
+  const runs = queue.runs();
+  const at = runs.findIndex((r) => r.run_id === run.run_id);
+  return runs.some((r, i) => {
+    const phases = i > at && r.run_id !== run.run_id ? ["in-progress", "review", "done"] : ["review", "done"];
+    return queue.events(r.run_id).some((e) => e.kind === "plan-status" && e.detail?.ok === true && phases.includes(String(e.detail?.phase))
+      && storyKeyOf(e.detail?.story_key) === key);
+  });
+}
+
+/** Story 38.2 (consult ruling): the run's last close-out (an `ended` or `paused` event carrying one) reports `no_changes`. */
+const endedWithoutChanges = (events: readonly QueueEvent[]): boolean =>
+  events.findLast((e) => (e.kind === "ended" || e.kind === "paused") && !!e.detail && ("closeout" in e.detail || "no_changes" in e.detail))?.detail?.no_changes === true;
+
+/** Story 38.2 (CAP-5): the `draft` call for each story a terminal run with no PR marked `in-progress` (an `ok` event) and
+ * has no `draft` event for, under the per-story lease `draft:<key>`, on the entity and owner its `in-progress` event names
+ * (the run branch may be gone with a "no changes" end): `plansync.py status --status draft --note "run <id> ended without a
+ * PR: <reason>"`, one `plan-status {phase: "draft", story_key, id, owner, directory, ok, …}`; a transient failure records
+ * nothing and is asked again, bounded by `PLAN_RETRY_LIMIT`. Only when (i) the run's last close-out reports `no_changes`
+ * (a run with commits but no PR keeps its story), (ii) no run created after it marked the story `in-progress`, `review`
+ * or `done` (`ok`), and (iii) no run at all marked it `review` or `done` (`ok`) — `heldElsewhere`, read again under the
+ * lease. Answers whether it recorded. Never throws. */
+async function storiesToDraft(queue: Queue, run: QueueRun, deps: PlanStatusDeps): Promise<boolean> {
+  let any = false;
+  try {
+    if (!endedWithoutChanges(queue.events(run.run_id))) return false;
+    const drafted = (key: string) => planEvents(queue.events(run.run_id), "draft").some((e) => e.detail?.story_key === key);
+    const started = planEvents(queue.events(run.run_id), "in-progress").filter((e) => e.detail?.ok === true && typeof e.detail?.story_key === "string" && typeof e.detail?.id === "string" && typeof e.detail?.directory === "string");
+    for (const ev of started) {
+      const d = ev.detail as Record<string, any>;
+      const key = d.story_key as string;
+      if (drafted(key) || heldElsewhere(queue, run, storyKeyOf(key) ?? key)) continue;
+      const at = { phase: "draft" as const, story_key: key, id: d.id, ...(d.owner !== undefined ? { owner: d.owner } : {}), directory: d.directory };
+      const note = `run ${run.run_id} ended without a PR: ${clip(run.reason ?? "no reason recorded", 200)}`;
+      any = (await leased(queue, run.run_id, "draft", deps, async () => {
+        if (drafted(key)) return true; // settled by another pass, read under the lease
+        if (heldElsewhere(queue, run, storyKeyOf(key) ?? key)) return false; // taken up or landed meanwhile: nothing to give back
+        const res = await callStatus(d.directory, d.id, "draft", note, deps);
+        if (res.transient) return { retry: res.error ?? "plansync.py status failed", detail: at };
+        await tellConflict(queue, run, d.id, "draft", res, deps);
+        return record(queue, run.run_id, { ...at, ...shown(res) });
+      }, `draft:${key}`)) || any;
+    }
+  } catch { /* the next tick tries again */ }
   return any;
 }
 

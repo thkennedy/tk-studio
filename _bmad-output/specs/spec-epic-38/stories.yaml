@@ -154,7 +154,14 @@
     executor spec as `stories/38-5-the-pause-path-finished-spec.md` in the spec folder;
     the engine resolves it by the glob `38-5-the-pause-path-finished-*.md`, and a file
     named `38-5-the-pause-path-finished.md` is read as pending (loop deficiency 1, story
-    21-6).
+    21-6). Replan (38-2 gate, 2026-11-08): Story 38.2 moved `findSpec` (with
+    `frontmatter`, `blockingCondition`, `snapshotFolders`, `snapshotReady`,
+    `renderSignature`, `stashedSpec`) from `closeout.ts` to
+    `apps/supervisor/src/worktree.ts` (`findSpec` near :1032); `closeout.ts` re-exports
+    them (:272), so `closeout.findSpec` still resolves. Edit `findSpec`'s split-spec
+    rule in `worktree.ts` (already in the plan's Files) rather than `closeout.ts`; this
+    is no deviation, and tests may import it from either module. `worktree.ts` grew
+    from 1346 to 1689 lines, so re-grep every plan anchor by symbol.
 
 - id: "38-6-the-gates-coverage-widened"
   title: "The Gate's Coverage Widened"
