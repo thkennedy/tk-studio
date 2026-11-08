@@ -143,6 +143,30 @@ from those statuses. Every Atlassian write goes through the planning adapter
    `ReasonMissing` by name; a temporary failure ends `partial` with `ok: false`
    and `retry: true`.
 
+   The `drop` verb (DW-51) retires the issues a superseded plan promoted;
+   the supervisor's approve pass calls it on the host, with the agent seat,
+   when an engagement is re-approved after `revise` with its earlier approve
+   PR still open:
+
+   ```bash
+   uv run "${CLAUDE_PLUGIN_ROOT}/lib/track.py" drop --directory <project-root> \
+     --engagement <ENG-NNN> --issue <KEY> [--issue <KEY> …] --reason "<text>" [--dry-run]
+   ```
+
+   Before any write, every issue not already dropped must have a transition
+   reaching `DNI`, else `NoTransition` with nothing moved or commented. Each
+   issue then moves by name to `DNI` and gets one `Dropped: <reason>` agent
+   comment with no account mention; an issue already in a dropped status is
+   not moved, and gets the comment only when its newest agent comment is not
+   that same body, else it is named in `skipped[]` (a retry never comments
+   twice). The result is `{ok, dry_run, engagement, issues: [{issue,
+   transitioned, commented}], skipped[], notes[], written: [], retry?}`.
+   Refusals end `blocked` by name: `EngagementNotFound`, `NoIssue`,
+   `BadIssue`, `ReasonMissing`, the agent seat's gaps, `NoTransition` and
+   `JiraRefused: <key>: <error>` (any other non-transient Jira error); a
+   temporary failure ends `partial` with `ok: false` and `retry: true`. It
+   holds the engagement's `track.lock` as `close` does.
+
    The `reply` verb (Story 31.6) is the owner's answer from the web's
    Issue screen; only the supervisor's `POST /inbox/{key}/reply` calls it,
    on the host:

@@ -1,6 +1,6 @@
 # Deferred Work
 
-<!-- deferred-work counter: last minted DW-189; mint through plansync.py deferred mint -->
+<!-- deferred-work counter: last minted DW-192; mint through plansync.py deferred mint -->
 
 ### DW-124: Contract §4 `submit` admitted a full job definition but the CLI/skill surface was id-only
 origin: migrated from legacy ledger ("Deferred from: code review of feat/tk-studio-connector (2026-08-06)"), 2026-10-29
@@ -450,7 +450,8 @@ location: apps/supervisor/src/approve.ts reservedEpics / the sync step
 severity: medium
 reason: plansync's plan-counter.yaml is branch-local; reservedEpics reserves only ## Epic numbers, so the second PR adds the same EP-<n>.md (an add/add conflict GitHub surfaces, not a silent duplicate). Pre-existing property of plansync's counter across unmerged branches. Meets DEFERRAL DISCIPLINE (b): AD-4 id uniqueness at risk.
 decision: owner 2026-11-05 (TKSTUDIO-216): A — wait, don't clash: an approve pass for a project waits (retrying each tick) while another engagement's approve PR for that project is still open; stays open for the sweep
-status: open
+status: done 2026-11-08
+resolution: resolved by sweep bundle dw-approve-concurrency-and-reapproval
 
 ### DW-50: Two engagements quoted before either approves predict the same EP id, so the shared budget-bands.yaml entry holds only the later quote's estimate and the re-key can move the other engagement's figure.
 origin: spec-deferred 27739241dd4d
@@ -469,7 +470,8 @@ location: apps/supervisor/src/approve.ts re-approval cut (read-tree reset) and t
 severity: medium
 reason: approve.ts re-approval path (operator ruling (2), pass 5): `git read-tree -u --reset origin/<default>` drops the first cycle's entity files holding external.jira.key and resets plan-counter.yaml; the following `plansync.py sync` mints keyless entities and jirabackend.promote POSTs a new issue for each. Consequence of ruling (2)'s wholesale replacement; reconciling the earlier promote (drop/transition the orphans, or carry keys forward) needs an operator decision. Meets DEFERRAL DISCIPLINE (a): AC1's plansync sync (the promote to Jira).
 decision: owner 2026-11-05 (TKSTUDIO-217): A — mark them dropped: before the second sync, move the first cycle's issues to the project's dropped/cancelled status (DNI) with a comment naming the re-approval; stays open for the sweep
-status: open
+status: done 2026-11-08
+resolution: resolved by sweep bundle dw-approve-concurrency-and-reapproval
 
 ### DW-52: A named engage.py closeout refusal records engagement-closeout ok:false and is never retried, so the record stays in-progress/partial with the issue open; a manual engage.py closeout rerun writes the
 origin: spec-deferred 8106661dadd5
@@ -1596,4 +1598,28 @@ source_spec: `kb/atlassian-free-tier.md` item 5 (the rewritten scope lists); `ha
 location: plugins/tk-studio/lib/jirabackend.py `find_statuses` (`_paged_values(client, "/statuses/search", …, scope=SCOPE_READ)` twice: the Jira v2 spec lists `manage:jira-configuration`), `find_workflow` (`/workflow/search` with `scope=SCOPE_READ`: the deprecated endpoint lists `manage:jira-project`), `create_project` (`POST /project` with `scope=SCOPE_PROJECT`: the spec lists `manage:jira-configuration`); plugins/tk-studio/lib/confluence.py `upload_attachment` (the v1 `PUT /content/{id}/child/attachment` (`scope=SCOPE_ATTACHMENT, v1=True`: the v1 spec adds `read:content-details:confluence`)
 severity: low
 reason: A `403` on one of these calls prints a remedy naming a scope the token already has, so the operator recreates a token that fails the same way (the pattern Tim named on TKSTUDIO-236: "I have recreated the API keys multiple times and yet we still seem to be missing permissions"). Fix to make: carry the spec's scope on each call (`SCOPE_CONFIGURATION` for `/statuses/search` and `POST /project`, `SCOPE_PROJECT` for `/workflow/search`, `read:content-details:confluence` beside `write:attachment:confluence` on the v1 upload) and pin each in the backends' tests; the message shape is unchanged. Sweep-safe.
+status: open
+
+### DW-190: Two engagements of one project starting their first append in separate supervisor processes at once can both see no holder: the approve lock is per engagement, so the DW-49 wait check is not atomic ac
+origin: spec-deferred 098796f73cb8
+source_spec: `spec-approve-concurrency-and-reapproval.md`
+location: apps/supervisor/src/approve.ts approveStep (the DW-49 wait check)
+severity: medium
+reason: approveStep takes only takeLock(<worktree>.lock) per engagement; serialised() covers one process. Serve and run/drain processes can each run approvePass concurrently. Meets DEFERRAL DISCIPLINE (b): AD-4 id uniqueness.
+status: open
+
+### DW-191: Two engagements of one project that each still have an earlier approve PR open, both revised and re-approved before either new cycle appends, hold each other through the cross-cycle hold: a mutual Wai
+origin: spec-deferred e13671470a74
+source_spec: `spec-approve-concurrency-and-reapproval.md`
+location: apps/supervisor/src/approve.ts openPrHolder (the earlier-open-PR hold)
+severity: medium
+reason: openPrHolder's earlier-open-PR branch (Spec Change Log #3) holds on the other's newest ok pr while gh answers OPEN, symmetrically. Reachable only from approve PRs already open side by side before DW-49 ships, or the deferred cross-process race. A tie-break lets one sync clash with the other's open ids, so it needs an owner ruling. Meets DEFERRAL DISCIPLINE (a): the DW-49 wait the criteria name.
+status: open
+
+### DW-192: A first cycle whose sync promoted Jira issues but whose commit/push never landed, then revised and re-approved, re-runs fresh: the kept worktree holding the keys is removed and no origin branch exists
+origin: spec-deferred 62be94cb1011
+source_spec: `spec-approve-concurrency-and-reapproval.md`
+location: apps/supervisor/src/approve.ts the fresh re-approval path (removeWorktree before the cut)
+severity: medium
+reason: dropSuperseded runs only on the onBranch read-tree cut (the path DW-51 names); the fresh path's removeWorktree drops the only copy of the keys. Pre-existing path not changed by this bundle. Meets DEFERRAL DISCIPLINE (a): AC1's promote to Jira.
 status: open

@@ -20,6 +20,25 @@
  *                re-approval after `revise` runs the pass again. Inputs (`scope.md`, the record) are read from the
  *                served root; the per-epic dollars come from the record (`quote.basis.epics[].usd_estimate`), never
  *                from the served root's budget-bands file (DW-46, DW-50).
+ *                DW-49 (owner decision A): before a cycle starts (no ok `append` since the newest approve line), the
+ *                pass WAITS while another engagement's approve PR for the same project is still open — scoped to its
+ *                newest approve line, an ok `append` with no ok `queued` and no `PrClosed` refusal after it, with no
+ *                ok `pr` yet or `gh pr view --json state` answering `OPEN` (a gh failure counts as open), or — whatever
+ *                its newest cycle shows — its newest ok `pr` across all its cycles, with no ok `queued` and no `PrClosed`
+ *                refusal after it, still `OPEN` (an earlier PR open after a revise); a cancelled, absent or
+ *                never-approved other engagement releases (an unreadable one holds while its events show an ok
+ *                `append` with no ok `queued` and no `PrClosed` refusal after it) — recorded once as
+ *                `append` false `WaitOpenPr: <other>'s approve PR <url | pending | unknown (record unreadable)> for
+ *                project <p> is still open (retried each pass)` with `wait: true` and `holder {engagement, pr}`
+ *                (`unreadable: true` for an unreadable record), in none of done/refused/failed; a cycle already past
+ *                `append` never waits. DW-51 (owner decision A): on a fresh re-approval cut from
+ *                `origin/engagement/ENG-NNN` of a Jira-bound project, after `worktree add` and before the tree reset
+ *                and the second sync, the earlier cycle's promoted issues (by provenance: the `external.jira.key` of
+ *                the plan entities at the branch's HEAD whose `source` is `epics.md#epic-N` / `epics.md#story-N.<m>`
+ *                for each `## Epic N` there whose first body line is `engagement: ENG-NNN`, less any key a
+ *                default-branch plan entity carries) are moved to `DNI` through `track.py drop`; the ok `append`
+ *                detail carries `dropped: [keys]`; a transient failure fails `append` `DropFailed: …`, a refusal
+ *                `DropRefused: <reason>`, both removing the worktree (retried next pass).
  *                The steps, in order, each one `engagement-approve {id, project, step, ok, detail}` service event (a
  *                failed step is retried at the next pass and never moves the state; the pass writes nothing into the
  *                record; a failure equal to the step's newest event is not repeated):
@@ -493,6 +512,142 @@ function reservedEpics(queue: Queue, project: string, id: string): number[] {
   return [...out];
 }
 
+/** DW-49 (TKSTUDIO-216, owner decision A): another engagement of `project` whose approve cycle is still open, so this
+ * engagement's cycle waits before it starts (both would `plansync sync` from the same branch-local `plan-counter.yaml`
+ * and mint the same EP/ST ids). Held: the other's events scoped to ITS newest approve line hold an ok `append` with no
+ * ok `queued` and no `queued` refusal starting `PrClosed` at or after it — with no ok `pr` yet (appended, synced or
+ * committed, the PR pending: `pr: null`, no gh call), or with an ok `pr` whose `gh pr view <url> --json state` answers
+ * `OPEN` (a gh failure or an unreadable answer counts as open: asked again at the next pass; `MERGED`/`CLOSED` does not
+ * hold). Also held (Spec Change Log #3), whatever its newest cycle shows: its newest ok `pr` across ALL its cycles with
+ * no ok `queued` and no `PrClosed` refusal at or after it, while gh answers `OPEN` (a gh failure holds) — an earlier PR
+ * still open after a revise, whose ids are on origin until the re-approval replaces them. Released when the other's
+ * record is absent, has no approve line, or is `cancelled`. An unreadable record holds (`unreadable: true`, its PR
+ * unknown) only while its events (any cycle) show an ok `append` with no ok `queued` and no `PrClosed` refusal after
+ * it. Null: none. */
+async function openPrHolder(queue: Queue, deps: ApproveDeps, t: Target, project: string, id: string): Promise<{ engagement: string; pr: string | null; unreadable?: true } | null> {
+  const others = queue.serviceEvents(APPROVE_EVENT).filter((e) => e.detail?.project === project && typeof e.detail?.id === "string" && e.detail.id !== id);
+  const lastOk = (evs: typeof others, step: ApproveStep) => evs.findLast((e) => e.detail?.step === step && e.detail?.ok === true);
+  // an ok queued, or a queued refusal starting PrClosed, at or after `at`: that cycle's PR is settled
+  const settledSince = (evs: typeof others, at: string) => evs.some((e) => e.detail?.step === "queued" && e.at >= at
+    && (e.detail?.ok === true || (e.detail?.ok === false && String(stepDetail(e).reason ?? "").startsWith("PrClosed"))));
+  const urlOf = (e: (typeof others)[number]): string | null => {
+    const recorded = stepDetail(e).pr;
+    return isObject(recorded) && typeof recorded.url === "string" && recorded.url ? recorded.url : null;
+  };
+  // gh's answer: MERGED/CLOSED releases; OPEN, a gh failure or an unreadable answer holds (asked again next pass)
+  const stillOpen = async (url: string): Promise<boolean> => {
+    try {
+      const r = await gh(deps, t.root, ["pr", "view", url, "--json", "state"]);
+      const view = r.exit === 0 ? lastJsonObject(r.stdout) as Record<string, unknown> | null : null;
+      const state = typeof view?.state === "string" ? view.state.toUpperCase() : undefined;
+      return state !== "MERGED" && state !== "CLOSED";
+    } catch { return true; }
+  };
+  for (const other of [...new Set(others.map((e) => e.detail!.id as string))]) {
+    const all = others.filter((e) => e.detail?.id === other);
+    let record: Engagement | null;
+    try { record = readEngagement(t.root, other); } catch {
+      // unreadable: held only while its events (any cycle) show a cycle still open
+      const append = lastOk(all, "append");
+      if (append && !settledSince(all, append.at)) return { engagement: other, pr: null, unreadable: true };
+      continue;
+    }
+    if (!record || record.state === "cancelled") continue;
+    const line = approveLine(record);
+    if (!line) continue;
+    const mine = all.filter((e) => e.at >= line.at);
+    let asked: string | null = null;
+    const append = lastOk(mine, "append");
+    if (append && !settledSince(mine, append.at)) {
+      const pr = mine.findLast((e) => e.detail?.step === "pr" && e.detail?.ok === true && e.at >= append.at);
+      if (!pr) return { engagement: other, pr: null };
+      const url = urlOf(pr); // the pr step always records one
+      if (url) {
+        if (await stillOpen(url)) return { engagement: other, pr: url };
+        asked = url;
+      }
+    }
+    // an earlier cycle's PR still open (revised and re-approved, the new cycle not yet past it)
+    const newest = lastOk(all, "pr");
+    if (!newest || settledSince(all, newest.at)) continue;
+    const url = urlOf(newest);
+    if (!url || url === asked) continue;
+    if (await stillOpen(url)) return { engagement: other, pr: url };
+  }
+  return null;
+}
+
+/** DW-51: the Jira keys (`external.jira.key`) the earlier cycle of `id` promoted, by provenance (Spec Change Log #2: no
+ * merge-base, no diff — a `read-tree --reset` commit is not a merge, so a second re-approval's merge-base stays at the
+ * original cut): the earlier cycle's epic numbers N are the `## Epic N` sections of `epics.md` at the branch's HEAD
+ * (checked out in `wt`, before the reset) whose first body line is `engagement: <id>`; the keys are those of the plan
+ * entities at HEAD whose `source` is `epics.md#epic-N` or starts `epics.md#story-N.` for those N, leaving out any key a
+ * plan entity of `defaultRef` also carries (a matched default-branch file whose frontmatter will not parse keeps every
+ * candidate key found in its text off the list); deduped and sorted. Throws when a read or git cannot answer. */
+async function supersededKeys(deps: ApproveDeps, wt: string, prefix: string, defaultRef: string, id: string): Promise<string[]> {
+  const lines = readFileSync(join(wt, `${prefix}${EPICS_REL}`), "utf-8").split(/\r?\n/);
+  const ns = new Set<number>();
+  for (let i = 0; i < lines.length; i++) {
+    const m = EPIC_HEAD_RE.exec(lines[i]!);
+    if (!m) continue;
+    let j = i + 1;
+    while (j < lines.length && !lines[j]!.trim()) j++;
+    if (j < lines.length && lines[j]!.trim() === `engagement: ${id}`) ns.add(Number(m[1]));
+  }
+  if (!ns.size) return [];
+  const keyOf = (fm: Record<string, unknown>): string => {
+    const jira = isObject(fm.external) && isObject(fm.external.jira) ? fm.external.jira : null;
+    return typeof jira?.key === "string" ? jira.key.trim() : "";
+  };
+  const parse = (text: string): Record<string, unknown> | null => { try { return frontmatter(text); } catch { return null; } };
+  const planRel = `${prefix}${PLAN_DIR_REL}`;
+  let names: string[];
+  try { names = readdirSync(join(wt, planRel)).filter((n) => n.endsWith(".md")); }
+  catch (e) { if ((e as NodeJS.ErrnoException)?.code === "ENOENT") return []; throw e; }
+  const keys = new Set<string>();
+  for (const name of names.sort()) {
+    const fm = parse(readFileSync(join(wt, planRel, name), "utf-8"));
+    if (!fm) continue;
+    const source = typeof fm.source === "string" ? fm.source.trim() : "";
+    const m = /^epics\.md#(?:epic-(\d+)$|story-(\d+)\.)/.exec(source);
+    if (!m || !ns.has(Number(m[1] ?? m[2]))) continue;
+    const key = keyOf(fm);
+    if (key) keys.add(key);
+  }
+  if (!keys.size) return [];
+  // a key a default-branch plan entity also carries is live there: never dropped
+  const grep = await git(deps, wt, ["grep", "-l", "-F", ...[...keys].flatMap((k) => ["-e", k]), defaultRef, "--", `${planRel}/`], 60);
+  if (grep.exit !== 0 && grep.exit !== 1) throw new Error(`git grep ${failed(grep)}`);
+  for (const hit of grep.exit === 0 ? grep.stdout.split(/\r?\n/).map((l) => l.trim()).filter(Boolean) : []) {
+    const rel = hit.startsWith(`${defaultRef}:`) ? hit.slice(defaultRef.length + 1) : hit;
+    const shown = await git(deps, wt, ["show", `${defaultRef}:${rel}`], 60);
+    if (shown.exit !== 0) throw new Error(`git show ${failed(shown)}`);
+    // `frontmatter` answers `{}` for a fence or YAML that will not parse: every candidate key in such a file's text
+    // may be live there, so none of them is dropped
+    const fm = parse(shown.stdout);
+    if (fm && Object.keys(fm).length) keys.delete(keyOf(fm));
+    else for (const k of [...keys]) if (shown.stdout.includes(k)) keys.delete(k);
+  }
+  return [...keys].sort();
+}
+
+/** DW-51 (TKSTUDIO-217, owner decision A): `track.py drop --engagement --issue <key>… --reason <reason>` on the host
+ * (the `trackBlock` pattern): the earlier cycle's promoted issues moved to `DNI` before the re-approval's sync. Answers
+ * ok, or the `append` refusal (`DropFailed: …` for a transient failure, `DropRefused: <track's reason>` for a refusal). */
+async function dropSuperseded(deps: ApproveDeps, root: string, id: string, keys: string[], reason: string): Promise<{ ok: true } | { ok: false; reason: string }> {
+  let r: RunResult;
+  try {
+    r = await uvRunner(deps)(root, studioScript(deps, "lib", "track.py"),
+      ["drop", "--directory", root, "--engagement", id, ...keys.flatMap((k) => ["--issue", k]), "--reason", reason], 120);
+  } catch (e) { return { ok: false, reason: `DropFailed: track.py drop: ${clip(message(e))}` }; }
+  const out = lastJsonObject(r.stdout) as Record<string, any> | null;
+  const said = typeof out?.reason === "string" && out.reason ? clip(out.reason) : "";
+  if (!out || typeof out.status !== "string" || out.retry === true) return { ok: false, reason: `DropFailed: ${said || `track.py drop ${failed(r)}`}` };
+  if (out.status === "blocked") return { ok: false, reason: `DropRefused: ${said || "track refused"}` };
+  if (out.status !== "complete") return { ok: false, reason: `DropFailed: track.py drop ended ${out.status}${said ? `: ${said}` : ""}` };
+  return { ok: true };
+}
+
 /** Whether the process `pid` lives (EPERM: it does, another user's). */
 function pidAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch (e) { return (e as NodeJS.ErrnoException)?.code === "EPERM"; }
@@ -613,12 +768,26 @@ async function worktreeSteps(queue: Queue, deps: ApproveDeps, t: Target, record:
       if (refused) return fail("append", refused);
     }
   }
+  let dropped: string[] = []; // DW-51: the earlier cycle's issues moved to DNI on this cut
   if (mode === "fresh") {
     if (existsSync(wt)) await removeWorktree();
     try {
       mkdirSync(dirname(wt), { recursive: true });
       const add = await git(deps, top, ["worktree", "add", "--relative-paths", wt, "-B", branch, base]);
       if (add.exit !== 0) return fail("append", `WorktreeAdd: git worktree add ${failed(add)}`);
+      if (onBranch && jiraBound(t.root)) {
+        // DW-51: before the reset and the second sync, the issues the earlier plan promoted (by provenance: this
+        // engagement's `## Epic N` entities' keys) moved to the dropped status; a failure removes the fresh worktree
+        let keys: string[];
+        try { keys = await supersededKeys(deps, wt, prefix, defaultRef, id); }
+        catch (e) { await removeWorktree(); return fail("append", `DropFailed: ${clip(message(e))}`); }
+        if (keys.length) {
+          const d = await dropSuperseded(deps, t.root, id, keys,
+            `${id} re-approved after revise (approve ${since}): the earlier plan this issue came from is replaced wholesale`);
+          if (!d.ok) { await removeWorktree(); return fail("append", d.reason); }
+          dropped = keys;
+        }
+      }
       if (onBranch) {
         // the earlier plan replaced wholesale in content: the index and the files reset to the default branch's tree
         const reset = await git(deps, wt, ["read-tree", "-u", "--reset", defaultRef]);
@@ -671,7 +840,7 @@ async function worktreeSteps(queue: Queue, deps: ApproveDeps, t: Target, record:
         const appended = appendEpics(epicsText, proposed, id, reservedEpics(queue, project, id));
         atomicWrite(join(served, EPICS_REL), appended.text);
         ours.add(EPICS_REL);
-        emit("append", true, { epics: appended.epics });
+        emit("append", true, { epics: appended.epics, ...(dropped.length ? { dropped } : {}) });
         appendedEpics = appended.epics;
       }
       // sync (normalize, then the projection)
@@ -905,6 +1074,18 @@ async function approveStep(queue: Queue, deps: ApproveDeps, t: Target, out: Appr
       emitStep(queue, deps, t, project, since, "append", false, { reason: `NotApproved: ${id} is ${record.state}, not approved` });
       out.refused.push(id);
       return;
+    }
+    // DW-49: before this cycle starts (no ok append yet), wait while another engagement's approve PR for the project
+    // is still open; told once (emitStep's dedupe), in none of done/refused/failed, the state never moved
+    if (!okStep(queue, project, id, since, "append")) {
+      const holder = await openPrHolder(queue, deps, t, project, id);
+      if (holder) {
+        emitStep(queue, deps, t, project, since, "append", false, {
+          reason: `WaitOpenPr: ${holder.engagement}'s approve PR ${holder.unreadable ? "unknown (record unreadable)" : holder.pr ?? "pending"} for project ${project} is still open (retried each pass)`,
+          wait: true, holder,
+        });
+        return;
+      }
     }
     if (!okStep(queue, project, id, since, "commit") && !(await worktreeSteps(queue, deps, t, record, since))) { out.failed.push(id); return; }
     if (!okStep(queue, project, id, since, "pr") && !(await prStep(queue, deps, t, project, since))) { out.failed.push(id); return; }

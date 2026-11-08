@@ -4,7 +4,7 @@
 // `uv`, a fake track.py answer), real git against a throwaway origin, `fakeGh`, a fake submitter and a fake graceful
 // stop: no live Atlassian, no live `gh`, no push beyond the throwaway origin.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { basename, dirname as dirnameOf, join } from "node:path";
 import {
@@ -95,7 +95,7 @@ function fakeSubmit(queue: Queue, o: { fail?: string } = {}) {
 }
 
 /** The deps: real git (the test identity), the fake gh, the fake plansync through `uv`, a fake `track.py`. */
-function approveDeps(queue: Queue, extra: Partial<ApproveDeps> & { track?: () => Record<string, unknown> } = {}) {
+function approveDeps(queue: Queue, extra: Partial<ApproveDeps> & { track?: (args: string[]) => Record<string, unknown> } = {}) {
   const plansync = fakePlansync();
   const gh = fakeGh(temp("tk-sup-ap-gh-"));
   const work = temp("tk-sup-ap-work-");
@@ -104,7 +104,7 @@ function approveDeps(queue: Queue, extra: Partial<ApproveDeps> & { track?: () =>
   const uv = async (root: string, script: string, args: string[], timeoutS?: number): Promise<RunResult> => {
     uvCalls.push({ script: basename(script), args });
     if (script.endsWith("track.py")) {
-      const answer = (extra.track ?? (() => ({ ok: true, status: "complete", engagement: ENG, issues: [{ issue: ISSUE, created: false, transitioned: true, commented: true }] })))();
+      const answer = (extra.track ?? (() => ({ ok: true, status: "complete", engagement: ENG, issues: [{ issue: ISSUE, created: false, transitioned: true, commented: true }] })))(args);
       return { exit: answer.status === "blocked" ? 2 : 0, stdout: JSON.stringify(answer), stderr: "" };
     }
     return runProcess("uv", ["run", script, ...args], { cwd: root, timeoutS: timeoutS ?? 120, env: { ...env, PYTHONIOENCODING: "utf-8" } });
@@ -124,6 +124,13 @@ function approveDeps(queue: Queue, extra: Partial<ApproveDeps> & { track?: () =>
 const approveEvents = (q: Queue) => q.serviceEvents(APPROVE_EVENT).map((e) => e.detail as Record<string, any>);
 const steps = (q: Queue) => approveEvents(q).map((d) => [d.step, d.ok]);
 const git = (cwd: string, ...args: string[]) => testGit(cwd, ...args);
+
+/** DW-49: another engagement of project p, approved, with its own scope. */
+function secondEngagement(root: string, id: string) {
+  mkdirSync(join(root, "_bmad-output", "engagements", id), { recursive: true });
+  writeFileSync(join(root, "_bmad-output", "engagements", id, "scope.md"), SCOPE.replace(`# ${ENG}`, `# ${id}`));
+  writeEngagement(root, { ...approvedRecord(), id });
+}
 
 describe("Story 32.6: the approve pass (AC1)", () => {
   test("approve with base_ref: epics appended, sync ran, the job and its config id, one commit on engagement/ENG-001, the PR; an OPEN PR queues nothing; on MERGED the run is queued from base_ref with the payload; the served root untouched", async () => {
@@ -679,6 +686,8 @@ describe("Story 32.6 review patches: re-approval, the kept worktree, the lock", 
     const pushes = gitCalls.filter((a) => a[0] === "push");
     expect(pushes).toHaveLength(2);
     for (const p of pushes) expect(p.some((a) => a.startsWith("--force") || a.startsWith("+"))).toBe(false);
+    // DW-51: no planning.jira binding, no track drop call
+    expect(fx.uvCalls.filter((c) => c.script === "track.py")).toEqual([]);
   }, 90_000);
 
   test("ruling (2): a push origin rejects as non-fast-forward is a named refusal on commit, retried at the next pass, never forced", async () => {
@@ -746,21 +755,387 @@ describe("Story 32.6 review patches: re-approval, the kept worktree, the lock", 
     expect(existsSync(lock)).toBe(false); // released
   }, 60_000);
 
-  test("4: two engagements approved before either PR merges take different ## Epic numbers", async () => {
+  test("4, DW-49: two engagements approved before either PR merges: ENG-002 waits while ENG-001's approve PR is open, then takes a different ## Epic and EP id once it merged", async () => {
     const queue = newQueue();
     const { root, origin } = servedRepo();
     const other = "ENG-002";
-    mkdirSync(join(root, "_bmad-output", "engagements", other), { recursive: true });
-    writeFileSync(join(root, "_bmad-output", "engagements", other, "scope.md"), SCOPE.replace(`# ${ENG}`, `# ${other}`));
-    writeEngagement(root, { ...approvedRecord(), id: other });
+    secondEngagement(root, other);
     const fx = approveDeps(queue);
+    const url = "https://github.com/acme/widget/pull/42";
     await approvePass(queue, fx.deps, { root, engagement: ENG });
+    const syncs = () => fx.plansync.calls().filter((a) => a[0] === "sync").length;
+    expect(syncs()).toBe(1);
+    // ENG-001's PR is open (gh answers OPEN): ENG-002 waits, told once, no plansync call
+    expect(await approvePass(queue, fx.deps, { root, engagement: other })).toEqual({ done: [], refused: [], failed: [] });
+    const theirs = () => approveEvents(queue).filter((d) => d.id === other);
+    expect(theirs().map((d) => [d.step, d.ok])).toEqual([["append", false]]);
+    expect(theirs()[0]!.detail.reason).toBe(`WaitOpenPr: ${ENG}'s approve PR ${url} for project p is still open (retried each pass)`);
+    expect(theirs()[0]!.detail).toMatchObject({ wait: true, holder: { engagement: ENG, pr: url } });
+    expect(syncs()).toBe(1);
+    const n = queue.serviceEvents().length;
+    expect(await approvePass(queue, fx.deps, { root, engagement: other })).toEqual({ done: [], refused: [], failed: [] });
+    expect(queue.serviceEvents().length).toBe(n);
+    expect(syncs()).toBe(1);
+    expect(readEngagement(root, other)!.state).toBe("approved");
+    // ENG-001's PR merged (origin's main moved, gh answers MERGED): ENG-002 runs append…pr with its own ids
+    git(origin, "update-ref", "refs/heads/main", "refs/heads/engagement/ENG-001");
+    fx.gh.answer({ view: "MERGED" });
     await approvePass(queue, fx.deps, { root, engagement: other });
-    const jobs = queue.serviceEvents(APPROVE_EVENT).map((e) => e.detail as Record<string, any>).filter((d) => d.step === "job").map((d) => [d.id, d.detail.jobs]);
-    expect(jobs).toEqual([[ENG, ["run-epic-41"]], [other, ["run-epic-42"]]]);
+    expect(theirs().map((d) => [d.step, d.ok]).slice(0, 6)).toEqual([["append", false], ["append", true], ["sync", true], ["job", true], ["commit", true], ["pr", true]]);
+    const jobs = approveEvents(queue).filter((d) => d.step === "job").map((d) => [d.id, d.detail.jobs, d.detail.epics[0].ep_id]);
+    expect(jobs).toEqual([[ENG, ["run-epic-41"], "EP-034"], [other, ["run-epic-42"], "EP-035"]]);
     expect(git(origin, "show", `engagement/${other}:_bmad-output/planning-artifacts/epics.md`)).toContain(`## Epic 42: Report exports\n\nengagement: ${other}`);
     // the pure part: the reserved numbers count in the highest ## Epic
     expect(appendEpics("## Epic 7: A\n", [{ k: 1, title: "X", intro: "", stories: [{ m: 1, title: "S", body: "b" }] }], ENG, [9, 3]).epics[0]!.n).toBe(10);
+  }, 90_000);
+
+  test("DW-49: ENG-001's PR closed unmerged (its queued refused PrClosed): ENG-002 does not wait, ENG-001's record unreadable or not", async () => {
+    const queue = newQueue();
+    const { root } = servedRepo();
+    const other = "ENG-002";
+    secondEngagement(root, other);
+    const fx = approveDeps(queue);
+    await approvePass(queue, fx.deps, { root, engagement: ENG });
+    fx.gh.answer({ view: "CLOSED" });
+    await approvePass(queue, fx.deps, { root, engagement: ENG });
+    expect(approveEvents(queue).findLast((d) => d.id === ENG)!.detail.reason).toStartWith("PrClosed:");
+    // the refusal releases the hold by itself: gh would say OPEN again, and no holder asks it; ENG-001's record
+    // unreadable releases too, its cycle settled (Spec Change Log #3 (a))
+    fx.gh.answer({ view: "OPEN" });
+    writeFileSync(join(root, "_bmad-output", "engagements", ENG, "engagement.yaml"), "{ not: [valid");
+    const views = () => fx.gh.calls().filter((c) => c.argv[0] === "pr" && c.argv[1] === "view").length;
+    const before = views();
+    await approvePass(queue, fx.deps, { root, engagement: other });
+    const theirs = approveEvents(queue).filter((d) => d.id === other);
+    expect(theirs.map((d) => [d.step, d.ok])).toEqual([["append", true], ["sync", true], ["job", true], ["commit", true], ["pr", true]]);
+    expect(views() - before).toBe(1); // ENG-002's own queued read, no holder read
+  }, 90_000);
+
+  test("DW-49: gh pr view failing counts as open: ENG-002 waits and asks again at the next pass", async () => {
+    const queue = newQueue();
+    const { root } = servedRepo();
+    const other = "ENG-002";
+    secondEngagement(root, other);
+    const fx = approveDeps(queue);
+    await approvePass(queue, fx.deps, { root, engagement: ENG });
+    fx.gh.answer({ fail: ["pr view"] });
+    await approvePass(queue, fx.deps, { root, engagement: other });
+    const theirs = () => approveEvents(queue).filter((d) => d.id === other);
+    expect(theirs().map((d) => [d.step, d.ok])).toEqual([["append", false]]);
+    expect(theirs()[0]!.detail.reason).toStartWith(`WaitOpenPr: ${ENG}'s approve PR https://github.com/acme/widget/pull/42`);
+    const views = () => fx.gh.calls().filter((c) => c.argv[0] === "pr" && c.argv[1] === "view").length;
+    const before = views();
+    await approvePass(queue, fx.deps, { root, engagement: other });
+    expect(views()).toBe(before + 1); // retried
+    expect(theirs()).toHaveLength(1);
+    expect(fx.plansync.calls().filter((a) => a[0] === "sync")).toHaveLength(1);
+  }, 90_000);
+
+  test("DW-49: an engagement mid-cycle (ok append, its sync refused, no commit) holds a fresh one, PR pending; a cycle already past append (resumed) never waits", async () => {
+    const queue = newQueue();
+    const { root } = servedRepo();
+    const other = "ENG-002";
+    secondEngagement(root, other);
+    const fx = approveDeps(queue);
+    // ENG-002 appends, its sync refused: its cycle has started
+    fx.plansync.sync("blocked");
+    await approvePass(queue, fx.deps, { root, engagement: other });
+    expect(approveEvents(queue).filter((d) => d.id === other).map((d) => [d.step, d.ok])).toEqual([["append", true], ["sync", false]]);
+    fx.plansync.sync("ok");
+    // ENG-001, fresh, waits on ENG-002's pending cycle (no gh call: no PR to ask after)
+    const views = () => fx.gh.calls().filter((c) => c.argv[0] === "pr" && c.argv[1] === "view").length;
+    expect(await approvePass(queue, fx.deps, { root, engagement: ENG })).toEqual({ done: [], refused: [], failed: [] });
+    const mine = approveEvents(queue).filter((d) => d.id === ENG);
+    expect(mine.map((d) => [d.step, d.ok])).toEqual([["append", false]]);
+    expect(mine[0]!.detail.reason).toBe(`WaitOpenPr: ${other}'s approve PR pending for project p is still open (retried each pass)`);
+    expect(mine[0]!.detail).toMatchObject({ wait: true, holder: { engagement: other, pr: null } });
+    expect(views()).toBe(0);
+    expect(fx.plansync.calls().filter((a) => a[0] === "sync")).toHaveLength(1);
+    // a third engagement holds too (an ok append of its own, no queued): ENG-002, already past append, resumes with
+    // no wait check
+    const third = "ENG-003";
+    secondEngagement(root, third);
+    queue.serviceEvent(APPROVE_EVENT, { id: third, project: "p", step: "append", ok: true, detail: { epics: [], root } }, "2026-10-25T05:59:00.000Z");
+    await approvePass(queue, fx.deps, { root, engagement: other });
+    const theirs = approveEvents(queue).filter((d) => d.id === other);
+    expect(theirs.some((d) => String(d.detail.reason ?? "").startsWith("WaitOpenPr"))).toBe(false);
+    expect(theirs.map((d) => [d.step, d.ok])).toEqual([["append", true], ["sync", false], ["sync", true], ["job", true], ["commit", true], ["pr", true]]);
+  }, 90_000);
+
+  test("DW-49: ENG-001's pushed commit with no PR yet holds ENG-002 (pr null); an unreadable ENG-001 record holds (unknown); once ENG-001's record is cancelled, ENG-002 does not wait", async () => {
+    const queue = newQueue();
+    const { root } = servedRepo();
+    const other = "ENG-002";
+    secondEngagement(root, other);
+    const fx = approveDeps(queue);
+    // ENG-001 commits and pushes, its PR create fails: the commit-pending holder
+    fx.gh.answer({ fail: ["pr create"] });
+    await approvePass(queue, fx.deps, { root, engagement: ENG });
+    expect(approveEvents(queue).filter((d) => d.id === ENG).map((d) => [d.step, d.ok])).toEqual([["append", true], ["sync", true], ["job", true], ["commit", true], ["pr", false]]);
+    fx.gh.answer({});
+    await approvePass(queue, fx.deps, { root, engagement: other });
+    const theirs = () => approveEvents(queue).filter((d) => d.id === other);
+    expect(theirs().map((d) => [d.step, d.ok])).toEqual([["append", false]]);
+    expect(theirs()[0]!.detail.reason).toBe(`WaitOpenPr: ${ENG}'s approve PR pending for project p is still open (retried each pass)`);
+    expect(theirs()[0]!.detail.holder).toEqual({ engagement: ENG, pr: null });
+    // ENG-001's record unreadable: still held, told as unknown (not "pending")
+    const recordPath = join(root, "_bmad-output", "engagements", ENG, "engagement.yaml");
+    const recordText = readFileSync(recordPath, "utf-8");
+    writeFileSync(recordPath, "{ not: [valid");
+    await approvePass(queue, fx.deps, { root, engagement: other });
+    expect(theirs().map((d) => [d.step, d.ok])).toEqual([["append", false], ["append", false]]);
+    expect(theirs()[1]!.detail.reason).toBe(`WaitOpenPr: ${ENG}'s approve PR unknown (record unreadable) for project p is still open (retried each pass)`);
+    expect(theirs()[1]!.detail).toMatchObject({ wait: true, holder: { engagement: ENG, pr: null, unreadable: true } });
+    writeFileSync(recordPath, recordText);
+    // ENG-001 cancelled: the hold released
+    writeEngagement(root, { ...readEngagement(root, ENG)!, state: "cancelled" });
+    await approvePass(queue, fx.deps, { root, engagement: other });
+    expect(theirs().map((d) => [d.step, d.ok]).slice(0, 4)).toEqual([["append", false], ["append", false], ["append", true], ["sync", true]]);
+  }, 90_000);
+
+  test("DW-49: ENG-001's first-cycle PR still open after a revise and re-approval, its new cycle not yet appended: ENG-002 waits on that PR; closed, it releases", async () => {
+    const queue = newQueue();
+    const { root } = servedRepo();
+    const other = "ENG-002";
+    secondEngagement(root, other);
+    const fx = approveDeps(queue);
+    const url = "https://github.com/acme/widget/pull/42";
+    await approvePass(queue, fx.deps, { root, engagement: ENG });
+    fx.gh.answer({ open: [url] }); // the earlier PR is still open (gh answers OPEN)
+    input(root, fx.deps, "revise");
+    input(root, fx.deps, "go", undefined, { quote: structuredClone(QUOTE) });
+    input(root, fx.deps, "approve", { autonomy: "full" });
+    // ENG-001's new cycle has not run: nothing since its newest approve line
+    expect(approveEvents(queue).filter((d) => d.id === ENG).map((d) => [d.step, d.ok])).toEqual([["append", true], ["sync", true], ["job", true], ["commit", true], ["pr", true]]);
+    expect(await approvePass(queue, fx.deps, { root, engagement: other })).toEqual({ done: [], refused: [], failed: [] });
+    const theirs = () => approveEvents(queue).filter((d) => d.id === other);
+    expect(theirs().map((d) => [d.step, d.ok])).toEqual([["append", false]]);
+    expect(theirs()[0]!.detail.reason).toBe(`WaitOpenPr: ${ENG}'s approve PR ${url} for project p is still open (retried each pass)`);
+    expect(theirs()[0]!.detail).toMatchObject({ wait: true, holder: { engagement: ENG, pr: url } });
+    expect(fx.plansync.calls().filter((a) => a[0] === "sync")).toHaveLength(1);
+    // the earlier PR closed unmerged: released
+    fx.gh.answer({ view: "CLOSED" });
+    await approvePass(queue, fx.deps, { root, engagement: other });
+    expect(theirs().map((d) => [d.step, d.ok]).slice(0, 3)).toEqual([["append", false], ["append", true], ["sync", true]]);
+  }, 90_000);
+
+  test("DW-49: an absent or never-approved other engagement releases: ENG-002 does not wait", async () => {
+    for (const variant of ["absent", "never-approved"] as const) {
+      const queue = newQueue();
+      const { root } = servedRepo();
+      const other = "ENG-002";
+      secondEngagement(root, other);
+      const fx = approveDeps(queue);
+      fx.gh.answer({ fail: ["pr create"] }); // ENG-001 pushed, no PR yet: a holder while its record stands
+      await approvePass(queue, fx.deps, { root, engagement: ENG });
+      fx.gh.answer({});
+      if (variant === "absent") rmSync(join(root, "_bmad-output", "engagements", ENG, "engagement.yaml"));
+      else writeEngagement(root, approvedRecord({ approve: false }));
+      await approvePass(queue, fx.deps, { root, engagement: other });
+      const theirs = approveEvents(queue).filter((d) => d.id === other);
+      expect([variant, theirs.map((d) => [d.step, d.ok])]).toEqual([variant, [["append", true], ["sync", true], ["job", true], ["commit", true], ["pr", true]]]);
+    }
+  }, 120_000);
+});
+
+describe("DW-51: a re-approval drops the superseded cycle's Jira issues", () => {
+  const url = "https://github.com/acme/widget/pull/42";
+
+  /** A Jira-bound engagement approved once (its PR open), its branch's plan entities carrying keys (TKS-101 on its
+   * `## Epic 41` epic, TKS-102 on a story of it — both by plansync `source`), then revised, re-quoted and approved again.
+   * `keyedBase`: the default branch's EP-030 (`## Epic 40`, not this engagement's) keyed TKS-030 before the cut and
+   * touched by the branch; after the cut the default branch modifies it, adds EP-031 (TKS-031), and carries an entity
+   * keyed TKS-102 too. `otherOnMain`: after the cut the default branch gains another engagement's promoted plan (ENG-009's
+   * `## Epic 50`, EP-040 keyed TKS-200, ST-350 keyed TKS-201). `brokenOnMain`: after the cut the default branch gains a
+   * plan file whose frontmatter will not parse, its text naming TKS-102. `unkeyed`: the branch's entities are never
+   * stamped with keys. */
+  async function reapproval(track?: (args: string[]) => Record<string, unknown>, o: { keyedBase?: boolean; otherOnMain?: boolean; brokenOnMain?: boolean; unkeyed?: boolean } = {}) {
+    const queue = newQueue();
+    const { root, origin } = servedRepo({ bound: true });
+    const fx = approveDeps(queue, track ? { track } : {});
+    const mainClone = join(temp("tk-sup-ap-main-"), "m");
+    const mainPlan = join(mainClone, "_bmad-output", "planning-artifacts", "plan");
+    git(dirnameOf(mainClone), "clone", "-q", origin, mainClone);
+    if (o.keyedBase) {
+      // the default branch's existing entity already promoted (TKS-030) before the cut
+      writeFileSync(join(mainPlan, "EP-030.md"), PLAN_40.replace("\n---\n", "\nexternal:\n  jira:\n    key: TKS-030\n---\n"));
+      git(mainClone, "commit", "-q", "-am", "EP-030 promoted");
+      git(mainClone, "push", "-q", "origin", "main");
+      git(root, "pull", "-q", "--ff-only", "origin", "main");
+    }
+    expect((await approvePass(queue, fx.deps, { root, engagement: ENG })).failed).toEqual([]);
+    const branch = "engagement/ENG-001";
+    if (!o.unkeyed) {
+      const clone = join(temp("tk-sup-ap-stamp-"), "c");
+      git(dirnameOf(clone), "clone", "-q", "-b", branch, origin, clone);
+      const plan = join(clone, "_bmad-output", "planning-artifacts", "plan");
+      writeFileSync(join(plan, "EP-034.md"), readFileSync(join(plan, "EP-034.md"), "utf-8").replace("\n---\n", "\nexternal:\n  jira:\n    key: TKS-101\n---\n"));
+      writeFileSync(join(plan, "ST-300.md"), "---\nshape_version: 1\nid: ST-300\ntype: story\ntitle: CSV button\nstatus: planned\nsource: epics.md#story-41.1\nexternal:\n  jira:\n    key: TKS-102\n---\n");
+      if (o.keyedBase) {
+        // the branch also modifies the entity promoted before the cut (another epic's: not this engagement's provenance)
+        writeFileSync(join(plan, "EP-030.md"), readFileSync(join(plan, "EP-030.md"), "utf-8").replace("title: Old work", "title: Old work, touched"));
+      }
+      git(clone, "add", "-A");
+      git(clone, "commit", "-q", "-m", "promote stamped the keys");
+      git(clone, "push", "-q", "origin", branch);
+    }
+    if (o.keyedBase) {
+      // after the cut the default branch moves: it modifies its keyed entity, adds another keyed one, and carries an
+      // entity keyed TKS-102 (live there: never dropped)
+      writeFileSync(join(mainPlan, "EP-030.md"), readFileSync(join(mainPlan, "EP-030.md"), "utf-8").replace("status: done", "status: archived"));
+      writeFileSync(join(mainPlan, "EP-031.md"), "---\nshape_version: 1\nid: EP-031\ntype: epic\ntitle: Main work\nstatus: planned\nexternal:\n  jira:\n    key: TKS-031\n---\n");
+      writeFileSync(join(mainPlan, "ST-299.md"), "---\nshape_version: 1\nid: ST-299\ntype: story\ntitle: Old story\nstatus: done\nsource: epics.md#story-40.1\nexternal:\n  jira:\n    key: TKS-102\n---\n");
+    }
+    if (o.otherOnMain) {
+      // after the cut another engagement's plan merged into the default branch, promoted and keyed
+      const epicsPath = join(mainClone, "_bmad-output", "planning-artifacts", "epics.md");
+      writeFileSync(epicsPath, readFileSync(epicsPath, "utf-8") + "\n## Epic 50: Other work\n\nengagement: ENG-009\n\nThe other epic.\n\n### Story 50.1: Other story\n\nAs a user,\nI want z,\nSo that w.\n\n**Acceptance Criteria:**\n\nGiven.\n");
+      writeFileSync(join(mainPlan, "EP-040.md"), "---\nshape_version: 1\nid: EP-040\ntype: epic\ntitle: Other work\nstatus: planned\nsource: epics.md#epic-50\nexternal:\n  jira:\n    key: TKS-200\n---\n");
+      writeFileSync(join(mainPlan, "ST-350.md"), "---\nshape_version: 1\nid: ST-350\ntype: story\ntitle: Other story\nstatus: planned\nsource: epics.md#story-50.1\nexternal:\n  jira:\n    key: TKS-201\n---\n");
+    }
+    if (o.brokenOnMain) {
+      // after the cut the default branch gains a plan file whose frontmatter will not parse, naming TKS-102
+      writeFileSync(join(mainPlan, "ST-298.md"), "---\nid: ST-298\nexternal: [broken\n  jira: {key: TKS-102\n---\n");
+    }
+    if (o.keyedBase || o.otherOnMain || o.brokenOnMain) {
+      git(mainClone, "add", "-A");
+      git(mainClone, "commit", "-q", "-m", "the default branch moved");
+      git(mainClone, "push", "-q", "origin", "main");
+    }
+    fx.gh.answer({ open: [url] }); // the earlier PR is still open
+    const reapprove = (title: string) => {
+      writeFileSync(join(root, "_bmad-output", "engagements", ENG, "scope.md"), SCOPE.replace("### Epic 1: Report exports", `### Epic 1: ${title}`));
+      input(root, fx.deps, "revise");
+      input(root, fx.deps, "go", undefined, { quote: structuredClone(QUOTE) });
+      input(root, fx.deps, "approve", { autonomy: "full" });
+      return readEngagement(root, ENG)!.inputs.findLast((l) => l.verb === "approve")!.at;
+    };
+    const since = reapprove("Report exports, revised");
+    return { queue, root, origin, fx, since, reapprove, branch, before: approveEvents(queue).length, wt: join(fx.work, "worktrees", "p", `engagement-${ENG}`) };
+  }
+  const drops = (fx: ReturnType<typeof approveDeps>) => fx.uvCalls.filter((c) => c.script === "track.py" && c.args[0] === "drop");
+  const syncIndexes = (fx: ReturnType<typeof approveDeps>) => fx.uvCalls.flatMap((c, i) => (c.script === "plansync.py" && c.args[0] === "sync" ? [i] : []));
+
+  test("bound, the earlier PR open, the branch's entities carrying keys: track drop called with every key before the second sync; the ok append lists dropped", async () => {
+    const { queue, root, fx, since, before } = await reapproval();
+    await approvePass(queue, fx.deps);
+    expect(approveEvents(queue).slice(before).map((d) => [d.step, d.ok])).toEqual([["append", true], ["sync", true], ["job", true], ["commit", true], ["pr", true]]);
+    expect(drops(fx)).toHaveLength(1);
+    const reason = `${ENG} re-approved after revise (approve ${since}): the earlier plan this issue came from is replaced wholesale`;
+    expect(drops(fx)[0]!.args).toEqual(["drop", "--directory", root, "--engagement", ENG, "--issue", "TKS-101", "--issue", "TKS-102", "--reason", reason]);
+    expect(reason).toContain("re-approved after revise");
+    const dropAt = fx.uvCalls.indexOf(drops(fx)[0]!);
+    expect(syncIndexes(fx)).toHaveLength(2);
+    expect(dropAt).toBeGreaterThan(syncIndexes(fx)[0]!);
+    expect(dropAt).toBeLessThan(syncIndexes(fx)[1]!);
+    const append = approveEvents(queue).slice(before).find((d) => d.step === "append")!;
+    expect(append.detail.dropped).toEqual(["TKS-101", "TKS-102"]);
+  }, 90_000);
+
+  test("default moved: the default branch modified its keyed entity after the cut (and adds keyed ones, one carrying a key of this engagement's entity); the branch touched it too: only this engagement's provenance keys not live on the default branch are dropped", async () => {
+    const { queue, root, fx, before } = await reapproval(undefined, { keyedBase: true });
+    await approvePass(queue, fx.deps);
+    expect(approveEvents(queue).slice(before).map((d) => [d.step, d.ok]).slice(0, 2)).toEqual([["append", true], ["sync", true]]);
+    expect(drops(fx)).toHaveLength(1);
+    const args = drops(fx)[0]!.args;
+    expect(args.slice(0, 7)).toEqual(["drop", "--directory", root, "--engagement", ENG, "--issue", "TKS-101"]);
+    expect(args[7]).toBe("--reason");
+    for (const live of ["TKS-030", "TKS-031", "TKS-102"]) expect(args).not.toContain(live);
+    expect(approveEvents(queue).slice(before).find((d) => d.step === "append")!.detail.dropped).toEqual(["TKS-101"]);
+  }, 90_000);
+
+  test("second re-approval: revise→approve→revise→approve with the PR open, HEAD carrying another engagement's promoted, keyed EP/ST files (pulled in by the first reset): only this engagement's own ## Epic N entities' keys are dropped", async () => {
+    const { queue, root, origin, fx, reapprove, branch, before } = await reapproval(undefined, { otherOnMain: true });
+    await approvePass(queue, fx.deps);
+    expect(approveEvents(queue).slice(before).map((d) => [d.step, d.ok])).toEqual([["append", true], ["sync", true], ["job", true], ["commit", true], ["pr", true]]);
+    expect(drops(fx).map((c) => c.args.filter((_, i, a) => a[i - 1] === "--issue"))).toEqual([["TKS-101", "TKS-102"]]);
+    // the first reset pulled ENG-009's keyed entities into the branch; the second cycle's own entities promoted
+    const epics = git(origin, "show", `${branch}:_bmad-output/planning-artifacts/epics.md`);
+    expect(epics).toContain("## Epic 50: Other work\n\nengagement: ENG-009");
+    expect(epics).toContain(`## Epic 51: Report exports, revised\n\nengagement: ${ENG}`);
+    expect(git(origin, "show", `${branch}:_bmad-output/planning-artifacts/plan/EP-040.md`)).toContain("key: TKS-200");
+    const clone = join(temp("tk-sup-ap-stamp2-"), "c");
+    git(dirnameOf(clone), "clone", "-q", "-b", branch, origin, clone);
+    const plan = join(clone, "_bmad-output", "planning-artifacts", "plan");
+    expect(readFileSync(join(plan, "EP-034.md"), "utf-8")).toContain("source: epics.md#epic-51");
+    writeFileSync(join(plan, "EP-034.md"), readFileSync(join(plan, "EP-034.md"), "utf-8").replace("\n---\n", "\nexternal:\n  jira:\n    key: TKS-111\n---\n"));
+    writeFileSync(join(plan, "ST-301.md"), "---\nshape_version: 1\nid: ST-301\ntype: story\ntitle: CSV button\nstatus: planned\nsource: epics.md#story-51.1\nexternal:\n  jira:\n    key: TKS-112\n---\n");
+    git(clone, "add", "-A");
+    git(clone, "commit", "-q", "-m", "promote stamped the second cycle's keys");
+    git(clone, "push", "-q", "origin", branch);
+    const second = approveEvents(queue).length;
+    const since = reapprove("Report exports, revised again");
+    await approvePass(queue, fx.deps);
+    expect(approveEvents(queue).slice(second).map((d) => [d.step, d.ok]).slice(0, 2)).toEqual([["append", true], ["sync", true]]);
+    expect(drops(fx)).toHaveLength(2);
+    const reason = `${ENG} re-approved after revise (approve ${since}): the earlier plan this issue came from is replaced wholesale`;
+    expect(drops(fx)[1]!.args).toEqual(["drop", "--directory", root, "--engagement", ENG, "--issue", "TKS-111", "--issue", "TKS-112", "--reason", reason]);
+    expect(approveEvents(queue).slice(second).find((d) => d.step === "append")!.detail.dropped).toEqual(["TKS-111", "TKS-112"]);
+  }, 120_000);
+
+  test("a default-branch plan file grep matched whose frontmatter will not parse keeps every candidate key in its text off the list", async () => {
+    const { queue, root, fx, before } = await reapproval(undefined, { brokenOnMain: true });
+    await approvePass(queue, fx.deps);
+    expect(approveEvents(queue).slice(before).map((d) => [d.step, d.ok]).slice(0, 2)).toEqual([["append", true], ["sync", true]]);
+    expect(drops(fx)).toHaveLength(1);
+    expect(drops(fx)[0]!.args.slice(0, 8)).toEqual(["drop", "--directory", root, "--engagement", ENG, "--issue", "TKS-101", "--reason"]);
+    expect(approveEvents(queue).slice(before).find((d) => d.step === "append")!.detail.dropped).toEqual(["TKS-101"]);
+  }, 90_000);
+
+  test("bound, the earlier PR open, the branch's entities carrying no keys: no track drop call and no dropped on the ok append", async () => {
+    const { queue, fx, before } = await reapproval(undefined, { unkeyed: true });
+    await approvePass(queue, fx.deps);
+    expect(approveEvents(queue).slice(before).map((d) => [d.step, d.ok])).toEqual([["append", true], ["sync", true], ["job", true], ["commit", true], ["pr", true]]);
+    expect(drops(fx)).toEqual([]);
+    expect(approveEvents(queue).slice(before).find((d) => d.step === "append")!.detail).not.toHaveProperty("dropped");
+  }, 90_000);
+
+  test("a failed read choosing the keys (git grep cannot answer): append false DropFailed, no track call, no sync, the worktree removed; the next pass retries", async () => {
+    const { queue, fx, before, wt } = await reapproval();
+    let broken = true;
+    fx.deps.run = (bin, args, opts) => (broken && bin === "git" && args[0] === "grep"
+      ? Promise.resolve({ exit: 128, stdout: "", stderr: "fatal: bad object" } as RunResult)
+      : runProcess(bin, args, { cwd: opts.cwd, timeoutS: opts.timeoutS, env: { ...fx.deps.env, ...(opts.env ?? {}) } }));
+    await approvePass(queue, fx.deps);
+    const after = () => approveEvents(queue).slice(before);
+    expect(after().map((d) => [d.step, d.ok])).toEqual([["append", false]]);
+    expect(after()[0]!.detail.reason).toStartWith("DropFailed: git grep");
+    expect(drops(fx)).toEqual([]);
+    expect(syncIndexes(fx)).toHaveLength(1);
+    expect(existsSync(wt)).toBe(false);
+    broken = false;
+    await approvePass(queue, fx.deps);
+    expect(drops(fx)).toHaveLength(1);
+    expect(after().map((d) => [d.step, d.ok])).toEqual([["append", false], ["append", true], ["sync", true], ["job", true], ["commit", true], ["pr", true]]);
+  }, 90_000);
+
+  test("a transient drop failure (retry: true): append false DropFailed, no sync, the worktree removed; the next pass retries", async () => {
+    let answer: Record<string, unknown> = { ok: false, status: "partial", retry: true, reason: "track retry: TKS-101: Jira answered 503 — a temporary failure; call again" };
+    const { queue, fx, before, wt } = await reapproval(() => answer);
+    await approvePass(queue, fx.deps);
+    const after = () => approveEvents(queue).slice(before);
+    expect(after().map((d) => [d.step, d.ok])).toEqual([["append", false]]);
+    expect(after()[0]!.detail.reason).toStartWith("DropFailed: track retry: TKS-101");
+    expect(syncIndexes(fx)).toHaveLength(1);
+    expect(existsSync(wt)).toBe(false);
+    answer = { ok: true, status: "complete", engagement: ENG, issues: [], skipped: [] };
+    await approvePass(queue, fx.deps);
+    expect(drops(fx)).toHaveLength(2);
+    expect(after().map((d) => [d.step, d.ok])).toEqual([["append", false], ["append", true], ["sync", true], ["job", true], ["commit", true], ["pr", true]]);
+  }, 90_000);
+
+  test("a refused drop (blocked): append false DropRefused with track's reason, retried at the next pass", async () => {
+    const { queue, root, fx, before, wt } = await reapproval(() => ({ ok: false, status: "blocked", reason: "track refused: NoTransition: TKS-101: no transition reaches 'DNI' from 'To Do'" }));
+    await approvePass(queue, fx.deps);
+    const after = () => approveEvents(queue).slice(before);
+    expect(after().map((d) => [d.step, d.ok])).toEqual([["append", false]]);
+    expect(after()[0]!.detail.reason).toBe("DropRefused: track refused: NoTransition: TKS-101: no transition reaches 'DNI' from 'To Do'");
+    expect(syncIndexes(fx)).toHaveLength(1);
+    expect(existsSync(wt)).toBe(false);
+    await approvePass(queue, fx.deps);
+    expect(drops(fx)).toHaveLength(2); // retried; the same refusal told once
+    expect(after()).toHaveLength(1);
+    expect(readEngagement(root, ENG)!.state).toBe("approved");
   }, 90_000);
 });
 
@@ -1064,7 +1439,7 @@ describe("Story 32.6 follow-up review patches", () => {
     expect(fx.submitted).toEqual([]);
   });
 
-  test("F2: an ok append whose sync failed holds its ## Epic N; a second engagement approved meanwhile takes the next", async () => {
+  test("F2, DW-49: an ok append whose sync failed holds its ## Epic N; a second engagement approved meanwhile waits on it, then takes the next once it merged", async () => {
     const queue = newQueue();
     const { root, origin } = servedRepo();
     const other = "ENG-002";
@@ -1077,10 +1452,17 @@ describe("Story 32.6 follow-up review patches", () => {
     expect(steps(queue)).toEqual([["append", true], ["sync", false]]);
     expect(approveEvents(queue)[0]!.detail.epics.map((e: { n: number }) => e.n)).toEqual([41]);
     fx.plansync.sync("ok");
+    // DW-49: ENG-001's cycle is open (an ok append, no queued): ENG-002 waits rather than sync beside it
     await approvePass(queue, fx.deps, { root, engagement: other });
+    expect(approveEvents(queue).filter((d) => d.id === other).map((d) => [d.step, d.ok, d.detail.wait])).toEqual([["append", false, true]]);
     await approvePass(queue, fx.deps, { root, engagement: ENG });
+    await approvePass(queue, fx.deps, { root, engagement: other });
+    expect(approveEvents(queue).filter((d) => d.id === other)).toHaveLength(2); // still waiting: ENG-001's PR is open
+    git(origin, "update-ref", "refs/heads/main", "refs/heads/engagement/ENG-001");
+    fx.gh.answer({ view: "MERGED" });
+    await approvePass(queue, fx.deps, { root, engagement: other });
     const jobs = approveEvents(queue).filter((d) => d.step === "job" && d.ok).map((d) => [d.id, d.detail.jobs]);
-    expect(jobs).toEqual([[other, ["run-epic-42"]], [ENG, ["run-epic-41"]]]);
+    expect(jobs).toEqual([[ENG, ["run-epic-41"]], [other, ["run-epic-42"]]]);
     expect(git(origin, "show", `engagement/${other}:_bmad-output/planning-artifacts/epics.md`)).toContain(`## Epic 42: Report exports\n\nengagement: ${other}`);
   }, 120_000);
 });

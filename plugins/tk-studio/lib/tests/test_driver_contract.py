@@ -3705,6 +3705,51 @@ class DriverContractTestCase(unittest.TestCase):
                        if line.startswith("| Story / rulings"))
         self.assertRegex(stories, r"Story 38\.1, Story 38\.2, Story 38\.3, Story 38\.4(, Story 38\.\d+)* \(Epic 38\)")
 
+    def test_0_1_34_dw_51_a_reapproval_drops_the_superseded_cycles_issues(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.34**", header)
+        self.assertNotIn("**0.1.35**", header)
+        self.assertEqual(header.count("0.1.34 (DW-51, additive)"), 1)
+        self.assertLess(header.index("0.1.34 (Story 38.4, additive)"),
+                        header.index("0.1.34 (DW-51, additive)"))
+        clause = " ".join(header[header.index("0.1.34 (DW-51, additive)"):].split())
+        for phrase in ("a re-approval drops the superseded cycle's issues", "the verb `drop`",
+                       "`track.py drop --engagement ENG-NNN --issue KEY … --reason TEXT`",
+                       "`Dropped: <reason>`", "`origin/engagement/ENG-NNN`", "the keys chosen by provenance",
+                       "own `## Epic N` sections, less any key the default branch carries",
+                       "(DW-49) the approve pass's `append`, before a cycle starts, waits as `WaitOpenPr`",
+                       "not a failure: retried each pass", "`detail.wait: true`", "`detail.holder {engagement, pr}`",
+                       "`unreadable: true`", "no ok `queued` and no `PrClosed` refusal after it",
+                       "a cancelled, absent or never-approved holder releases",
+                       "its newest ok `pr` of any cycle, with no ok `queued` and no `PrClosed` refusal after it, "
+                       "still answers `OPEN` — an earlier approve PR open after a revise", "— additive) |"):
+            self.assertIn(phrase, clause)
+        track_row = next(line for line in self.text.splitlines() if line.startswith("| `tk-studio-track`"))
+        self.assertIn("0.1.34 (DW-51), verb `drop`", track_row)
+        self.assertIn("`lib/track.py drop`", track_row)
+        self.assertIn("`JiraRefused: <key>: <error>`", track_row)
+        flat = " ".join(self.text.split())
+        self.assertEqual(flat.count("**0.1.34 (DW-51, additive).**"), 1)
+        self.assertLess(flat.index("**0.1.34 (Story 38.4, additive).**"), flat.index("**0.1.34 (DW-51, additive).**"))
+        note = flat[flat.index("**0.1.34 (DW-51, additive).**"):]
+        note = note[:note.index("## 8. Conformance")]
+        subs = ("**The verb:**", "**The caller:**", "**The serve process:**")
+        self.assertEqual([note.index(s) for s in subs], sorted(note.index(s) for s in subs))
+        for phrase in ("`uv run track.py drop --directory ROOT --engagement ENG-NNN --issue KEY [--issue KEY …] --reason TEXT [--dry-run]`",
+                       "`jirabackend.DNI_STATUS`", "`DROPPED_STATUS_NAMES`", "so a retry never comments twice",
+                       "`{ok, dry_run, engagement, issues: [{issue, transitioned, commented}], skipped[], notes[], written: []}`",
+                       "`EngagementNotFound`", "`NoIssue`", "`BadIssue`", "`ReasonMissing`", "`NoTransition`",
+                       "`JiraRefused: <key>: <error>`", "before any write", "a retry after a failed comment posts it",
+                       "chosen by provenance", "whose first body line is `engagement: <ENG>`",
+                       "leaving out any key a plan entity on the default branch also carries",
+                       "`partial`, `ok: false`, `retry: true`", "`_bmad-output/engagements/<id>/track.lock`",
+                       "re-approved after revise (approve <since>)", "`dropped: [keys]`", "`DropFailed: …`",
+                       "`DropRefused: <reason>`"):
+            self.assertIn(phrase, note)
+        skill = (PLUGIN_ROOT / "skills" / "tk-studio-track" / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn('track.py" drop --directory <project-root>', skill)
+
     def test_story_35_7_the_skill_sweep_waits_540_s_inside_the_bash_cap(self):
         # the skill's one sweep call must print its block inside the Bash tool's 600 s cap
         skill = (PLUGIN_ROOT / "skills" / "tk-studio-launch" / "SKILL.md").read_text(encoding="utf-8")
