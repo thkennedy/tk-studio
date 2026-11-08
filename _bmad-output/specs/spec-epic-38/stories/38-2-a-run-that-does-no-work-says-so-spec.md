@@ -219,6 +219,9 @@ DEVIATION SCORE (pass 3): 0. The story's score stays 2 (pass 1, by consult rulin
 | review | 1 | 2026-11-08T00:10:03Z | 2026-11-08T00:35:55Z | dd8a965c-4f6d-4733-9baa-dfe36abb1899 | claude-opus-5-5 | medium | 9117349 | 78093 | 6.8797 | completed |
 | review | 2 | 2026-11-08T00:35:55Z | 2026-11-08T00:53:32Z | 2b361a37-5179-43e4-ad92-4163a0aa56e5 | claude-opus-5-5 | medium | 6291114 | 58785 | 4.6501 | completed |
 | gate | 1 | 2026-11-08T00:53:32Z | 2026-11-08T00:56:37Z | c60da882-8d03-4a2f-a4a5-9c361c6842a9 | claude-opus-5-5 | medium | 3020185 | 18478 | 1.8172 | completed |
+| host-leg | 1 | 2026-11-08T00:56:39Z | 2026-11-08T02:00:58Z | — | — | — | — | — | — | green |
+| close-out | 1 | 2026-11-08T02:00:58Z | 2026-11-08T02:01:06Z | — | — | — | — | — | — | PR |
+| merge | — | 2026-11-08T02:02:21Z | 2026-11-08T02:02:21Z | — | — | — | — | — | — | merged |
 
 
 ## Auto Run Result
