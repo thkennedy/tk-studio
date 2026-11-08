@@ -5,6 +5,8 @@ An addendum to the studio design spec of 2026-10-09 (`../studio-design-spec-2026
 
 **Revised 2026-11-07 (late) on the owner's review of the plan PR:** the sources below are named, the office grammar of the 2026-09-01 digest is brought into §3.4, and the phone is deferred per D5 (choice 5 rewritten in §4).
 
+**Revised 2026-11-08 on the owner's ask:** the sandbox's Claude login gets a clock and a renewal from the page — Story 39.2 (the §2 row, §3.7, §4 choice 7); the later stories are renumbered 39.3 to 39.9.
+
 **Sources this addendum stands on.** The design spec of 2026-10-09 and its rulings (`../studio-design-spec-2026-10-09/README.md`, `decisions.md`, and the owner's answers in `decisions-answers.md`: D5 in his words — PixiJS, no Next.js, desktop, laptop and iPad first and a separate phone-friendly UI only after the full web UI is complete and working; D6 — look at existing assets and draw our own versions with the 2D tools on this PC, kept in the repo). The front-end research of 2026-10-09 (`../../research/studio-front-end-and-repo-structure-2026-10-09/research.md`, Decision B: the renderer scoring that put plain PixiJS v8 first and Phaser second, the Pixel Agents and claude-office precedents, hooks-first office feeds, the SSE rules — `Last-Event-ID`, a heartbeat under 15 s, never a non-200 on an expired cookie — and the asset licence survey). The office-UI digest of 2026-09-01 (`../../research/studio-office-ui-2026-09-01/digest-studio-office-ui.md`): the Game Dev Tycoon grammar mapped onto the loop's vocabulary (point bubbles into a phased project bar, a persistent `!` for needs-you, a blocked badge, the hiring card as role plus model tier), the rule to hold each visual state 1 to 2 s so bursts do not strobe and to lerp everything continuous, and the two-stream shape (one SSE of semantic agent states). The code of Epics 29 to 32 as it is on `main` (§1).
 
 ## 0. The owner's words (2026-11-07)
@@ -37,6 +39,7 @@ Epics 29 to 32 built, and `main` carries (file:line as of 17a6f3f2):
 | Task progress | A HUD count (`done/failed/total`) and the Status screen's snapshot. No run timeline (claimed → launched → sessions → review passes → host leg → close-out), no per-stage timing and cost, no guard clock, no queue view. |
 | Studio chat interface | A chat per engagement, answered by a planner run per line, the reply landing when the run ends. No chat to the studio itself (the orchestrator), no streaming, no way to say "queue 38.2", "what is running", "answer DW-87 with A" from the web. |
 | Model and effort settings | Read-only in `GET /agents`. No screen, no route; the knobs are four files. |
+| Renewing the sandbox's Claude login (hole 69; asked for on 2026-11-08) | A terminal chore about every 29 days: `sbx run`, `/login`, paste the code. The expiry is invisible until the supervisor's preflight blocks every sandbox run, on the console only. |
 
 ## 3. The shape Epic 39 gives it
 
@@ -75,7 +78,7 @@ Routes under `/app` (the SPA fallback already serves them; the app gains a route
 | `/app/chat/<engagement-id>` | an engagement's chat (today's Chat screen) |
 | `/app/checkin/<engagement-id>/<n>` | a check-in: what there is to evaluate, continue / stop |
 | `/app/status` | status and the queue |
-| `/app/settings` | model, effort, bands, autonomy |
+| `/app/settings` | model, effort, bands, autonomy; the sandbox login's clock and renewal |
 
 Every notice the studio sends (an inbox block, a check-in, a run's end, a cap) carries the one route that answers it. The page is reachable on the tailnet only (D10).
 
@@ -113,6 +116,8 @@ At approval the owner and the planner agree the **check-in points** of an engage
 
 In scope: per leg model and effort (the project's `routing.toml` `[defaults]` through `pipeline.py`), the bands' estimates and caps (`budget-bands.yaml`), the default autonomy at approval, the per-band follow-up-review cap (38.7's `[limits.by_band]`), the presentation toggles (movement, sound off by default, HUD detail). Out of scope: secrets, the supervisor's own environment, the per-job placement (`TK_SUPERVISOR_CONFIG`), the shipped defaults in `customize.toml`. A write shows the resolved `routing.current.json` and the service event; a write while a run is live applies to the next run and the page says so.
 
+The sandbox login card (Story 39.2) sits on the same page and is the one place the web touches a credential's life, never its value: it shows how long the sandbox's Claude login stays valid (read from the sandbox's credential expiry, which the sbx proxy leaves readable while it holds the tokens themselves) and renews it with the ordinary `/login` exchange, driven by the supervisor inside the sandbox — the page opens the sign-in URL, the owner approves on whatever device holds his claude.ai session and pastes the code claude.ai shows, the supervisor hands the code to the waiting login. The code is single-use, minutes-lived and bound to the sandbox's PKCE verifier, so its passage through the page is safe; no token is ever shown, stored or logged, and the Max-login preflight keeps its claude.ai-only rule. The out-of-scope line above stands for everything else.
+
 ### 3.8 The studio chat
 
 `/app/chat` is a conversation with the studio, not with an engagement. One owner line queues one `studio-chat` run (a shipped one-shot job in the mould of `engagement-chat`: planner tier, host, `claude -p` with the plugin, the `tk-studio-orchestrator` core resolving the owner's role and working set, the council shell loaded as presentation), whose reply streams to the page over the existing chat SSE as it is produced. The reply carries `proposals[]` as today: `queue <job>`, `answer <id>: <letter>`, `open <route>`, `start an engagement`, `stop after this story`, `open the studio`; a pressed proposal is the typed request the supervisor already knows how to run. Lines and replies are kept in `_bmad-output/tracking/studio-chat.jsonl` (the record) and shown as `message` items in the inbox. The chat answers questions about state from the same reads the pages use (the board, the runs, the ledger), so "what is running" costs a read, not a plan.
@@ -125,6 +130,7 @@ In scope: per leg model and effort (the project's `routing.toml` `[defaults]` th
 4. **The studio chat is the orchestrator**, so the terminal and the page cannot drift (AD-11). Streaming is of the reply text; the routing decision is made once at the start of the run.
 5. **No phone work in this epic (D5, in the owner's words of 2026-10 and again on 2026-11-07).** The web is desktop, laptop and iPad first. The owner's reasoning, recorded here: the full office view with sprites and desks is untested at any width and is theory until it runs, so significant changes are likely; a phone layout kept alongside it would mean updating and maintaining two UIs through every change. The desktop and iPad UI is made to work and iterated on first; the phone UI (small by design: inbox, approve, status, as §6.3 of the spec says) is decided after that, as its own epic. The notifier's links open their page on whatever device follows them, with no layout promise below iPad width; Story 39.8 records, from this epic's code, what a phone UI would reuse and where the text screens break, so that decision starts from evidence. The earlier draft of this choice (a responsive pass inside this epic) is withdrawn.
 6. **Notices link into `/app`** from this epic on; Jira remains the record and the fallback channel, never the primary one.
+7. **The sandbox login stays the subscription's ordinary `/login` grant, renewed from the page** (the owner, 2026-11-08: a button that opens the sign-in and a clock showing how long the login is valid "feels a little simpler if it works", and "something that is only ever used once doesn't feel like it needs to be stored somewhere like that"). The alternative weighed the same day — a one-year `claude setup-token` kept in 1Password and fed to the sbx proxy as a custom secret, the Docker sign-in's pattern — would make the chore yearly, but it stores a credential, weakens the preflight's proof (`claude auth status` reports a token logged in without validating it) and leans on an sbx path Docker still marks experimental. The page keeps the strict preflight, stores nothing, and makes the monthly renewal thirty seconds from any device, with a visible clock and a Task three days out. Revisit only if the monthly cadence proves a burden.
 
 ## 5. Open questions for the owner (asked through the plan PR, not blocking)
 
@@ -135,4 +141,4 @@ In scope: per leg model and effort (the project's `routing.toml` `[defaults]` th
 
 ## 6. Not in this epic
 
-A public mode (D10), a second account, voice, a phone UI of any kind (D5: after the desktop and iPad UI is working, its own epic; §4 choice 5) and a native phone app, editing plan text in the web, the nightly hygiene pass (DW-179), the game asset pipeline, any change to the engine's own loop. The follow-up-review entries and the owner's open Tasks (TKSTUDIO-233 to 236) are not this epic's.
+A public mode (D10), a second account, voice, a phone UI of any kind (D5: after the desktop and iPad UI is working, its own epic; §4 choice 5) and a native phone app, editing plan text in the web, the nightly hygiene pass (DW-179), the game asset pipeline, any change to the engine's own loop. The follow-up-review entries and the owner's open Tasks (TKSTUDIO-234 to 236) are not this epic's; TKSTUDIO-233's renewal is the last manual one, and Story 39.2 takes the chore from there.

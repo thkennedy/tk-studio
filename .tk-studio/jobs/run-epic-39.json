@@ -2,14 +2,14 @@
   "job_schema_version": 1,
   "id": "run-epic-39",
   "type": "run-epic",
-  "description": "tk-studio Epic 39 (the studio as a place: the front end the owner works in; the design addendum _bmad-output/planning-artifacts/design/studio-design-spec-2026-11-07-front-end/README.md): eight stories in the order of the owner's use (39.1 addresses, 39.2 the studio chat, 39.3 the kanban and the story, 39.4 the run's timeline, 39.5 sessions and sub-agents as characters, 39.6 messages both ways and the check-in, 39.7 model and effort settings, 39.8 the records), one story per run (stop.after_stories 1), contract 0.1.35 additive. Submit it with POST /jobs {project: tk-studio, job: run-epic-39} only after tk-studio/run-epic-39 is placed {tier: sbx, sandbox: claude-tk-studio} in the supervisor's per-job config (hole 90), after Epic 38 has landed, and only after the previous landing's docs PR has merged. Guards: the type's (max_wall_clock_seconds 3600 for the engine, host_verify_seconds 7200 for the host leg, merged key-wise); no interim: Story 38.1's guard is on main since #350. Revised 2026-11-07 on the owner's review: no phone work in this epic (D5).",
+  "description": "tk-studio Epic 39 (the studio as a place: the front end the owner works in; the design addendum _bmad-output/planning-artifacts/design/studio-design-spec-2026-11-07-front-end/README.md): nine stories in the order of the owner's use (39.1 addresses, 39.2 the sandbox login's clock and renewal, 39.3 the studio chat, 39.4 the kanban and the story, 39.5 the run's timeline, 39.6 sessions and sub-agents as characters, 39.7 messages both ways and the check-in, 39.8 model and effort settings, 39.9 the records), one story per run (stop.after_stories 1), contract 0.1.35 additive. Submit it with POST /jobs {project: tk-studio, job: run-epic-39} only after tk-studio/run-epic-39 is placed {tier: sbx, sandbox: claude-tk-studio} in the supervisor's per-job config (hole 90), after Epic 38 has landed, and only after the previous landing's docs PR has merged. Guards: the type's (max_wall_clock_seconds 3600 for the engine, host_verify_seconds 7200 for the host leg, merged key-wise); no interim: Story 38.1's guard is on main since #350. Revised 2026-11-07 on the owner's review: no phone work in this epic (D5). Revised 2026-11-08 on the owner's ask: Story 39.2 added (hole 69's chore moves to the page), the later stories renumbered.",
   "target": {
     "payload": {
       "epic": 39
     }
   },
   "stop": {
-    "max_runs": 14,
+    "max_runs": 16,
     "after_stories": 1
   },
   "guards": {
