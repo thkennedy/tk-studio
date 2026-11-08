@@ -875,6 +875,60 @@ def design_pages_line(project_root: Path, site: str | None) -> str | None:
     return ("Design pages: " + ", ".join(links)) if links else None
 
 
+# Story 38.4 (EP-36 B1, the retrospective's B3, AI-4): the canonical statuses
+# a promote moves off `Blocked - Awaiting User` once no block stands
+BLOCK_EXIT_STATUSES = ("in-progress", "review")
+_BLOCK_LINE_RE = re.compile(r"^\[~accountid:[^\]]+\]\s*Blocked:")
+
+
+def _parse_stamp(value) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    for parse in (datetime.fromisoformat,
+                  lambda v: datetime.strptime(v, "%Y-%m-%dT%H:%M:%S.%f%z"),
+                  lambda v: datetime.strptime(v, "%Y-%m-%dT%H:%M:%S%z")):
+        try:
+            parsed = parse(value)
+        except ValueError:
+            continue
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    return None
+
+
+def block_answered(plan_dir: Path, key: str) -> bool:
+    """Story 38.4, edge (a)(ii): the issue's last block comment answered — in
+    `<root>/_bmad-output/tracking/<KEY>/comments.jsonl` (root is
+    `plan_dir.parents[2]`; the last line per comment id), an owner comment is
+    newer than the newest agent `Blocked:` comment. Read here, UTF-8 (the
+    sync-back imports this module)."""
+    try:
+        root = Path(plan_dir).parents[2]
+        text = (root / "_bmad-output" / "tracking" / key / "comments.jsonl"
+                ).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError, IndexError):
+        return False
+    latest: dict[str, dict] = {}
+    for raw in text.splitlines():
+        try:
+            entry = json.loads(raw)
+        except ValueError:
+            continue
+        if isinstance(entry, dict):
+            latest[str(entry.get("id"))] = entry
+    block_at = None
+    for entry in latest.values():
+        at = _parse_stamp(entry.get("created"))
+        if entry.get("author") == "agent" and at is not None and \
+                _BLOCK_LINE_RE.match(str(entry.get("body") or "")) and \
+                (block_at is None or at > block_at):
+            block_at = at
+    if block_at is None:
+        return False
+    return any(entry.get("author") == "owner"
+               and (_parse_stamp(entry.get("created")) or block_at) > block_at
+               for entry in latest.values())
+
+
 def promote(plan_dir: Path, client: JiraClient | None, project_key: str,
             mapping: dict, dry_run: bool = False,
             skip_ids: set[str] | None = None,
@@ -919,8 +973,19 @@ def promote(plan_dir: Path, client: JiraClient | None, project_key: str,
         # canonical status already matches the snapshot
         resolved_exit = snapshot.get("status") == RESOLVED_STATUS \
             and front["status"] != "blocked"
+        # Story 38.4 (edge (a), EP-36 B1): an issue in `Blocked - Awaiting
+        # User` whose canonical is `in-progress`/`review` leaves it once no
+        # block stands — (i) the block's record resolved (the snapshot's
+        # canonical was `blocked`, a driver's status call moved it on) or
+        # (ii) the issue's last block comment answered
+        block_free = front["status"] in BLOCK_EXIT_STATUSES and (
+            snapshot.get("canonical_status") == "blocked"
+            or (bool(snapshot.get("key"))
+                and snapshot.get("status") == BLOCKED_STATUS
+                and block_answered(plan_dir, str(snapshot["key"]))))
+        block_exit = snapshot.get("status") == BLOCKED_STATUS and block_free
         status_changed = snapshot.get("canonical_status") != front["status"] \
-            or resolved_exit
+            or resolved_exit or block_exit
         assignee_changed = (front.get("assignee") or None) != \
             (snapshot.get("canonical_assignee") or None)
         key = snapshot.get("key")
@@ -990,9 +1055,35 @@ def promote(plan_dir: Path, client: JiraClient | None, project_key: str,
         backend_status, backend_category = _current_status(client, key)
         target = TO_BACKEND_CATEGORY[front["status"]]
         exit_stuck = False
+        block_stuck = False
+        if backend_status == BLOCKED_STATUS and block_free \
+                and backend_category == target:
+            # the category move first; no route: by name to `Block
+            # Resolved`, then the category move (37.4's exit); still none:
+            # the note, the file untouched (the evidence kept for the next pass)
+            moved = _transition_to_category(client, key, target, notes,
+                                            front["id"], front["status"])
+            if moved is None and transition_to_name(
+                    client, key, RESOLVED_STATUS, notes, front["id"]):
+                backend_status = RESOLVED_STATUS
+                moved = _transition_to_category(client, key, target, notes,
+                                                front["id"], front["status"])
+            if moved is not None:
+                backend_status = moved
+            else:
+                block_stuck = backend_status == BLOCKED_STATUS
+                if block_stuck:
+                    notes.append(f"{front['id']}: {key} stays in "
+                                 f"{BLOCKED_STATUS!r} — no block stands, but "
+                                 f"no route leaves it (Story 38.4, edge (a))")
+                else:
+                    notes.append(f"{front['id']}: {key} moved to "
+                                 f"{RESOLVED_STATUS!r} — no block stands, but "
+                                 f"no route reaches the {target!r} category "
+                                 f"from it (Story 38.4, edge (a))")
         # `Blocked - Awaiting User` keeps winning while the block stands;
         # `Block Resolved` is left for any non-`blocked` canonical (37.4)
-        if backend_category != target or (
+        elif backend_category != target or (
                 backend_status == RESOLVED_STATUS
                 and front["status"] != "blocked"):
             moved = _transition_to_category(client, key, target, notes,
@@ -1009,11 +1100,19 @@ def promote(plan_dir: Path, client: JiraClient | None, project_key: str,
                 and backend_status == snapshot.get("status") \
                 and snapshot.get("canonical_status") == front["status"]:
             continue
+        # Story 38.4: the block edge with no route out, likewise
+        if block_stuck and not fields_changed and not assignee_changed \
+                and backend_status == snapshot.get("status"):
+            continue
 
         snapshot.update({"key": key, "synced_at": _now_iso(),
                          "content_hash": content_hash,
                          "status": backend_status,
-                         "canonical_status": front["status"],
+                         # a stuck block edge keeps evidence (i) (the
+                         # snapshot's `blocked`) for the next pass
+                         "canonical_status": (snapshot.get("canonical_status")
+                                              if block_stuck
+                                              else front["status"]),
                          "assignee": backend_assignee or "",
                          "canonical_assignee": front.get("assignee") or ""})
         front.setdefault("external", {})[BINDING] = snapshot

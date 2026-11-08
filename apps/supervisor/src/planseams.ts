@@ -2,8 +2,21 @@
  * Story 36.7 (DW-85): the small seams the sweep and the plan passes share, in a leaf so `sweep.ts` never imports
  * `planstatus.ts` or `board.ts`. Every name is re-exported at its old home (`planstatus.ts`, `board.ts`, `hygiene.ts`).
  */
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { load as loadYaml } from "js-yaml";
 import type { QueueEvent } from "./queue";
+
+/** Story 31.5: a project root's `planning.jira` binding — a non-empty `planning.jira.project_key` in its tracked
+ * `.tk-studio/config.yaml` (read only; any read or parse failure is "not bound"). Story 38.4: moved here from
+ * `closeout.ts` (re-exported there) so `sweep.ts` reads it without a module cycle. */
+export function jiraBound(root: string): boolean {
+  try {
+    const doc = loadYaml(readFileSync(join(root, ".tk-studio", "config.yaml"), "utf-8")) as Record<string, any> | null;
+    const key = doc?.planning?.jira?.project_key;
+    return (typeof key === "string" && key.trim() !== "") || typeof key === "number";
+  } catch { return false; }
+}
 
 /** The deferred-work ledger, relative to a project root. */
 export const DEFERRED_REL = join("_bmad-output", "implementation-artifacts", "deferred-work.md");

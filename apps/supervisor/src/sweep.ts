@@ -8,7 +8,8 @@
  *   triage     `recordTriage`, from the engine sweep's watch: the first time `<served root>/.bmad-loop/runs/<engine
  *              id>/triage.json` exists it is copied (atomically) to the run workspace, `<studioHome>/projects/<key>/
  *              runs/<studio run id>/sweep/triage.json`, and noted once as a queue `sweep-triage {engine_run_id, path,
- *              bundles: [{name, dw_ids}], blocked: [{id, blocker}], decisions: [{id, question}], already_resolved:
+ *              bundles: [{name, dw_ids}], blocked: [{id, blocker}], decisions: [{id, question, context, options: [{letter,
+ *              text, key, effect}], default}] (Story 38.4: the skill's options lettered, `decisionOf`), already_resolved:
  *              [id], skip: [id]}` — never re-noted for that engine run. A file that does not parse once it is a minute
  *              old (the engine writes it in place) is noted once as `sweep-triage {engine_run_id, error}`. This is the
  *              queue's store; bmad-loop's own journal key of that name is never read or written. Story 36.2 (DW-116):
@@ -38,7 +39,8 @@
  *              `max_bundles` (`sweep-bundles-truncated {dropped}`) or skipped (`sweep-bundle-skipped {name}`) is
  *              `not landed — dropped by max_bundles` / `not landed — skipped by the engine`, still counted in n.
  *   PR body    `## Sweep` before `## Host verify` (`sweepSection`): one line per bundle, `### Blocked`, `### Human
- *              decisions` (skipped unattended; `bmad-loop decisions` answers them). Story 38.3 (DW-165): then `## Stage
+ *              decisions` (skipped unattended; `bmad-loop decisions` answers them — Story 38.4: on a bound project the
+ *              issue keys, `- <KEY>: <ids>`, in place of the bare questions). Story 38.3 (DW-165): then `## Stage
  *              Log` (`sweepStageLogText`): `plansync.py stage --from-run --run-dir <engine run dir> --worktree <served>`
  *              (read only, `engineStageRowsOf`) answers each bundle key's engine passes as story-doc rows (stage, pass,
  *              started, ended, session_id, model, effort, tokens_in, tokens_out, cost_usd, outcome); `withStageRows` puts
@@ -110,20 +112,26 @@
  *              before the emit) under the same `PLAN_RETRY_LIMIT` bound as a failed emit.
  *              The supervisor commits nothing: the rewrite lands at the owner
  *              root as the Stage Log rows do.
+ *   decisions  Story 38.4 (hole 112, DW-171): `sweepCloseOutSummary` then answers the engine from the owner record
+ *              (`answerDecisions`: `_bmad-output/tracking/decisions-jira.json`'s `answers`, fed to `bmad-loop decisions`
+ *              in the sandbox while the run dir is there; one `sweep-decisions-answered` note per engine run) and posts the
+ *              decisions still open (`postDecisions`: `track.py block --source sweep` on a bound project, `jiraBound` from
+ *              `planseams.ts`; one `sweep-decisions-posted` note per call); the summary and the record carry
+ *              `decision_issues`. Neither ever blocks the close-out.
  *   re-run     Story 36.2 (DW-123): `summaryFromRecord` rebuilds the summary from the run's `ended` (else raced
  *              `closed_out`) `sweep` record: the worktree is gone by then. The record's merged `blocked`, `decisions` and `skip`
  *              win, every cycle's; an older record falls back to the first triage's `sweep-triage` note.
  */
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { pluginRoot, StudioRootMissing } from "./env";
+import { pluginRoot, sbxBin, StudioRootMissing } from "./env";
 import { inconclusiveReason, legVerdict, redReason, type HostVerifyResult } from "./hostverify";
-import { DEFERRED_REL, PLAN_RETRY_LIMIT, runPr } from "./planseams";
+import { DEFERRED_REL, jiraBound, PLAN_RETRY_LIMIT, runPr } from "./planseams";
 import type { PlanStatusDeps } from "./planstatus";
 import { isSweep, isTerminal, selfOwner, servedRoot, SWEEP_JOB_TYPE, type Queue, type QueueEvent, type QueueRun, type TerminalState } from "./queue";
 import { projectKeyOf, studioRunDir } from "./sandbox";
 import { gh, stopEngine, stopEngineAt, studioScript, uvRunner } from "./runners";
-import { lastJsonObject, type RunResult, type WorkerCommand } from "./server";
+import { lastJsonObject, runProcess, toVmPath, type RunResult, type WorkerCommand } from "./server";
 import type { WorktreeDeps } from "./worktree";
 
 type Env = Record<string, string | undefined>;
@@ -164,16 +172,42 @@ export type Triage = {
   /** `cycle`: set on a summary's merged triage (1 for `triage.json`, N for `triage-<N>.json`). */
   bundles: { name: string; dw_ids: string[]; cycle?: number }[];
   blocked: { id: string; blocker: string }[];
-  decisions: { id: string; question: string }[];
+  /** Story 38.4: the skill's options lettered A, B, … (`text`: the label, then ` — <intent or resolution>`, one line,
+   * clipped to 200), `default` the recommendation's letter (null: none, or no options). */
+  decisions: TriageDecision[];
   already_resolved: string[];
   skip: string[];
 };
+/** Story 38.4: one triage decision in the studio's shape (`sweepdecisions.shape`'s, the lib's `triage_summary`). */
+export type TriageDecision = { id: string; question: string; context: string; options: DecisionOption[]; default: string | null };
+export type DecisionOption = { letter: string; text: string; key: string; effect: string };
 
 const objects = (v: unknown): Record<string, unknown>[] =>
   Array.isArray(v) ? v.filter((x): x is Record<string, unknown> => !!x && typeof x === "object" && !Array.isArray(x)) : [];
 const str = (v: unknown) => (typeof v === "string" ? v : "");
 const ids = (v: unknown): string[] =>
   Array.isArray(v) ? v.map((x) => (x && typeof x === "object" ? str((x as Record<string, unknown>).id) : str(x))).filter(Boolean) : [];
+
+const oneLine = (v: unknown) => str(v).split(/\s+/).filter(Boolean).join(" ");
+const clipText = (t: string, n = 200) => (t.length <= n ? t : `${t.slice(0, n - 1).trimEnd()}…`);
+
+/** Story 38.4: a decision lettered (Settled shape 1): the skill's `{options: [{key, label, effect, intent?, resolution?}],
+ * recommendation}`, or a note's/record's already-lettered `{options: [{letter, text, key, effect}], default}` kept. */
+export function decisionOf(d: Record<string, unknown>): TriageDecision {
+  const raw = objects(d.options);
+  const base = { id: str(d.id), question: str(d.question), context: str(d.context) };
+  if (raw.length && raw.every((o) => typeof o.letter === "string" && !("label" in o))) {
+    return { ...base, options: raw.map((o) => ({ letter: str(o.letter), text: str(o.text), key: str(o.key), effect: str(o.effect) })), default: typeof d.default === "string" ? d.default : null };
+  }
+  let def: string | null = null;
+  const options = raw.slice(0, 26).map((o, i): DecisionOption => {
+    const letter = String.fromCharCode(65 + i), label = oneLine(o.label), extra = oneLine(o.intent || o.resolution);
+    const key = o.key === undefined || o.key === null ? "" : String(o.key);
+    if (def === null && key && d.recommendation !== undefined && d.recommendation !== null && String(d.recommendation) === key) def = letter;
+    return { letter, text: clipText(extra ? `${label} — ${extra}` : label), key, effect: str(o.effect) };
+  });
+  return { ...base, options, default: def };
+}
 
 /** The partition's summary (bmad-loop-sweep's result schema), or undefined when `raw` is not an object. */
 export function parseTriage(raw: unknown): Triage | undefined {
@@ -182,7 +216,7 @@ export function parseTriage(raw: unknown): Triage | undefined {
   return {
     bundles: objects(r.bundles).map((b) => ({ name: str(b.name), dw_ids: Array.isArray(b.dw_ids) ? b.dw_ids.filter((i): i is string => typeof i === "string") : [] })),
     blocked: objects(r.blocked).map((b) => ({ id: str(b.id), blocker: str(b.blocker) })),
-    decisions: objects(r.decisions).map((d) => ({ id: str(d.id), question: str(d.question) })),
+    decisions: objects(r.decisions).map(decisionOf),
     already_resolved: ids(r.already_resolved),
     skip: ids(r.skip),
   };
@@ -313,7 +347,12 @@ export type SweepSummary = {
   triage_cost_usd?: number | null;
   /** Story 38.3 (DW-165): why the bundles' Stage Log rows could not be read (`Stage Log not read: <error>`). */
   stage_error?: string;
+  /** Story 38.4: the owner's decision issues (`track.py block --source sweep`): each Jira key and its DW ids (asked here,
+   * or earlier); unset: never posted (an unbound project, or the call failed). */
+  decision_issues?: DecisionIssue[];
 };
+/** Story 38.4: one decision issue and the ids it asks (or answered). */
+export type DecisionIssue = { issue: string; ids: string[] };
 
 /** The engine's task key of a cycle's bundle (`sweep.py _bundle_key`). */
 export const bundleKey = (name: string, cycle: number) => (cycle === 1 ? `dw-${name}` : `dw${cycle}-${name}`);
@@ -438,9 +477,23 @@ export function sweepSection(s: SweepSummary): string[] {
     "",
     "### Human decisions",
     "",
-    ...(t.decisions.length
-      ? [...t.decisions.map((d) => `- ${d.id}: ${d.question}`), "", "Skipped unattended (`--no-prompt`): `bmad-loop decisions` answers them."]
-      : ["none"]),
+    ...(t.decisions.length ? decisionLines(t.decisions, s.decision_issues) : ["none"]),
+  ];
+}
+
+/** Story 38.4: a bound project's decisions as their issue keys (`- <KEY>: <ids>`; an id no issue names keeps its bare
+ * question), else the bare questions and the unattended line. */
+function decisionLines(decisions: TriageDecision[], issues: DecisionIssue[] | undefined): string[] {
+  if (!issues) return [...decisions.map((d) => `- ${d.id}: ${d.question}`), "", "Skipped unattended (`--no-prompt`): `bmad-loop decisions` answers them."];
+  const asked = new Set(issues.flatMap((i) => i.ids));
+  const bare = decisions.filter((d) => !asked.has(d.id));
+  const lines = [...issues.map((i) => `- ${i.issue}: ${i.ids.join(", ")}`), ...bare.map((d) => `- ${d.id}: ${d.question}`), ""];
+  if (!bare.length) return [...lines, "Asked in Jira (`tk-studio-decision`, `Blocked - Awaiting User`): the owner answers there and the sync-back ingests the answers."];
+  // a partial post: the issue lines are asked in Jira; the bare questions keep the unattended line
+  return [
+    ...lines,
+    "The issue lines: asked in Jira (`tk-studio-decision`, `Blocked - Awaiting User`): the owner answers there and the sync-back ingests the answers.",
+    "The bare questions (no issue): skipped unattended (`--no-prompt`): `bmad-loop decisions` answers them.",
   ];
 }
 
@@ -484,6 +537,7 @@ export function sweepRecord(s: SweepSummary): Record<string, unknown> {
     ...(s.triage_cost_usd !== undefined ? { triage_cost_usd: s.triage_cost_usd } : {}),
     ...(s.engine_cost_error ? { engine_cost_error: s.engine_cost_error } : {}),
     ...(s.stage_error ? { stage_error: s.stage_error } : {}),
+    ...(s.decision_issues ? { decision_issues: s.decision_issues } : {}),
   };
 }
 
@@ -507,6 +561,7 @@ export function summaryFromRecord(events: readonly QueueEvent[]): SweepSummary |
     ...(finite(rec.triage_cost_usd) || rec.triage_cost_usd === null ? { triage_cost_usd: rec.triage_cost_usd as number | null } : {}),
     ...(typeof rec.engine_cost_error === "string" ? { engine_cost_error: rec.engine_cost_error } : {}),
     ...(typeof rec.stage_error === "string" ? { stage_error: rec.stage_error } : {}),
+    ...(Array.isArray(rec.decision_issues) ? { decision_issues: decisionIssues(rec.decision_issues) } : {}),
   };
   const note = events.findLast((e) => e.kind === SWEEP_TRIAGE);
   if (rec.triage !== true) {
@@ -517,7 +572,7 @@ export function summaryFromRecord(events: readonly QueueEvent[]): SweepSummary |
     triage: {
       bundles: bundles.map((b) => ({ name: b.name, dw_ids: b.dw_ids, cycle: b.cycle })),
       blocked: Array.isArray(rec.blocked) ? objects(rec.blocked).map((b) => ({ id: str(b.id), blocker: str(b.blocker) })) : t?.blocked ?? [],
-      decisions: Array.isArray(rec.decisions) ? objects(rec.decisions).map((d) => ({ id: str(d.id), question: str(d.question) })) : t?.decisions ?? [],
+      decisions: Array.isArray(rec.decisions) ? objects(rec.decisions).map(decisionOf) : t?.decisions ?? [],
       already_resolved: ids(rec.already_resolved), skip: Array.isArray(rec.skip) ? ids(rec.skip) : t?.skip ?? [],
     },
     bundles, ...cost,
@@ -643,10 +698,187 @@ export function withStageRows(s: SweepSummary, rows: EngineStageRows): SweepSumm
  * bundle's outcome, the engine priced (`engineCostOf`) and its bundles' Stage Log rows (`engineStageRowsOf`), all read
  * before the worktree goes. `paused`: the engine's paused detail. */
 export async function sweepCloseOutSummary(
-  queue: Queue, run: Pick<QueueRun, "run_id" | "worktree" | "prefix" | "engine_run_id">, deps: WorktreeDeps = {}, paused?: Record<string, unknown>,
+  queue: Queue, run: Pick<QueueRun, "run_id" | "worktree" | "prefix" | "engine_run_id" | "root" | "tier" | "sandbox" | "studio_run_id">, deps: WorktreeDeps = {},
+  paused?: Record<string, unknown>, bound: (root: string) => boolean = jiraBound,
 ): Promise<SweepSummary> {
   const priced = withEngineCost(sweepSummary(queue, run, paused), await engineCostOf(run, deps));
-  return withStageRows(priced, await engineStageRowsOf(run, deps));
+  const rows = withStageRows(priced, await engineStageRowsOf(run, deps));
+  // Story 38.4: the engine answered from the record, then the decisions still open posted (a bound project only)
+  const ask = await answerDecisions(queue, run, rows, deps);
+  return postDecisions(queue, run, rows, deps, ask, bound);
+}
+
+// ------------------------------------------------------------ Story 38.4: the owner's decisions
+
+/** The queue note of the engine answer at the close-out, once per engine run. */
+export const SWEEP_DECISIONS_ANSWERED = "sweep-decisions-answered";
+/** The queue note of the decisions' posting at a close-out. */
+export const SWEEP_DECISIONS_POSTED = "sweep-decisions-posted";
+/** The record the post writes and the ingest answers, relative to the owner root (local tracking memory). */
+export const DECISIONS_RECORD_REL = join("_bmad-output", "tracking", "decisions-jira.json");
+/** A key the engine verb's prompt may be fed (checked before it goes into the `sh -c` line). */
+export const ENGINE_KEY_RE = /^[A-Za-z0-9_-]{1,16}$/;
+/** The engine in the sandbox (`sbx exec` carries no shell: the pipe needs `sh -c`). */
+const ENGINE_BIN = '"$HOME/.local/bin/bmad-loop"';
+
+const decisionIssues = (v: unknown): DecisionIssue[] =>
+  objects(v).map((i) => ({ issue: str(i.issue), ids: ids(i.ids) })).filter((i) => i.issue);
+const normLabel = (v: unknown) => oneLine(v).toLowerCase();
+/** A skill option's lettered `text` (Settled shape 1): the label, then ` — <intent or resolution>`, clipped to 200. */
+const letteredText = (o: Record<string, unknown>) => {
+  const label = oneLine(o.label), extra = oneLine(o.intent || o.resolution);
+  return clipText(extra ? `${label} — ${extra}` : label);
+};
+const shQuote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
+
+/** The engine's triage files (`triage.json`, then `triage-<N>.json` to the first missing) as host paths. */
+function triageFiles(runDir: string): string[] {
+  const out: string[] = [];
+  if (!existsSync(join(runDir, "triage.json"))) return out;
+  out.push(join(runDir, "triage.json"));
+  for (let n = 2; existsSync(join(runDir, `triage-${n}.json`)); n++) out.push(join(runDir, `triage-${n}.json`));
+  return out;
+}
+
+/** The raw skill decisions of the triage files, by id (a later file wins). */
+function rawDecisions(files: string[]): Map<string, Record<string, unknown>> {
+  const m = new Map<string, Record<string, unknown>>();
+  for (const f of files) {
+    try { for (const d of objects(JSON.parse(readFileSync(f, "utf-8"))?.decisions)) if (str(d.id)) m.set(str(d.id), d); } catch { /* unreadable: skipped */ }
+  }
+  return m;
+}
+
+/** The record's answers (`{<DW>: {letter, text, key, label, effect, issue, date}}`), {} when absent or unreadable. */
+function recordAnswers(root: string): Record<string, Record<string, unknown>> {
+  try {
+    const a = JSON.parse(readFileSync(join(root, DECISIONS_RECORD_REL), "utf-8"))?.answers;
+    return a && typeof a === "object" && !Array.isArray(a) ? a : {};
+  } catch { return {}; }
+}
+
+/** `bmad-loop decisions --json`'s pending set in order (each option's key), or the failure. */
+async function enginePending(sb: string, vm: string, deps: WorktreeDeps): Promise<{ id: string; keys: string[] }[] | string> {
+  const env = deps.env ?? process.env;
+  const run = deps.sbx?.run ?? ((b: string, a: string[], o: { timeoutS: number }) => runProcess(b, a, { timeoutS: o.timeoutS }));
+  const r = await run(sbxBin(env), ["exec", sb, "sh", "-c", `${ENGINE_BIN} decisions --json --project ${shQuote(vm)}`], { timeoutS: 120 });
+  const o = lastJsonObject(r.stdout) as Record<string, unknown> | null;
+  if (r.exit !== 0 || !o || !Array.isArray(o.decisions)) return clip(`bmad-loop decisions --json exit ${r.exit}: ${r.stderr || r.stdout}`);
+  return objects(o.decisions).map((d) => ({ id: str(d.id), keys: objects(d.options).map((x) => str(x.key)) }));
+}
+
+/** Story 38.4 (Settled shape 8): the engine answered from the record at the sweep's close-out — the one time its run dir
+ * (`pending_missed_decisions`) still sees the triage and nothing else writes the worktree's git. Each recorded answer is
+ * matched to the triage's options by `(effect, normalised label)`, else by `key` with an equal label, else (a hand-posted
+ * issue's answer: no `key`, no `effect`, its `label` the whole option line) by its label equal, normalised, to an option's
+ * label or lettered `text`; a miss is returned (the post's `--ask`). An id whose triage options are unreadable (the run
+ * dir or its triage files gone) is neither matched nor returned. On the sbx tier, `sbx exec <sb> sh -c '"$HOME/.local/bin/bmad-loop" decisions --json --project
+ * <vm>'` lists the pending set; while its leading ids have matched answers their keys (each checked against
+ * `ENGINE_KEY_RE`) are piped in (`printf "%s\n" <keys> | … decisions --project <vm>`; the EOF after the last one ends the
+ * verb non-zero, as expected), and a second `--json` read judges the outcome. The engine writes its own `decision:` line
+ * and commits on the run branch, in the sweep's PR. One `sweep-decisions-answered {engine_run_id, answered, left, ok,
+ * error?}` note per engine run. Never throws; a failure never blocks the close-out. */
+export async function answerDecisions(
+  queue: Queue, run: Pick<QueueRun, "run_id" | "worktree" | "prefix" | "engine_run_id" | "root" | "tier" | "sandbox">, s: SweepSummary, deps: WorktreeDeps = {},
+): Promise<string[]> {
+  const eid = run.engine_run_id, served = servedRoot(run);
+  const decisions = s.triage?.decisions ?? [];
+  if (!decisions.length || !eid || !served) return [];
+  const answers = recordAnswers(run.root);
+  if (!decisions.some((d) => answers[d.id])) return [];
+  const runDir = engineRunDir(served, eid);
+  const raw = rawDecisions(triageFiles(runDir));
+  const matched = new Map<string, string>(), ask: string[] = [];
+  for (const d of decisions) {
+    const a = answers[d.id];
+    if (!a) continue;
+    // an unreadable triage (run dir or triage files gone) is never evidence that an answer no longer matches
+    const source = raw.get(d.id);
+    if (!source) continue;
+    const opts = objects(source.options);
+    const hit = opts.find((o) => str(o.effect) === str(a.effect) && normLabel(o.label) === normLabel(a.label))
+      ?? opts.find((o) => String(o.key ?? "") === str(a.key) && normLabel(o.label) === normLabel(a.label))
+      // a hand-posted (legacy) issue's answer carries no key and no effect, its label the whole option line
+      ?? (!str(a.key) && !str(a.effect)
+        ? opts.find((o) => normLabel(a.label) === normLabel(o.label) || normLabel(a.label) === normLabel(letteredText(o)))
+        : undefined);
+    if (hit) matched.set(d.id, String(hit.key ?? "")); else ask.push(d.id);
+  }
+  if (run.tier !== "sbx" || !run.sandbox || !matched.size) return ask;
+  if (queue.events(run.run_id).some((e) => e.kind === SWEEP_DECISIONS_ANSWERED && e.detail?.engine_run_id === eid)) return ask;
+  let detail: Record<string, unknown>;
+  try {
+    const vm = toVmPath(served);
+    const before = await enginePending(run.sandbox, vm, deps);
+    if (typeof before === "string") throw new Error(before);
+    const keys: string[] = [], walked: string[] = [];
+    for (const p of before) {
+      const key = matched.get(p.id);
+      if (key === undefined || !ENGINE_KEY_RE.test(key) || !p.keys.includes(key)) break;
+      keys.push(key); walked.push(p.id);
+    }
+    if (keys.length) {
+      const env = deps.env ?? process.env;
+      const exec = deps.sbx?.run ?? ((b: string, a: string[], o: { timeoutS: number }) => runProcess(b, a, { timeoutS: o.timeoutS }));
+      await exec(sbxBin(env), ["exec", run.sandbox, "sh", "-c", `printf "%s\\n" ${keys.join(" ")} | ${ENGINE_BIN} decisions --project ${shQuote(vm)}`], { timeoutS: 120 });
+    }
+    const after = keys.length ? await enginePending(run.sandbox, vm, deps) : before;
+    if (typeof after === "string") throw new Error(after);
+    const pending = new Set(after.map((p) => p.id));
+    detail = { engine_run_id: eid, answered: walked.filter((id) => !pending.has(id)), left: [...matched.keys()].filter((id) => pending.has(id)), ok: true };
+  } catch (e) { detail = { engine_run_id: eid, answered: [], left: [...matched.keys()], ok: false, error: clip(message(e)) }; }
+  try { queue.note(run.run_id, SWEEP_DECISIONS_ANSWERED, detail); } catch { /* the note lost: the close-out goes on */ }
+  return ask;
+}
+
+/** Story 38.4 (Settled shapes 4, 14): the decisions still open posted to the owner — on a bound project (`bound`, the
+ * planseams `jiraBound` by default) only: `uv run track.py block --directory <root> --source sweep --triage <path> …
+ * --run-id <studio run id> [--ask DW-N …]` on the host (the engine's triage files while its run dir is there, else the
+ * note's run-workspace copy). The summary gains `decision_issues` (each issue and its ids, an id skipped as asked or
+ * answered on an earlier issue included), so the PR body lists the keys in place of the bare questions. One
+ * `sweep-decisions-posted {engine_run_id, ok, status, issues, skipped, retry?, error?}` note per call; a repeated call
+ * (another close-out site) is idempotent (the verb skips what its record asked). Never throws: a failure keeps the bare
+ * questions. */
+export async function postDecisions(
+  queue: Queue, run: Pick<QueueRun, "run_id" | "worktree" | "prefix" | "engine_run_id" | "root" | "studio_run_id">, s: SweepSummary, deps: WorktreeDeps = {},
+  ask: string[] = [], bound: (root: string) => boolean = jiraBound,
+): Promise<SweepSummary> {
+  try {
+    if (!s.triage?.decisions.length || !bound(run.root)) return s;
+    const served = servedRoot(run), eid = run.engine_run_id;
+    let files = served && eid ? triageFiles(engineRunDir(served, eid)) : [];
+    if (!files.length) {
+      const path = triageNote(queue.events(run.run_id), eid)?.detail?.path;
+      files = typeof path === "string" && existsSync(path) ? [path] : [];
+    }
+    let detail: Record<string, unknown>;
+    let out: SweepSummary = s;
+    if (!files.length) detail = { engine_run_id: eid ?? null, ok: false, error: "no triage file to post from" };
+    else {
+      const args = ["block", "--directory", run.root, "--source", "sweep", ...files.flatMap((f) => ["--triage", f]),
+        "--run-id", run.studio_run_id ?? run.run_id, ...ask.flatMap((id) => ["--ask", id])];
+      let r: RunResult | undefined, failure: string | undefined;
+      try { r = await uvRunner(deps)(run.root, studioScript(deps, "lib", "track.py"), args, 120); }
+      catch (e) { failure = clip(message(e)); }
+      const o = r ? lastJsonObject(r.stdout) as Record<string, any> | null : null;
+      const posted = objects(o?.issues).filter((i) => typeof i.issue === "string").map((i) => ({ issue: str(i.issue), ids: ids(i.ids) }));
+      const skipped = Array.isArray(o?.skipped) ? o!.skipped.filter((x: unknown): x is string => typeof x === "string") : [];
+      // `DW-n: already asked on KEY` / `DW-n: already re-asked on KEY` / `DW-n: answered on KEY`: the id's issue for the body
+      const earlier = new Map<string, string[]>();
+      for (const line of skipped) {
+        const m = /^(DW-\d+): (?:already asked|already re-asked|answered) on (\S+)$/.exec(line);
+        if (m) earlier.set(m[2]!, [...(earlier.get(m[2]!) ?? []), m[1]!]);
+      }
+      const issues = [...posted, ...[...earlier].map(([issue, xs]) => ({ issue, ids: xs }))];
+      const ok = !!o && o.ok === true;
+      detail = { engine_run_id: eid ?? null, ok, status: typeof o?.status === "string" ? o.status : null, issues, skipped,
+        ...(o?.retry === true ? { retry: true } : {}),
+        ...(!ok ? { error: failure ?? clip(String(o?.reason ?? o?.error ?? `track.py block --source sweep exit ${r?.exit}: ${r?.stderr || r?.stdout}`)) } : {}) };
+      if (issues.length) out = { ...s, decision_issues: issues };
+    }
+    try { queue.note(run.run_id, SWEEP_DECISIONS_POSTED, detail); } catch { /* the note lost: the close-out goes on */ }
+    return out;
+  } catch { return s; }
 }
 
 /** Story 38.3 (DW-165): the PR body's `## Stage Log` (after `## Sweep`, before `## Host verify`): per bundle `### <name>[

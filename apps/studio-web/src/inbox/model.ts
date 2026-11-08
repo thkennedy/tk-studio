@@ -17,6 +17,8 @@ export interface InboxItem {
   blocked_since: string | null;
   reason_comment: ReasonComment | null;
   state: string;
+  /** Story 38.4 (contract 0.1.34): a sweep decision issue (`tk-studio-decision`) and the DW ids it asks. */
+  decision?: { ids: string[] } | null;
 }
 export interface InboxAnswer { ok: true; project: string; generated_at: string | null; items: InboxItem[] }
 
@@ -83,6 +85,10 @@ export interface InboxRow {
   waited: string;
   /** The first line of the reason comment's body, its Jira mentions removed (`—` when none). */
   reason: string;
+  /** Story 38.4: the item's state (`open`; a decision's `resolved`: answered, awaiting the ingest). */
+  state: string;
+  /** Story 38.4: a sweep decision issue, else a block. */
+  kind: "decision" | "block";
 }
 
 /** A duration in ms as `Nm` (under an hour), `Nh` (under a day) or `Nd`; negative counts as 0. */
@@ -113,15 +119,21 @@ export function reasonLine(body: string | null | undefined): string {
 
 const text = (v: unknown): string => (typeof v === "string" && v.trim() ? v.trim() : NONE);
 
-/** The rows: per answer (in the order given: `projectsFrom`), its `open` items in the order served. */
+const isDecision = (i: InboxItem): boolean => isObj(i.decision);
+
+/** The rows: per answer (in the order given: `projectsFrom`), its `open` items in the order served. Story 38.4: a
+ * sweep decision item is listed in `resolved` too (answered, awaiting the sync-back's ingest); each row names its
+ * `state` and `kind`. No new screen (DW-178's check-in UI is not built here). */
 export function inboxRows(answers: readonly Pick<InboxAnswer, "project" | "items">[], now: number): InboxRow[] {
-  return answers.flatMap((a) => a.items.filter((i) => i.state === "open").map((i) => ({
+  return answers.flatMap((a) => a.items.filter((i) => i.state === "open" || (i.state === "resolved" && isDecision(i))).map((i) => ({
     project: a.project,
     key: i.issue,
     title: text(i.title),
     priority: text(i.priority),
     waited: waitedText(i.blocked_since, now),
     reason: reasonLine(i.reason_comment?.body),
+    state: i.state,
+    kind: isDecision(i) ? ("decision" as const) : ("block" as const),
   })));
 }
 
@@ -133,6 +145,10 @@ export function inboxNotice(loaded: boolean, rows: readonly InboxRow[], errors: 
   if (!loaded) return LOADING_TEXT;
   return rows.length === 0 && errors.length === 0 ? EMPTY_TEXT : null;
 }
+
+/** The Inbox table's header cells, one per row cell in order (Story 38.4: `State` after the title; the `Decision` tag
+ * sits inside the title cell, so it has no column of its own). */
+export const INBOX_COLUMNS = ["Project", "Issue", "Title", "State", "Priority", "Waited", "Reason"] as const;
 
 /** The nav item's count: the row count, null for an empty inbox (no count shown). */
 export const navCount = (rows: readonly InboxRow[]): number | null => (rows.length ? rows.length : null);

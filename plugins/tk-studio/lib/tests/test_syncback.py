@@ -80,9 +80,10 @@ class FakeSyncBack(FakeAtlassian):
         q = {k: v[0] for k, v in urllib.parse.parse_qs(query).items()}
         if method == "GET" and path == "/search/jql":
             self.jql.append(q["jql"])
-            # Story 32.3: `summary` rides the one search (the engagement item)
+            # Story 32.3: `summary` rides the one search (the engagement item);
+            # Story 38.4: `labels` too (the sweep decision item)
             assert q["fields"] == ("status,updated,comment,attachment,"
-                                   "priority,summary"), q
+                                   "priority,summary,labels"), q
             token = q.get("nextPageToken")
             if token is not None and token == self.fail_token:
                 return 500, {"errorMessages": ["boom"]}
@@ -121,7 +122,8 @@ class FakeSyncBack(FakeAtlassian):
         return entry
 
     def issue(self, key, status, category, minutes_ago, comments=(),
-              attachments=(), total=None, priority=None, summary=None):
+              attachments=(), total=None, priority=None, summary=None,
+              labels=None):
         entry = {"key": key, "fields": {
             "status": {"name": status, "statusCategory": {"key": category}},
             "updated": stamp(minutes_ago),
@@ -132,6 +134,8 @@ class FakeSyncBack(FakeAtlassian):
             entry["fields"]["priority"] = {"name": priority}
         if summary is not None:
             entry["fields"]["summary"] = summary
+        if labels is not None:
+            entry["fields"]["labels"] = list(labels)
         self.search_issues.append(entry)
         return entry
 
@@ -496,7 +500,32 @@ class InboxSeamTests(SyncBackTestCase):
                           for i in data["items"]],
                          [(f"{KEY}-40", "ENG-001", "ENG-001: questions")])
         self.assertEqual(syncback.SEARCH_FIELDS,
-                         "status,updated,comment,attachment,priority,summary")
+                         "status,updated,comment,attachment,priority,summary,labels")
+
+    def test_story_38_4_the_label_reaches_the_inbox_and_the_ingest_runs_after_derive(self):
+        # `labels` rides the one search; a `tk-studio-decision` issue lands
+        # as an item carrying `decision`, and the ingest runs right after
+        # `inbox.derive` under its gate (never on a dry run)
+        self.fake.issue(f"{KEY}-41", jirabackend.RESOLVED_STATUS, "indeterminate",
+                        30, summary="Decisions: DW-7, DW-9 — keep?",
+                        labels=["tk-studio-decision"])
+        seen = []
+
+        def ingest(root, result, binding, jira, now):
+            seen.append(json.loads((self.root / self.INBOX).read_text(encoding="utf-8")))
+            return []
+        with unittest.mock.patch.object(syncback.sweepdecisions, "ingest", ingest):
+            result = self.run_tick()
+            self.assert_block_last(result, "complete")
+            self.assertEqual([(i["issue"], i.get("decision"), i.get("title"), i["state"])
+                              for i in seen[0]["items"]],
+                             [(f"{KEY}-41", {"ids": ["DW-7", "DW-9"]},
+                               "Decisions: DW-7, DW-9 — keep?", "resolved")])
+            self.assertEqual({k: result["counts"][k] for k in (
+                "decisions_ingested", "decisions_reblocked", "decisions_done")},
+                {"decisions_ingested": 0, "decisions_reblocked": 0, "decisions_done": 0})
+            self.run_tick(dry_run=True)
+        self.assertEqual(len(seen), 1)
 
     def test_a_dry_run_or_an_interrupted_search_writes_no_inbox(self):
         self.fake.issue(f"{KEY}-1", jirabackend.BLOCKED_STATUS, "indeterminate",

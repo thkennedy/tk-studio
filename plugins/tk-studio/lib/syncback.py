@@ -25,7 +25,11 @@ queries Atlassian live for context:
     replaces `scope.md` wholesale through `engage.apply_page_revision`;
   - the inbox (Story 31.5): `_bmad-output/tracking/inbox.json`, derived
     by `inbox.derive` from the tick's search and the comment logs, only
-    after a non-dry-run tick that read every page.
+    after a non-dry-run tick that read every page;
+  - (Story 38.4) right after it, under the same gate, the answered sweep
+    decision issues ingested by `sweepdecisions.ingest` (counts
+    `decisions_ingested`, `decisions_reblocked`, `decisions_done`; a
+    temporary failure is `partial`, retried next tick).
 
 One paged JQL search per tick (`GET /rest/api/2/search/jql`), never a GET
 per issue; the bound is relative (`updated >= -<n>m`, n = the minutes since
@@ -53,13 +57,15 @@ import confluence
 import inbox
 import jirabackend
 import mdstorage
+import sweepdecisions
 
 TRACKING_REL = Path("_bmad-output") / "tracking"
 STATE_REL = TRACKING_REL / "sync-state.json"
 MIRROR_REL = Path("kb") / "confluence"
 OVERLAP_MINUTES = 5
-# Story 32.3: `summary` names an engagement issue (`ENG-NNN: questions`)
-SEARCH_FIELDS = "status,updated,comment,attachment,priority,summary"
+# Story 32.3: `summary` names an engagement issue (`ENG-NNN: questions`);
+# Story 38.4: `labels` names a sweep decision issue (`tk-studio-decision`)
+SEARCH_FIELDS = "status,updated,comment,attachment,priority,summary,labels"
 KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*-\d+$")
 MENTION_RE = re.compile(r"\[~accountid:([^\]\s]+)\]")
 HEADER_HASH_RE = re.compile(r"^content_hash: sha256:([0-9a-f]{64})$",
@@ -84,7 +90,9 @@ def new_result(dry_run: bool) -> dict:
                        "comments_seen": 0, "comments_appended": 0,
                        "attachments_appended": 0, "pages_mirrored": 0,
                        "pages_unchanged": 0, "pages_overwritten": 0,
-                       "engagement_pages_mirrored": 0, "scopes_replaced": 0},
+                       "engagement_pages_mirrored": 0, "scopes_replaced": 0,
+                       "decisions_ingested": 0, "decisions_reblocked": 0,
+                       "decisions_done": 0},
             "newest_comment": None, "applied": [], "conflicts": [],
             "overwritten": [], "rate_limit": {}, "notes": [], "written": []}
 
@@ -749,6 +757,9 @@ def tick(root: Path, result: dict, binding: dict, plan_dir: Path, jira,
             result.get("case") not in INBOX_HOLD_CASES:
         inbox.derive(root, result, binding["project_key"], plan_dir, latest,
                      now)
+        # Story 38.4: an answered sweep decision issue ingested (the ledger's
+        # `decision:` lines, the record, the reply, Done or a re-block)
+        partial += sweepdecisions.ingest(root, result, binding, jira, now)
     elif complete_read and not dry_run:
         # the inbox is held, so the cursor must not pass the issues this
         # tick read: an issue that left `Blocked - Awaiting User` here would

@@ -1628,3 +1628,180 @@ class BlockResolvedExitTests(JiraTestCase):
         self._set_canonical("ST-001", status="review")
         self._project()
         self.assertEqual(self.fake.posted_transitions, ["31"])
+
+
+class BlockEdgeTests(JiraTestCase):
+    """Story 38.4 (EP-36 B1, the retrospective's B3, AI-4; edge (a)): an issue
+    in `Blocked - Awaiting User` whose canonical is `in-progress` or `review`
+    leaves it once no block stands — (i) the block's record resolved (the
+    snapshot's canonical was `blocked`) or (ii) the issue's last block
+    comment answered (an owner comment newer than the newest agent
+    `Blocked:` in the comment log); with no category route, through `Block
+    Resolved`; a standing block keeps winning."""
+
+    SITE = BlockResolvedExitTests.SITE
+
+    def setUp(self):
+        super().setUp()
+        self.fake.STATUSES = dict(self.SITE)
+
+    def _b1(self) -> str:
+        """B1's sequence: the block pulled back (canonical `blocked`), then the
+        cancel and the re-drive's status call (no `track unblock`)."""
+        self._project()
+        key = self._jira_key("ST-001")
+        self.fake.issues[key]["status"] = jirabackend.BLOCKED_STATUS
+        self._project()
+        _, front, _ = self._canonical("ST-001")
+        self.assertEqual(front["external"]["jira"]["canonical_status"], "blocked")
+        return key
+
+    def _exits(self, status: str, key: str):
+        result = self._project()
+        self.assertEqual(result["conflicts"], [])
+        self.assertEqual(self.fake.issues[key]["status"], "In Progress")
+        _, front, _ = self._canonical("ST-001")
+        self.assertEqual(front["status"], status)
+        self.assertEqual(front["external"]["jira"]["status"], "In Progress")
+        self.assertEqual(front["external"]["jira"]["canonical_status"], status)
+
+    def test_i_the_block_record_resolved_in_progress_leaves_blocked(self):
+        key = self._b1()
+        self._set_canonical("ST-001", status="in-progress")
+        self._exits("in-progress", key)
+
+    def test_i_the_block_record_resolved_review_leaves_blocked(self):
+        key = self._b1()
+        self._set_canonical("ST-001", status="review")
+        self._exits("review", key)
+
+    def _held(self, status: str) -> str:
+        """Jira in `Blocked - Awaiting User`, the snapshot recording it with a
+        non-`blocked` canonical (no record of the block on the plan entry)
+        and an unpromoted local move between `in-progress` and `review` (so
+        the pull-back keeps the local status: AD-5)."""
+        self._project()
+        key = self._jira_key("ST-001")
+        self.fake.issues[key]["status"] = jirabackend.BLOCKED_STATUS
+        path, front, body = self._canonical("ST-001")
+        front["status"] = status
+        front["external"]["jira"].update({
+            "status": jirabackend.BLOCKED_STATUS,
+            "canonical_status": "review" if status == "in-progress" else "in-progress"})
+        path.write_text(interchange.render_entity(front, body), encoding="utf-8",
+                        newline="\n")
+        return key
+
+    def _log(self, key: str, *lines: tuple[str, str, str]):
+        path = self.root / "_bmad-output" / "tracking" / key / "comments.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("".join(json.dumps({"id": cid, "author": who, "body": text,
+                                            "created": f"2026-11-08T10:0{n}:00.000+0000"}) + "\n"
+                                for n, (cid, who, text) in enumerate(lines)),
+                        encoding="utf-8", newline="\n")
+
+    def test_ii_the_last_block_comment_answered_leaves_blocked(self):
+        for status in ("in-progress", "review"):
+            with self.subTest(status=status):
+                self.fake = FakeJira()
+                self.fake.STATUSES = dict(self.SITE)
+                self.client = jirabackend.JiraClient(
+                    "example.atlassian.net", "tim@example.com", "fake-token",
+                    transport=self.fake)
+                self._set_canonical("ST-001", status="ready", external=None)
+                key = self._held(status)
+                self._log(key, ("c1", "agent", "[~accountid:acc-owner] Blocked: x\nResolves when: y"),
+                          ("c2", "owner", "done, carry on"))
+                self._exits(status, key)
+
+    def test_a_standing_block_with_no_evidence_keeps_winning(self):
+        key = self._held("in-progress")
+        # the owner spoke before the block comment: not an answer
+        self._log(key, ("c1", "owner", "hello"),
+                  ("c2", "agent", "[~accountid:acc-owner] Blocked: x\nResolves when: y"))
+        self.fake.calls.clear()
+        self._project()
+        self.assertEqual(self.fake.writes(), [])
+        self.assertEqual(self.fake.issues[key]["status"], jirabackend.BLOCKED_STATUS)
+
+    def test_a_blocked_canonical_keeps_the_block(self):
+        key = self._b1()
+        self.fake.calls.clear()
+        self._project()
+        self.assertEqual(self.fake.writes(), [])
+        self.assertEqual(self.fake.issues[key]["status"], jirabackend.BLOCKED_STATUS)
+
+    def test_no_category_route_goes_through_block_resolved(self):
+        key = self._b1()
+        fake = self.fake
+        original = FakeJira.__call__
+
+        def routed(self_, method, url, body):
+            # from the block status only `Block Resolved` (and To Do); from
+            # there `In Progress`
+            status = fake.issues[key]["status"]
+            fake.routes = ([("1", "To Do"), ("4", jirabackend.RESOLVED_STATUS)]
+                           if status == jirabackend.BLOCKED_STATUS else
+                           [("1", "To Do"), ("2", "In Progress"),
+                            ("3", jirabackend.BLOCKED_STATUS), ("5", "Done")])
+            return original(self_, method, url, body)
+        with mock.patch.object(FakeJira, "__call__", routed):
+            self._set_canonical("ST-001", status="in-progress")
+            self._exits("in-progress", key)
+        self.assertEqual(self.fake.posted_transitions[-2:], ["4", "2"])
+
+    def test_no_route_at_all_is_a_note_and_the_file_untouched(self):
+        key = self._b1()
+        self._set_canonical("ST-001", status="in-progress")
+        self.fake.routes = [("1", "To Do"), ("3", jirabackend.BLOCKED_STATUS),
+                            ("5", "Done")]
+        path, _, _ = self._canonical("ST-001")
+        before = path.read_text(encoding="utf-8")
+        result = self._project()
+        self.assertIn("no route leaves it", json.dumps(result))
+        self.assertEqual(path.read_text(encoding="utf-8"), before)
+        self.assertEqual(self.fake.issues[key]["status"], jirabackend.BLOCKED_STATUS)
+
+    def test_block_resolved_reached_but_no_category_route_names_block_resolved(self):
+        """Follow-up review patch 3: the by-name move to `Block Resolved`
+        succeeds, the category move after it finds no route — the note names
+        `Block Resolved`, not `stays in 'Blocked - Awaiting User'`."""
+        key = self._b1()
+        fake = self.fake
+        original = FakeJira.__call__
+
+        def routed(self_, method, url, body):
+            # from the block status only `Block Resolved`; from there no
+            # route into `indeterminate` but the block status itself
+            status = fake.issues[key]["status"]
+            fake.routes = ([("1", "To Do"), ("4", jirabackend.RESOLVED_STATUS)]
+                           if status == jirabackend.BLOCKED_STATUS else
+                           [("1", "To Do"), ("3", jirabackend.BLOCKED_STATUS),
+                            ("5", "Done")])
+            return original(self_, method, url, body)
+        with mock.patch.object(FakeJira, "__call__", routed):
+            self._set_canonical("ST-001", status="in-progress")
+            result = self._project()
+        self.assertEqual(self.fake.issues[key]["status"], jirabackend.RESOLVED_STATUS)
+        notes = [n for n in result["promote"]["notes"] if "edge (a)" in n]
+        self.assertEqual(notes, [f"ST-001: {key} moved to 'Block Resolved' — no block stands, "
+                                 f"but no route reaches the 'indeterminate' category from it "
+                                 f"(Story 38.4, edge (a))"])
+        self.assertNotIn("no route leaves it", json.dumps(result))
+
+    def test_a_stuck_edge_with_a_field_change_keeps_evidence_i(self):
+        """A stuck block edge whose pass still writes the file (a field
+        changed) keeps the snapshot's `canonical_status: blocked`, so a later
+        pass with a route still sees evidence (i) and leaves the block."""
+        key = self._b1()
+        self._set_canonical("ST-001", status="in-progress", title="A renamed story")
+        routes = self.fake.routes
+        self.fake.routes = [("1", "To Do"), ("3", jirabackend.BLOCKED_STATUS),
+                            ("5", "Done")]
+        result = self._project()
+        self.assertIn("no route leaves it", json.dumps(result))
+        _, front, _ = self._canonical("ST-001")
+        self.assertEqual(front["external"]["jira"]["canonical_status"], "blocked")
+        self.assertEqual(self.fake.issues[key]["status"], jirabackend.BLOCKED_STATUS)
+        self.fake.routes = routes
+        self._exits("in-progress", key)

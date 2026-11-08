@@ -173,6 +173,7 @@ import ledger
 import miniyaml
 import sandbox_login
 import store as storelib
+import sweepdecisions
 from pipeline import LEGACY_BEGIN_RE, policy_dirties_tree
 
 # statuses `bmad-loop list --json` reports for a run whose engine is gone;
@@ -1786,7 +1787,10 @@ def _ids(items) -> list[str]:
 def triage_summary(raw: dict) -> dict:
     """The block's ``triage`` from the engine's partition (bmad-loop-sweep's
     result schema): bundles ``{name, dw_ids}``, blocked ``{id, blocker}``,
-    decisions ``{id, question}``, already_resolved and skip as ids."""
+    decisions ``{id, question, context, options: [{letter, text, key,
+    effect}], default}`` (Story 38.4: the skill's options lettered A, B, …,
+    `default` the recommendation's letter — `sweepdecisions.shape`),
+    already_resolved and skip as ids."""
     def objects(key):
         value = raw.get(key)
         return [x for x in value if isinstance(x, dict)] if isinstance(value, list) else []
@@ -1796,8 +1800,7 @@ def triage_summary(raw: dict) -> dict:
                     for b in objects("bundles")],
         "blocked": [{"id": str(b.get("id") or ""), "blocker": str(b.get("blocker") or "")}
                     for b in objects("blocked")],
-        "decisions": [{"id": str(d.get("id") or ""), "question": str(d.get("question") or "")}
-                      for d in objects("decisions")],
+        "decisions": [sweepdecisions.shape(d) for d in objects("decisions")],
         "already_resolved": _ids(raw.get("already_resolved")),
         "skip": _ids(raw.get("skip")),
     }

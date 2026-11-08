@@ -233,6 +233,37 @@ class MergeTests(InboxTestCase):
         self.assertEqual((item["engagement"], item["title"], item["state"]),
                          ("ENG-002", "ENG-002: questions", "resolved"))
 
+    def test_story_38_4_a_decision_issue_carries_decision_ids(self):
+        # `tk-studio-decision` in the pulled labels: `decision {ids}` from the
+        # record's entry, else the summary's DW tokens; `title` the summary;
+        # kept from the previous item when the labels were not pulled
+        record = self.root / "_bmad-output" / "tracking" / "decisions-jira.json"
+        record.parent.mkdir(parents=True, exist_ok=True)
+        record.write_text(json.dumps({"version": 1, "answers": {}, "issues": {
+            f"{KEY}-50": {"ids": ["DW-3", "DW-12"], "state": "open", "decisions": {}}}}),
+            encoding="utf-8")
+        self.fake.issue(f"{KEY}-50", BLOCKED, "indeterminate", 30,
+                        summary="Decisions: DW-3, DW-12 — keep?",
+                        labels=["tk-studio-decision", "theme-x"])
+        self.fake.issue(f"{KEY}-51", RESOLVED, "indeterminate", 29,
+                        summary="Decision: DW-7 — drop?", labels=["tk-studio-decision"])
+        self.fake.issue(f"{KEY}-52", BLOCKED, "indeterminate", 28,
+                        summary="Decision: DW-8 — not labelled", labels=[])
+        self.run_tick()
+        by_key = {i["issue"]: i for i in self.items()}
+        self.assertEqual((by_key[f"{KEY}-50"]["decision"], by_key[f"{KEY}-50"]["title"],
+                          by_key[f"{KEY}-50"]["state"]),
+                         ({"ids": ["DW-3", "DW-12"]}, "Decisions: DW-3, DW-12 — keep?", "open"))
+        self.assertEqual((by_key[f"{KEY}-51"]["decision"], by_key[f"{KEY}-51"]["state"]),
+                         ({"ids": ["DW-7"]}, "resolved"))
+        self.assertNotIn("decision", by_key[f"{KEY}-52"])
+        self.fake.search_issues = []
+        self.fake.issue(f"{KEY}-51", RESOLVED, "indeterminate", 5)  # no labels pulled
+        self.run_tick(minutes_later=10)
+        by_key = {i["issue"]: i for i in self.items()}
+        self.assertEqual((by_key[f"{KEY}-51"]["decision"], by_key[f"{KEY}-51"]["title"]),
+                         ({"ids": ["DW-7"]}, "Decision: DW-7 — drop?"))
+
     def test_an_issue_leaving_the_setup_statuses_leaves_the_inbox(self):
         self.fake.issue(f"{KEY}-1", BLOCKED, "indeterminate", 30)
         self.run_tick()

@@ -200,6 +200,38 @@ with `engagement` and `kind` on the engagement form; `to` is null for an issue
 not moved. Refusals end `blocked` (exit 2) as `block`'s do (`NoIssue` for an
 engagement with no issue, `UnknownKind`, `ReasonMissing`); a temporary failure
 ends `partial` with `ok: false` and `retry: true`.
+
+Story 38.4 (hole 112, DW-171) gives a sweep's owner decisions their source:
+
+  uv run track.py block --directory ROOT --source sweep --triage PATH
+      [--triage PATH …] --run-id RID [--ask DW-N …] [--dry-run]
+
+(`--source sweep` is exclusive with `--story`, `--engagement`, `--reason`,
+`--resolves` and `--kind`, each mix refused by name, exit 2, no call; and
+`--triage`, `--run-id` and `--ask` are its own.) The triage files (the
+sweep's `triage.json`, then `triage-<N>.json`; a later file wins by id) are
+lettered and grouped by `sweepdecisions` (its docstring has the shape, the
+grouping and the issue form): one `Task` per related group, labelled
+`tk-studio-decision`, assigned to the owner, moved to `Blocked - Awaiting
+User` with the mention comment (`_block_issue`), each written to
+`_bmad-output/tracking/decisions-jira.json`. An id already asked on an open
+record issue, or holding a recorded answer, is skipped (`skipped[]: "DW-n:
+already asked on KEY" | "DW-n: answered on KEY"`) unless `--ask DW-n` names
+it (its block then says `Earlier answer: <letter> (<KEY>) no longer matches
+these options`; once re-asked on an open issue, a repeated `--ask` is skipped:
+"DW-n: already re-asked on KEY"); an open record issue whose block did not complete (the
+record's `blocked: false`) has its move and mention finished instead, its ids
+not skipped. The result is `{ok, dry_run, source: "sweep", run_id,
+issues: [{issue, ids, created, transitioned, commented, skipped?, error?}],
+skipped[], notes, written}`; no decisions is `complete` with nothing posted.
+Refusals are `block --engagement`'s (binding, variables, owner,
+`IssueCreateRefused`) plus `TriageUnreadable` (a path absent or not a JSON
+object); a temporary failure is `partial`, `ok: false`, `retry: true`. A dry
+run creates nothing, writes nothing and names each group (`dry run: would
+create "<summary>" (Task, tk-studio-decision, assigned to the owner) for
+<ids> and move it to 'Blocked - Awaiting User' with the mention comment`),
+`partial`. The sweep's close-out (`apps/supervisor/src/sweep.ts`
+`postDecisions`) is the caller, on a bound project only.
 """
 from __future__ import annotations
 
@@ -216,10 +248,11 @@ import config as configlib
 import inbox
 import jirabackend
 import plansync
+import sweepdecisions
 import syncback
 
 INTENT = "tk-studio-track"
-SOURCES = ("run", "engagement")
+SOURCES = ("run", "engagement", "sweep")
 FINISHED = ("done", "dropped")
 ENTITY_ID_RE = re.compile(r"^(EP|ST|TA)-\d{3,}$")
 ISSUE_KEY_RE = re.compile(r"^[A-Z][A-Z0-9]+-\d+$")
@@ -400,6 +433,9 @@ def block(project_root: Path, story: str, reason: str, resolves: str,
 
     if source not in SOURCES:
         return refuse(f"--source {source!r} is not one of {', '.join(SOURCES)}")
+    if source == "sweep":
+        return refuse("--source sweep takes --triage and --run-id, not "
+                      "--story; no Atlassian call made")
     if not (reason or "").strip() or not (resolves or "").strip():
         return refuse("--reason and --resolves must both name something")
     if plansync._recorded(root, "planning.jira.project_key") is None:
@@ -1552,6 +1588,10 @@ def unblock(project_root: Path, story: str, reason: str, source: str = "run",
 
     if source not in SOURCES:
         return refuse(f"--source {source!r} is not one of {', '.join(SOURCES)}")
+    if source == "sweep":
+        return refuse("--source sweep has no unblock: the sweep's decision "
+                      "issues leave the block through the ingest; no "
+                      "Atlassian call made")
     if not (reason or "").strip():
         return refuse("ReasonMissing: --reason must name something; no "
                       "Atlassian call made")
@@ -1715,6 +1755,13 @@ def main(argv: list[str] | None = None) -> int:
     blk.add_argument("--kind")
     # Validated in code, not argparse choices: a refusal stays JSON (exit 2).
     blk.add_argument("--source")
+    # Story 38.4: `--source sweep`'s own flags (validated in code)
+    blk.add_argument("--triage", action="append",
+                     help="the sweep's triage file (repeatable; a later one "
+                          "wins by id)")
+    blk.add_argument("--run-id", help="the sweep's studio run id")
+    blk.add_argument("--ask", action="append",
+                     help="re-ask a DW id already answered (repeatable)")
     blk.add_argument("--dry-run", action="store_true")
     unb = sub.add_parser("unblock")
     unb.add_argument("--directory", required=True,
@@ -1827,6 +1874,33 @@ def main(argv: list[str] | None = None) -> int:
                                   dry_run=args.dry_run)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 2 if result.get("status") == "blocked" else 0
+    if args.source == "sweep":
+        mixed = [flag for flag, value in (
+            ("--story", args.story), ("--engagement", args.engagement),
+            ("--reason", args.reason), ("--resolves", args.resolves),
+            ("--kind", args.kind)) if value is not None]
+        if mixed:
+            result = _finish({"ok": False, "dry_run": args.dry_run,
+                              "source": "sweep", "run_id": args.run_id,
+                              "issues": [], "skipped": [], "notes": [],
+                              "written": []}, "blocked",
+                             f"track refused: --source sweep is exclusive "
+                             f"with {', '.join(mixed)}; no Atlassian call "
+                             f"made")
+        else:
+            result = sweepdecisions.post(directory, args.triage or [],
+                                         args.run_id, ask=args.ask or [],
+                                         dry_run=args.dry_run)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 2 if result.get("status") == "blocked" else 0
+    if args.triage is not None or args.run_id is not None \
+            or args.ask is not None:
+        result = _finish(_result(args.story, args.source or "run",
+                                 args.dry_run), "blocked",
+                         "track refused: --triage, --run-id and --ask are "
+                         "--source sweep's; no Atlassian call made")
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 2
     if args.engagement is not None:
         if args.story is not None or args.resolves is not None \
                 or args.source not in (None, "engagement"):

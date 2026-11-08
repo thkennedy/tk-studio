@@ -1,14 +1,15 @@
 // The Inbox screen (Story 31.6, design spec §6.9 item 2): what needs the owner — the open items of every served
 // project's `GET /inbox?project=<id>` (the projects in `projectsFrom` order, the items in the order served), each
 // row naming the project, the issue key and title, the priority, how long it has waited and the reason's first
-// line. Choosing a row opens the Issue screen. The rows (and so the nav count) come from `useInbox`, which `App.tsx`
+// line. Story 38.4: a sweep decision row carries a `Decision` tag and its state (`open`, or `resolved`: answered,
+// awaiting the ingest). Choosing a row opens the Issue screen. The rows (and so the nav count) come from `useInbox`, which `App.tsx`
 // owns so the count sits on the nav item whichever screen is shown; it refetches as the Board does — on a change of
 // the projects' runs or an agent's `blocked_issue` in the store, and when the window regains focus or the page
 // becomes visible — never on a timer. The rules are in `model.ts`.
 import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import type { OfficeStore } from "../live/store";
 import { fetchAgents, projectsFrom } from "../office/model";
-import { fetchInboxRows, inboxNotice, inboxRefetchKey, type InboxRow } from "./model";
+import { fetchInboxRows, INBOX_COLUMNS, inboxNotice, inboxRefetchKey, type InboxRow } from "./model";
 
 const font = "13px/1.4 ui-monospace, Menlo, Consolas, monospace";
 
@@ -87,6 +88,17 @@ export function InboxScreen({ rows, errors, loaded, onOpen }: { rows: InboxRow[]
       ))}
       {notice && <div style={{ color: "#9a9a9a" }}>{notice}</div>}
       <table style={{ borderCollapse: "collapse", width: "100%" }}>
+        {rows.length > 0 && (
+          <thead>
+            <tr style={{ borderBottom: "1px solid #2a2a2a" }}>
+              {INBOX_COLUMNS.map((c) => (
+                <th key={c} style={{ padding: "6px 8px", textAlign: "left", fontWeight: "normal", color: "#9a9a9a" }}>
+                  {c}
+                </th>
+              ))}
+            </tr>
+          </thead>
+        )}
         <tbody>
           {rows.map((r) => (
             <tr
@@ -101,7 +113,15 @@ export function InboxScreen({ rows, errors, loaded, onOpen }: { rows: InboxRow[]
                   {r.key}
                 </button>
               </td>
-              <td style={{ padding: "6px 8px" }}>{r.title}</td>
+              <td style={{ padding: "6px 8px" }}>
+                {r.kind === "decision" && (
+                  <span data-tag="decision" style={{ marginRight: 6, padding: "0 4px", border: "1px solid #6aa0ff", color: "#6aa0ff" }}>
+                    Decision
+                  </span>
+                )}
+                {r.title}
+              </td>
+              <td style={{ padding: "6px 8px", color: "#9a9a9a" }}>{r.state}</td>
               <td style={{ padding: "6px 8px", color: "#e0b040" }}>{r.priority}</td>
               <td style={{ padding: "6px 8px" }}>{r.waited}</td>
               <td style={{ padding: "6px 8px", color: "#c8c8c8" }}>{r.reason}</td>

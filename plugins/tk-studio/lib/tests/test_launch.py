@@ -2238,13 +2238,35 @@ class SweepVerbTestCase(unittest.TestCase):
         self.assertEqual(parsed["triage"], {
             "bundles": [{"name": "a", "dw_ids": ["DW-1", "DW-2"]}, {"name": "b", "dw_ids": ["DW-3"]}],
             "blocked": [{"id": "DW-4", "blocker": "Story 36.1 must land first"}],
-            "decisions": [{"id": "DW-5", "question": "keep or drop?"}],
+            "decisions": [{"id": "DW-5", "question": "keep or drop?", "context": "c",
+                           "options": [], "default": None}],
             "already_resolved": [], "skip": []})
         events = [e for e in self._ledger_lines() if e["event"] == "sweep-triage"]
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["payload"], {
             "run_id": self.RID, "bundles": 2, "dw_ids": ["DW-1", "DW-2", "DW-3"],
             "blocked": ["DW-4"], "decisions": ["DW-5"], "already_resolved": [], "skip": []})
+
+    def test_story_38_4_decisions_carry_lettered_options_and_a_default(self):
+        # the skill's own options lettered A.. in order, the recommendation's
+        # letter the default; the ledger payload and the reason stay ids
+        triage = launch.triage_summary({"decisions": [{
+            "id": "DW-7", "question": "build or close?", "context": "ctx",
+            "options": [
+                {"key": "1", "label": "Build it", "effect": "build", "intent": "add  the\nflag"},
+                {"key": "2", "label": "Close", "effect": "close", "resolution": "fine as is"},
+                {"key": "3", "label": "Keep open", "effect": "keep-open"}],
+            "recommendation": "2"}, {"id": "DW-8", "question": "q", "options": []}]})
+        self.assertEqual(triage["decisions"], [
+            {"id": "DW-7", "question": "build or close?", "context": "ctx",
+             "options": [
+                 {"letter": "A", "text": "Build it — add the flag", "key": "1", "effect": "build"},
+                 {"letter": "B", "text": "Close — fine as is", "key": "2", "effect": "close"},
+                 {"letter": "C", "text": "Keep open", "key": "3", "effect": "keep-open"}],
+             "default": "B"},
+            {"id": "DW-8", "question": "q", "context": "", "options": [], "default": None}])
+        self.assertEqual(launch.triage_reason(triage),
+                         "bundles: none; blocked: none; decisions: DW-7, DW-8")
 
     def test_sweep_reason_reads_none_for_empty_lists(self):
         self.assertEqual(launch.triage_reason(launch.triage_summary({})),

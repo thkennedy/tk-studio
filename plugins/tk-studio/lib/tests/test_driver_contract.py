@@ -3609,6 +3609,65 @@ class DriverContractTestCase(unittest.TestCase):
                        if line.startswith("| Story / rulings"))
         self.assertRegex(stories, r"Story 38\.1, Story 38\.2, Story 38\.3(, Story 38\.\d+)* \(Epic 38\)")
 
+    def test_0_1_34_story_38_4_the_owners_decisions_have_a_source_and_a_sink(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.34**", header)
+        self.assertNotIn("**0.1.35**", header)
+        self.assertEqual(header.count("0.1.34 (Story 38.4, additive)"), 1)
+        self.assertLess(header.index("0.1.34 (Story 38.3, additive)"),
+                        header.index("0.1.34 (Story 38.4, additive)"))
+        clause = " ".join(header[header.index("0.1.34 (Story 38.4, additive)"):].split())
+        for phrase in ("the owner's decisions have a source and a sink",
+                       "`options [{letter, text, key, effect}]` and `default`",
+                       "`track.py block --source sweep` posts one `tk-studio-decision` Task per related group",
+                       "`_bmad-output/tracking/decisions-jira.json`", "`plansync.py ledger-decide`",
+                       "`decision: <letter> — <text> (<KEY>, <date>)`", "`sweep-decisions-answered`",
+                       "`decision {ids}`", "leaves `Blocked - Awaiting User` once no block stands (edge (a))",
+                       "— additive) |"):
+            self.assertIn(phrase, clause)
+        flat = " ".join(self.text.split())
+        self.assertEqual(flat.count("**0.1.34 (Story 38.4, additive).**"), 1)
+        self.assertLess(flat.index("**0.1.34 (Story 38.3, additive).**"), flat.index("**0.1.34 (Story 38.4, additive).**"))
+        note = flat[flat.index("**0.1.34 (Story 38.4, additive).**"):]
+        note = note[:note.index("## 8. Conformance")]
+        subs = ("**The decision shape:**", "**The grouping:**", "**The issue form:**", "**The source verb:**",
+                "**The record:**", "**The grammar and the `default` rule:**", "**The `decision:` line and its verb:**",
+                "**The engine answer:**", "**The ingest, the reply and the re-block:**", "**The inbox field:**",
+                "**The block edge (option (a), named here):**", "**The serve process:**")
+        for sub in subs:
+            self.assertIn(sub, note)
+        self.assertEqual([note.index(s) for s in subs], sorted(note.index(s) for s in subs))
+        for phrase in ("`{id, question, context, options: [{letter, text, key, effect}], default}`",
+                       "at most 30 ids", "`Decision: DW-87 — <question>`", "`DW-12, …, DW-17 +N`",
+                       "`uv run track.py block --directory ROOT --source sweep --triage PATH [--triage PATH …] --run-id RID",
+                       "`TriageUnreadable`", "`sweep-decisions-posted {engine_run_id, ok, status, issues, skipped, retry?, error?}`",
+                       "is superseded by statement for a bound project",
+                       "answers: {<DW>: {letter, text, key, label, effect, issue, date}}}`",
+                       "`_bmad-output/tracking/decisions-jira.json` at the project root",
+                       "`not ingested: options unreadable`", "`qualified answer, not ingested`",
+                       "an id `ledger-decide` refuses is `ledger refused`, each left open",
+                       "`LedgerDuplicateId`, `LedgerMissingId`, an entry with no `status:` line or no ledger is refused",
+                       "`uv run plansync.py ledger-decide --directory ROOT --id DW-N --letter L --text TEXT --issue KEY",
+                       "`printf \"%s\\n\" <keys> | … decisions --project <vm>`", "`^[A-Za-z0-9_-]{1,16}$`",
+                       "`sweep-decisions-answered {engine_run_id, answered, left, ok, error?}`",
+                       "`decisions_ingested`, `decisions_reblocked`, `decisions_done`",
+                       "only a temporary failure (`track.transient`) records no cycle",
+                       "records the cycle with `move_pending: true`", "never a second reply",
+                       "a repeated `--ask` is idempotent (`DW-n: already re-asked on KEY`, no second issue)",
+                       "a legacy entry whose `status` is `Done` is not asked",
+                       "its group name kept in the entry's `group`",
+                       "still records the cycle `{block_comment, at, ingested, missing}`, the failure in `notes`",
+                       "an item with no `reason_comment` id is skipped before `ledger_decide` and the reply",
+                       "`SEARCH_FIELDS` gains `labels`", "no `validate-resolution` run",
+                       "(i) the snapshot's `canonical_status` is `blocked`",
+                       "an owner comment is newer than the newest agent `Blocked:` comment",
+                       "Option (b), `track unblock` on every cancel and re-drive path, is not taken"):
+            self.assertIn(phrase, note)
+        stories = next(line for line in self.text.splitlines()
+                       if line.startswith("| Story / rulings"))
+        self.assertRegex(stories, r"Story 38\.1, Story 38\.2, Story 38\.3, Story 38\.4(, Story 38\.\d+)* \(Epic 38\)")
+
     def test_story_35_7_the_skill_sweep_waits_540_s_inside_the_bash_cap(self):
         # the skill's one sweep call must print its block inside the Bash tool's 600 s cap
         skill = (PLUGIN_ROOT / "skills" / "tk-studio-launch" / "SKILL.md").read_text(encoding="utf-8")

@@ -128,7 +128,7 @@
  */
 import { existsSync, readFileSync, renameSync, rmSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
-import { load as loadYaml } from "js-yaml";
+import { jiraBound } from "./planseams";
 import { notifier, sbxBin } from "./env";
 import { canonicalPr, isWithin, notify, NOTICE_MAX_BYTES, sendText, TRUNCATED_MARKER, type EndNotice } from "./hygiene";
 import { hostVerify, inconclusiveReason, isInconclusive, isRed, isSlice, legGuard, legHistory, noteCloseOutLease, redReason, type HostVerifyResult, type LegHistoryEntry } from "./hostverify";
@@ -659,15 +659,9 @@ export function rulingRecorded(events: readonly QueueEvent[], storyKey: string, 
   return events.slice(pause + 1).some((e) => e.kind === "awaiting-ruling" && e.detail?.story_key === storyKey && e.detail?.engine_run_id === engineRunId);
 }
 
-/** Story 31.5: a project root's `planning.jira` binding — a non-empty `planning.jira.project_key` in its tracked
- * `.tk-studio/config.yaml` (read only; any read or parse failure is "not bound"). */
-export function jiraBound(root: string): boolean {
-  try {
-    const doc = loadYaml(readFileSync(join(root, ".tk-studio", "config.yaml"), "utf-8")) as Record<string, any> | null;
-    const key = doc?.planning?.jira?.project_key;
-    return (typeof key === "string" && key.trim() !== "") || typeof key === "number";
-  } catch { return false; }
-}
+/** Story 31.5: a project root's `planning.jira` binding. Story 38.4: it lives in `planseams.ts` now (sweep.ts reads it
+ * without a cycle), re-exported here for its importers. */
+export { jiraBound };
 
 /** Story 31.5: one `track-block` (story key, engine run id) recorded since the run's latest `paused` event. */
 export function trackRecorded(events: readonly QueueEvent[], storyKey: string, engineRunId: string | null): boolean {

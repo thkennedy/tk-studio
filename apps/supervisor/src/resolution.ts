@@ -15,7 +15,8 @@
  *            at most 3 times: a key with 3 `validate-expired` events stays recorded and expires no more, so a
  *            deterministic refusal that writes no line stops minting runs (only a re-block, a new agent `Blocked:`
  *            comment, is a new key). Story 36.3: an item the agent seat itself moved (`agentUnblocked`) queues nothing
- *            and records nothing. The definition is resolved as `validate`
+ *            and records nothing. Story 38.4: an item carrying `decision` (a sweep decision issue, ingested by the
+ *            sync-back tick's `sweepdecisions.ingest`) queues nothing, as one carrying `engagement`. The definition is resolved as `validate`
  *            resolves it (`jobrun.py resolve`, injected) with `target.payload` = `{verb: "validate", project_root,
  *            issues: [{issue, story, paused_run, spec}]}`; the run options are `tier: "host"` plus the planner leg's
  *            `model` and `effort` from the served project's `.bmad-loop/routing.current.json` (the paused run's
@@ -228,8 +229,9 @@ async function queueResolved(queue: Queue, deps: ResolutionDeps, out: Resolution
     try {
       const root = str(projects[project]?.root);
       if (!root || !jiraBound(root)) continue;
-      // Story 32.3: an engagement's questions item has no validation leg (the planner's next turn judges the answer)
-      const resolved = readInbox(root).items.filter((i) => (i.state === "resolved" || i.state === "validating") && i.engagement === undefined);
+      // Story 32.3: an engagement's questions item has no validation leg (the planner's next turn judges the answer);
+      // Story 38.4: nor a sweep decision item (the sync-back tick ingests its answer)
+      const resolved = readInbox(root).items.filter((i) => (i.state === "resolved" || i.state === "validating") && i.engagement === undefined && i.decision === undefined);
       for (const item of resolved) {
         const key = resolutionKey(project, item as Record<string, any>);
         if (!key || recorded.has(key)) continue;

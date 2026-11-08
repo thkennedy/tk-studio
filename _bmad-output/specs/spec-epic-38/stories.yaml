@@ -161,7 +161,12 @@
     them (:272), so `closeout.findSpec` still resolves. Edit `findSpec`'s split-spec
     rule in `worktree.ts` (already in the plan's Files) rather than `closeout.ts`; this
     is no deviation, and tests may import it from either module. `worktree.ts` grew
-    from 1346 to 1689 lines, so re-grep every plan anchor by symbol.
+    from 1346 to 1689 lines, so re-grep every plan anchor by symbol. Refresh (38-4
+    gate, 2026-11-08): plans/38-5.md's "Refreshed at the 38-4 gate" block has the
+    anchors at HEAD after 38.1-38.4; the leg's guard is 38.1's `legGuard`; 38.4's
+    `track.py block --source sweep` refuses `--kind`, so `--kind engine` is a
+    `--source run` form only. Oversize (plan Risks, not split): halt (the `halt`
+    consult) if the Files list grows past the plan's Files or past band L.
 
 - id: "38-6-the-gates-coverage-widened"
   title: "The Gate's Coverage Widened"
