@@ -10,11 +10,18 @@
  *             `VerifyRunning` (409: a `host-verify-leg` lease held by a live owner, `Queue.takeVerifyLeg`).
  *             `VerifyFailed` (500): the work folder unset, or the cut or materialise failed; the lease is released.
  *   the cut   `<run.worktree>.verify` (a leftover from a crashed leg removed first), the branch fetched, then
- *             Story 35.1: `git worktree add --relative-paths -B supervisor/run-<id> <path> <tip sha>` — on the run
- *             branch, never detached: a stale local branch (a close-out's removed worktree keeps it) is reset to
- *             origin's tip, so a commit there fast-forwards it; a local branch not an ancestor of that tip (unpushed
- *             commits) is `VerifyFailed` naming it and `git log --oneline <tip>..<local>` (never moved); another
- *             worktree holding the branch is `VerifyFailed` naming that worktree's path (never removed here). Then `materialise`d as `prepareWorktree` does.
+ *             (DW-117, TKSTUDIO-221 A) by whether a slice commit can be due, decided once here (`isSlice` of the
+ *             resolved definition, the only cut-time signal) and handed to the leg. A non-slice run's re-run commits
+ *             nothing, so it cuts `git worktree add --relative-paths --detach <path> <tip sha>`: detached at origin's
+ *             tip, the local run branch never read nor moved — a branch held by a worktree a close-out kept on error,
+ *             or one ahead of origin, refuses nothing. A slice run (Story 35.1) cuts `git worktree add
+ *             --relative-paths -B supervisor/run-<id> <path> <tip sha>` — on the run branch, never detached: a stale
+ *             local branch (a close-out's removed worktree keeps it) is reset to origin's tip, so a commit there
+ *             fast-forwards it; a local branch not an ancestor of that tip (unpushed commits) is `VerifyFailed` naming
+ *             it and `git log --oneline <tip>..<local>` (never moved); another worktree holding the branch (a kept
+ *             close-out worktree among them) is `VerifyFailed` naming that worktree's path — from git's refusal, else
+ *             `git worktree list --porcelain`'s entry on `refs/heads/<branch>` — never removed here. Then
+ *             `materialise`d as `prepareWorktree` does.
  *   the leg   `hostVerify` on a copy of the run naming the fresh worktree, under the leg's own guard (Story 38.1:
  *             `legGuard` — the job's `guards.host_verify_seconds`, else `max_wall_clock_seconds`, else 600; never the
  *             worker's `worker_guard_s`): exactly as the close-out runs it (the command read at the run's `base_ref`
@@ -249,6 +256,21 @@ async function refuseAheadBranch(root: string, branch: string, tip: string, deps
   throw new Error(`the local run branch '${branch}' is not an ancestor of origin's tip ${tip.slice(0, 12)} (never moved here): ${ahead || `git merge-base --is-ancestor ${failed(anc)}`}`);
 }
 
+/** DW-117: the path of the worktree holding `refs/heads/<branch>` per `git worktree list --porcelain`, or undefined
+ * (none listed, or the call failing). Never throws. */
+async function holdingWorktree(root: string, branch: string, deps: WorktreeDeps): Promise<string | undefined> {
+  try {
+    const r = await git(deps, root, ["worktree", "list", "--porcelain"], 30);
+    if (r.exit !== 0) return undefined;
+    for (const entry of r.stdout.split(/\r?\n\r?\n/)) {
+      const lines = entry.split(/\r?\n/);
+      const wt = lines.find((l) => l.startsWith("worktree "))?.slice("worktree ".length);
+      if (wt && lines.includes(`branch refs/heads/${branch}`)) return wt;
+    }
+  } catch { /* the existing fallback */ }
+  return undefined;
+}
+
 /** Re-run an ended run's host leg (see the header). Throws `VerifyRefused`; answers once the leg is started. Story 37.5:
  * `ready` marks a sweep's draft ready on green whatever its record says (B3). */
 export async function rerunHostLeg(queue: Queue, runId: string, opts: { by: "api" | "cli"; ready?: boolean }, deps: HostLegDeps = {}): Promise<HostLegStarted> {
@@ -264,7 +286,10 @@ export async function rerunHostLeg(queue: Queue, runId: string, opts: { by: "api
     throw new VerifyRefused("VerifyRunning", `a host-leg re-run of queue run '${runId}' is already running`);
   }
   const path = `${run.worktree}.verify`;
+  let slice = false;
   try {
+    // DW-117: decided once, before the cut, and handed to the leg (Story 34.8: the close-out's detection).
+    slice = isSlice(queue.definition(run));
     if (!workDir(deps.env ?? process.env)) throw new Error("TK_SUPERVISOR_WORK is unset");
     if (existsSync(path)) await removeWorktree(run.root, path, deps); // a crashed earlier leg's leftover
     // A registration whose folder is gone (a crash between the rmSync and the prune, a hand delete) would make
@@ -273,13 +298,17 @@ export async function rerunHostLeg(queue: Queue, runId: string, opts: { by: "api
     const f = await git(deps, run.root, ["fetch", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`]);
     if (f.exit !== 0) throw new Error(`git fetch ${failed(f)}`);
     mkdirSync(dirname(path), { recursive: true });
-    await refuseAheadBranch(run.root, branch, head, deps);
-    // Story 35.1: on the run branch reset to origin's tip (`-B`), never detached: the slice commit lands there.
-    const add = await git(deps, run.root, ["worktree", "add", "--relative-paths", "-B", branch, path, head]);
+    // DW-117 (TKSTUDIO-221 A): a non-slice re-run commits nothing, so it cuts detached at origin's tip and never reads
+    // the local run branch; a slice one keeps Story 35.1's cut on the run branch reset to origin's tip (`-B`), where
+    // its commit lands.
+    if (slice) await refuseAheadBranch(run.root, branch, head, deps);
+    const add = await git(deps, run.root, slice
+      ? ["worktree", "add", "--relative-paths", "-B", branch, path, head]
+      : ["worktree", "add", "--relative-paths", "--detach", path, head]);
     if (add.exit !== 0) {
       const out = `${add.stderr}\n${add.stdout}`;
-      if (/already (checked out|used by worktree)/i.test(out)) {
-        const at = /already (?:checked out|used by worktree) at '([^']+)'/i.exec(out)?.[1];
+      if (slice && /already (checked out|used by worktree)/i.test(out)) {
+        const at = /already (?:checked out|used by worktree) at '([^']+)'/i.exec(out)?.[1] ?? await holdingWorktree(run.root, branch, deps);
         throw new Error(at
           ? `the run branch '${branch}' is held by another worktree at '${at}' (never removed here)`
           : `the run branch '${branch}' is held by another worktree (never removed here): git worktree add ${failed(add)}`);
@@ -292,7 +321,7 @@ export async function rerunHostLeg(queue: Queue, runId: string, opts: { by: "api
     try { queue.releaseVerifyLeg(runId, self); } catch { /* a dead owner's lease is taken over */ }
     throw new VerifyRefused("VerifyFailed", clip(message(e)));
   }
-  const done = runLeg(queue, run, path, { by: opts.by, head, branch, ...(opts.ready === true ? { ready: true } : {}) }, deps);
+  const done = runLeg(queue, run, path, { by: opts.by, head, branch, slice, ...(opts.ready === true ? { ready: true } : {}) }, deps);
   return { run_id: run.run_id, state: run.state, head, done };
 }
 
@@ -327,15 +356,15 @@ async function judgeJobRun(queue: Queue, run: QueueRun, verify: HostVerifyResult
 /** The leg in the cut worktree, (a slice) the proof commit and push, the PR body and its flip, the removal, the judge's
  * `job-run` line, and the one `host-verify` event (it closes the lease). */
 async function runLeg(
-  queue: Queue, run: QueueRun, path: string, at: { by: "api" | "cli"; head: string; branch: string; ready?: boolean }, deps: HostLegDeps,
+  queue: Queue, run: QueueRun, path: string, at: { by: "api" | "cli"; head: string; branch: string; slice: boolean; ready?: boolean }, deps: HostLegDeps,
 ): Promise<HostLegResult> {
   let verify: HostVerifyResult;
   const rerun: HostLegRerun = { by: at.by, head: at.head, worktree: "kept", pr: null };
   try {
     // Story 38.1 (CAP-1): the leg's own guard (`guards.host_verify_seconds`), never the worker's `worker_guard_s`.
     const g = legGuard(queue.definition(run));
-    // Story 34.8: a slice run's re-run gets the assets step too (the close-out's detection, from the resolved definition).
-    const slice = isSlice(queue.definition(run));
+    // Story 34.8: a slice run's re-run gets the assets step too (DW-117: decided at the cut, `rerunHostLeg`).
+    const slice = at.slice;
     verify = await hostVerify({ ...run, worktree: path }, g.seconds, deps, { slice, guardKey: g.key });
     // Story 35.1: a slice run's placed art and proof committed and pushed, before the body edit.
     const committed = slice ? await sliceCommit(run, path, at.branch, at.head, verify, rerun, deps) : { ok: true };

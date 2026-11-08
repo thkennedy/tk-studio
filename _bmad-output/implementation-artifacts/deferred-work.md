@@ -1035,7 +1035,8 @@ location: apps/supervisor/src/hostleg.ts:253-262 (the `-B` refusal), :217-232 (t
 severity: medium
 reason: 35.1's CAP-2 cut (`supervisor/run-<id>` reset to origin's tip, never detached) holds for a slice re-run that must commit, but a non-slice re-run after a close-out error meets the run's own kept worktree. Fix: cut detached when no slice commit is due; name the kept worktree in the `VerifyFailed` reason (and offer its removal); a test whose refusal comes from a close-out that kept its worktree.
 decision: owner 2026-11-07 (TKSTUDIO-221): A — the re-run cuts a detached checkout when no slice commit is due, so a plain re-run always works; the refusal (naming the kept worktree's path) stays only when a slice must commit onto the run branch; a test born from a close-out that kept its worktree pins it; stays open for the sweep bundle
-status: open
+status: done 2026-11-08
+resolution: resolved by sweep bundle dw-hostleg-rerun-detached-cut
 
 ### DW-118: The sweep's end rule overrides the engine's own end: `sweepEndState` applies whenever a summary exists and the engine was not killed, so an engine that ended `failed`/`blocked` after its last bundle reads `complete` by bundle count.
 origin: retro-epic-35, B9, AI-2
