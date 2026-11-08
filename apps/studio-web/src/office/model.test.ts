@@ -4,7 +4,7 @@
 import { describe, expect, it } from "vitest";
 import { createOfficeStore, OFFICE_STATES, type OfficeAgent, type OfficeState } from "../live/store";
 import {
-  agentsUrl, bubbleFor, safeHref, desksFrom, fetchAgents, framesFor, hudModel, NONE, PENDING, PROJECT_KEY, projectsFrom,
+  agentsUrl, bubbleFor, safeHref, desksFrom, fetchAgents, framesFor, hudModel, LOADING, NONE, PENDING, PROJECT_KEY, projectsFrom,
   rememberedProject, rememberProject, type FrameSheet, type StorageLike,
 } from "./model";
 
@@ -232,15 +232,30 @@ describe("the HUD (a fixture store)", () => {
     });
   });
 
-  it("the null seams: a state-null row is pending, a null engine id and phase are —", () => {
+  it("the null seams: a state-null row is pending, a null engine id and phase are Loading…", () => {
     const state = fixture({
       agents: [agent("session", "r2")],
       runs: [{ run_id: "r2", project: null, state: null, engine_run_id: null, epic: { ...epic, current_story: null }, stories: [] }],
     });
     expect(hudModel(state, "p", 10_000).live).toEqual({
-      run_id: "r2", state: PENDING, engine_run_id: NONE, done: 2, failed: 1, total: 7, story: NONE, phase: NONE,
+      run_id: "r2", state: PENDING, engine_run_id: LOADING, done: 2, failed: 1, total: 7, story: NONE, phase: LOADING,
     });
     expect(hudModel(state, "p", 10_000).since).toBe("0s ago");
+  });
+
+  it("a pending value reads Loading…, never — (TKSTUDIO-213)", () => {
+    expect(LOADING).toBe("Loading…");
+  });
+
+  it("a new run with a current story but no story rows and no engine id: phase and engine id are Loading…", () => {
+    const state = fixture({
+      agents: [agent("session", "r3")],
+      runs: [{ run_id: "r3", project: "p", state: "running", engine_run_id: null, epic, stories: [] }],
+    });
+    const live = hudModel(state, "p", 10_000).live;
+    expect(live).toMatchObject({ story: "30-4", phase: "Loading…", engine_run_id: "Loading…" });
+    expect(live?.phase).not.toBe(NONE);
+    expect(live?.engine_run_id).not.toBe(NONE);
   });
 
   it("no live run: the last ended run's state and PR; a null PR; none at all", () => {

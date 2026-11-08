@@ -257,7 +257,8 @@ location: plugins/tk-studio/contracts/driver-contract.md:151; apps/studio-web/sr
 severity: medium
 reason: Category (a), a defect in behaviour AC2 names ("the current story's phase"). driver-contract.md:151 pins "A run new to the live set sends an epic-only office.progress beside its office.run", so the store holds no stories for that run. A consult (pass 2) ruled it a contract or operator decision (an additive per-story office.progress for a new run), not a 30-4 patch. A reconnect snapshot fills it.
 decision: owner 2026-11-05 (TKSTUDIO-213): A with one change — the pending phase and engine id read "Loading…", never a bare "—" ("always be intentional regarding UI feedback; no symbols without human-readable meaning in displayed text"); stays open until that text lands (a sweep bundle)
-status: open
+status: done 2026-11-08
+resolution: resolved by sweep bundle dw-office-hud-loading-text
 
 ### DW-30: A run that becomes live, or reaches `launched`, after the page's snapshot keeps the HUD's engine run id at "—" until a reconnect snapshot brings it.
 origin: spec-deferred 4fdab8eaa859
@@ -266,7 +267,8 @@ location: apps/supervisor/src/office.ts:663; apps/studio-web/src/live/store.ts:1
 severity: medium
 reason: Category (a), a defect in behaviour AC2 names ("the engine run id"). The `office.run` delta has the pinned shape {run_id, project, state, from} with no engine_run_id, and the hub emits it only on a state change (apps/supervisor/src/office.ts:663). The web store's applyRun creates new rows with engine_run_id null and never updates it (apps/studio-web/src/live/store.ts:151). The fix is an additive delta field, so it is a contract or operator decision, the same class as the existing phase deferral. Found by follow-up review pass 4.
 decision: owner 2026-11-05 (TKSTUDIO-213): A with one change — the pending phase and engine id read "Loading…", never a bare "—" ("always be intentional regarding UI feedback; no symbols without human-readable meaning in displayed text"); stays open until that text lands (a sweep bundle)
-status: open
+status: done 2026-11-08
+resolution: resolved by sweep bundle dw-office-hud-loading-text
 
 ### DW-31: Follow-up review still recommended for 30-4-the-office-screen after the damping cap was spent
 origin: review-budget-followup

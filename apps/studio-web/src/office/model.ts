@@ -165,12 +165,14 @@ export function rememberProject(project: string, storage: StorageLike | null = d
 
 export const PENDING = "pending";
 export const NONE = "—";
+/** A pending live value (the run's engine id, the current story's phase): TKSTUDIO-213. */
+export const LOADING = "Loading…";
 
 export interface HudLive {
   run_id: string;
   /** The run's queue state, `pending` while unknown (a progress-born row). */
   state: string;
-  /** `—` until the snapshot names it. */
+  /** `Loading…` until the snapshot names it. */
   engine_run_id: string;
   done: number;
   failed: number;
@@ -229,12 +231,12 @@ export function hudModel(state: LiveState, project: string, now: number): HudMod
       live: {
         run_id: run.run_id,
         state: run.state ?? PENDING,
-        engine_run_id: run.engine_run_id ?? NONE,
+        engine_run_id: run.engine_run_id ?? LOADING,
         done: run.epic?.done ?? 0,
         failed: run.epic?.failed ?? 0,
         total: run.epic?.total ?? 0,
         story: current ?? NONE,
-        phase: story?.phase ?? NONE,
+        phase: story?.phase ?? LOADING,
       },
       last: null,
       since,
