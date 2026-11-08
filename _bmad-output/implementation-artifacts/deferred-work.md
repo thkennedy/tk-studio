@@ -1,6 +1,6 @@
 # Deferred Work
 
-<!-- deferred-work counter: last minted DW-186; mint through plansync.py deferred mint -->
+<!-- deferred-work counter: last minted DW-187; mint through plansync.py deferred mint -->
 
 ### DW-124: Contract §4 `submit` admitted a full job definition but the CLI/skill surface was id-only
 origin: migrated from legacy ledger ("Deferred from: code review of feat/tk-studio-connector (2026-08-06)"), 2026-10-29
@@ -1232,7 +1232,7 @@ source_spec: `36-2-the-sweeps-records-are-whole-spec.md`
 location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261030-204855-1dd5; this entry preserves the lingering recommendation for a deliberate later review.
-status: open (owner's decision: a review pass costs 7.32 USD; the epic's mean 7.46)
+status: resolved 2026-11-08 by the day-8x docs PR (owner decision 2026-11-08 (TKSTUDIO-235): A — closed as accepted: later stories and gates reviewed the same surfaces; a review pass would have cost about 7.32 USD)
 
 ### DW-146: A story being built never reads In Progress in Jira: the plan-status pass sets `review` when the run's PR opens and `done` at the merge, nothing at the launch, so the issue reads Backlog for the whole build (hole 104).
 origin: hole 104 (found by the owner 2026-10-30 20:3xZ while Epic 36's run 1, q-run-epic-36-20261030T201456Z-e76900, built 36.1 with TKSTUDIO-191 in Backlog)
@@ -1289,7 +1289,7 @@ source_spec: `36-3-a-paused-or-resumed-run-is-never-parked-spec.md`
 location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261031-042417-65bc; this entry preserves the lingering recommendation for a deliberate later review.
-status: open (owner's decision: a review pass costs 6.26 USD; the epic's mean 7.46)
+status: resolved 2026-11-08 by the day-8x docs PR (owner decision 2026-11-08 (TKSTUDIO-235): A — closed as accepted: later stories and gates reviewed the same surfaces; a review pass would have cost about 6.26 USD)
 
 ### DW-153: The Jira promote's category picker took the first transition into the target category, and the setup's global transitions list `Blocked - Awaiting User` before `In Progress`, so every review promotion at PR open landed the story's issue in the block status until the merge (hole 109).
 origin: hole 109 (found 2026-10-31 04:2xZ answering the owner's question why nothing ever read In Progress: TKSTUDIO-191 and 192 Backlog → Blocked - Awaiting User at 01:20Z, TKSTUDIO-189 on 2026-10-29, every Epic 35 story since the first sync)
@@ -1321,7 +1321,7 @@ source_spec: `36-4-the-host-leg-goes-red-for-code-only-spec.md`
 location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261031-091634-c382; this entry preserves the lingering recommendation for a deliberate later review.
-status: open (owner's decision: a review pass costs 7.43 USD; the epic's mean 7.46)
+status: resolved 2026-11-08 by the day-8x docs PR (owner decision 2026-11-08 (TKSTUDIO-235): A — closed as accepted: later stories and gates reviewed the same surfaces; a review pass would have cost about 7.43 USD)
 
 ### DW-157: Runs carrying own_block still count toward stop.max_runs in evaluate_stop, so repeated supervisor faults can stop a job through max_runs.
 origin: spec-deferred 8209a52f4be7
@@ -1337,7 +1337,7 @@ source_spec: `36-5-the-supervisors-own-faults-spec.md`
 location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261031-122053-c9d8; this entry preserves the lingering recommendation for a deliberate later review.
-status: open (owner's decision: a review pass costs 7.22 USD; the epic's mean 7.46)
+status: resolved 2026-11-08 by the day-8x docs PR (owner decision 2026-11-08 (TKSTUDIO-235): A — closed as accepted: later stories and gates reviewed the same surfaces; a review pass would have cost about 7.22 USD)
 
 ### DW-159: `run-vertical-slice` game-project runs get no In Progress and no rhythm: the launched duties filter on `isRunEpic`.
 origin: spec-deferred, consult ruling 2026-10-31T17:47:31Z (deviation-gt-0) on Story 36.6's job filter
@@ -1377,7 +1377,7 @@ source_spec: `36-6-setup-and-the-launch-check-by-evidence-spec.md`
 location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261031-170810-6825; this entry preserves the lingering recommendation for a deliberate later review.
-status: open (owner's decision: a review pass costs 10.50 USD; the epic's mean 7.46)
+status: resolved 2026-11-08 by the day-8x docs PR (owner decision 2026-11-08 (TKSTUDIO-235): A — closed as accepted: later stories and gates reviewed the same surfaces; a review pass would have cost about 10.50 USD)
 
 ### DW-164: `withMcpStop` in `cli.ts` is not checked to inject `stopEngineMcp`; only its call sites and `sbxDeps` are pinned.
 origin: spec-deferred 9ed3801f2c8f
@@ -1524,7 +1524,7 @@ source_spec: `37-7-the-records-reconciled-and-the-proofs-captured-spec.md`
 location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261106-134720-e093; this entry preserves the lingering recommendation for a deliberate later review.
-status: open
+status: resolved 2026-11-08 by the day-8x docs PR (owner decision 2026-11-08 (TKSTUDIO-235): A — closed as accepted: later stories and gates reviewed the same surfaces)
 
 ### DW-182: The live `plansync setup` cannot exercise `POST /workflows/update` on the owner's site (every transition is already present, so nothing is posted), and the 36-6 ask's v3 read spelling (`/workflows/search?expand=statuses,transitions`) is refused by the site: the update's body shape stays unverified, and the proof needs a site state with a missing transition.
 origin: operator session 2026-11-06 (CAP-16's proof through 37-7's Consult Log ask; the 36-6 consult of 2026-10-31T17:47:31Z: a lost configuration or a v3 spelling becomes a follow-up DW, not a block)
@@ -1532,7 +1532,8 @@ source_spec: `36-6-setup-and-the-launch-check-by-evidence-spec.md` § Consult Lo
 location: plugins/tk-studio/lib/plansync.py setup (the workflow step: the update posted only for transitions `workflow_transitions` finds absent; the Confluence folders created without adoption when the children read is refused); plugins/tk-studio/lib/jirabackend.py `update_workflow`, `find_workflow_version` (`/workflows/search`, `queryString` only); plugins/tk-studio/lib/confluence.py `find_folders` (`/spaces/{id}/direct-children`)
 severity: low
 reason: The dry run on 2026-11-06 found every Jira item (the six statuses, the Blocked -> Block Resolved transition, the three global transitions, the filter, the space), so a live `setup` would post nothing for the workflow and could not answer what DW-107/DW-127 left open (whether the site takes `statusReference` as the status id and the v3 transition shape); its only live effect would be five Confluence folders (Brief, GDD, Scope of Work, Decisions, Records) created without adoption, since the children read is refused by scope (DW-106) and existing folders cannot be seen — so the operator did not make the call. The ask's v3 read, `GET /workflows/search?expand=statuses,transitions`, is a 400 on this site ("supported parameters are: [usage, values.transitions]"); `expand=values.transitions` answers (version 2, 9 transitions, 5 with `properties`). Fix to make: (1) a way to exercise the update for real — a `setup --verify-workflow` that removes and restores one global transition on a scratch project key, or the owner's say that the dry run's "found" list is proof enough, which closes DW-107/127's unverified clause; (2) the 36-6 ask's v3 read corrected to `expand=values.transitions` wherever it is quoted (36-6 spec `:263`, 37-7's CAP-16 ask); (3) the folder step: with the children read refused by scope, hand the five folders to the owner's numbered steps instead of creating unadopted (possibly duplicate) folders, or add `read:custom-content:confluence` and `read:hierarchical-content:confluence` to the Confluence key (DW-106).
-status: open
+decision: owner 2026-11-08 (TKSTUDIO-236): not a letter — "confirm needed scopes against confluence documentation and provide all scopes needed for the api key … Also look for a way to do this in an automated or programmatic fashion via CLI with owner's login or API key or some other route … I want a better way." The studio's research (the endpoint inventory mapped to Atlassian's scope lists; acli, the admin API's token endpoints, OAuth 2.0 3LO with refresh tokens, Forge) answers on TKSTUDIO-236 with the complete scope checklist and the recommended route; the live `setup` runs once the key carries the scopes.
+status: open (the scope checklist and the route are owed on TKSTUDIO-236; then the live setup)
 
 ### DW-183: `sbx skills ls` names the store's top-level entries (the plugin folder `tk-studio` and `synced`), not skills: `skillInStore`'s listing check never matches a job's target skill and the host folder walk does all the work; the parser is unpinned against the real format.
 origin: operator session 2026-11-06 (CAP-13's capture through 37-7's Consult Log ask; the 36-5 consult of 2026-10-31T13:09:40Z: "if the listing names plugins and not skills, say so, since the ruling re-pins the check then")
@@ -1564,4 +1565,12 @@ source_spec: `38-2-a-run-that-does-no-work-says-so-spec.md`
 location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261107-231024-c5ae; this entry preserves the lingering recommendation for a deliberate later review.
+status: open
+
+### DW-187: The launch-time plan-status pass writes `blocked` on one refused connection to api.atlassian.com (WinError 10060) and never retries (hole 115).
+origin: operator session 2026-11-08 (Story 38.3's run `q-run-epic-38-20261108T033847Z-8b5e54`: its first `plan-status` event at 03:41:28Z)
+source_spec: `kb/agent-pc-setup-runbook.md` fixes row "hole 115"; `handoff-phase1-loop-2026-10-09.md` 2026-11-08 06:4xZ update
+location: plugins/tk-studio/lib/plansync.py plan-status (the Jira call behind the `in-progress` sync); apps/supervisor/src/planstatus.ts (the pass that records the answer)
+severity: low
+reason: At launch the pass read `ok: false, error: blocked, reason: "cannot reach api.atlassian.com: <urlopen error [WinError 10060] A connection attempt failed …"` and the story's `in-progress` never reached Jira; the end-of-run pass at 06:12:47Z synced fine (TKSTUDIO-228 `Done`), so the record healed itself, but a `blocked` written on a single transient refusal is a false alarm the operator reads past, and a launch whose only Jira write is this one leaves the issue `Backlog` for the run's whole length. Fix to make: retry a connection-level error (`URLError`, socket timeouts) a bounded number of times with a short back-off before writing `blocked`, and name the retry count in the reason when it still fails.
 status: open
