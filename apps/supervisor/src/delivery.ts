@@ -10,9 +10,16 @@
  *                  `in-progress`; a `steady` stop on a run with no PR, or with a PR `gh pr view --json state` names
  *                  `CLOSED` (unmerged: step 7 resubmits only a `MERGED` one), awaits no merge and holds nothing back;
  *                  `OPEN`, `MERGED` or gh failing still holds back), and in `partial` no `cap` block owed
- *                  (Jira-bound). Once per last run: an `engagement-closeout` event naming its `run_id` means done (re-
- *                  read right before each notice, another process's pass told already); a later `go {cap}` from
- *                  `partial` gives a new last run, so a new closeout replaces the file and the page.
+ *                  (Jira-bound). Done for a last run: an ok `engagement-closeout` event naming its `run_id` with no
+ *                  `go` line in the record at or after it while the record (as the pass read it) sits in
+ *                  `in-progress` — in `partial` (a `go` step 2 re-capped) any ok event counts (re-read right before
+ *                  each notice, another process's pass told already); an `ok: false` event never counts. A later `go {cap}` from `partial` gives a new
+ *                  last run (step 7's resubmit), so a new closeout replaces the file and the page. DW-53 (TKSTUDIO-
+ *                  218, option A): a `go` after the close-out of a run that ended unstopped (`goAfterEnd`): stories
+ *                  left in the job's epic (the event's `stories_left`) — step 7 resubmits, this pass never re-closes
+ *                  (a transient submit failure waits for step 7's next pass); none left — this pass re-closes the run
+ *                  at once from `in-progress` (compose, lib, `run-ended`, the issue, a new ok event for the same
+ *                  `run_id`).
  *   the input      `{run_id, outcome_hint, runs: [{run_id, job, state, studio_run_id, cost_usd, pr}], stories: [{key,
  *                  run_id, spec_status, pr, pr_state}], epics: [{job, queued}], side_exits: [{at, to, verb, reason}],
  *                  spend {planning_usd, runs_usd}, quote}`: `cost_usd` the ledger's `job-run` `total_cost_usd` of the
@@ -39,18 +46,26 @@
  *                  Written to a temp file and run as `engage.py closeout --directory <served root> --engagement <id>
  *                  --input-file <path>` on the host (`uv`, timeout 300): the report, its page, the record's
  *                  `closeout`.
- *   the state      `applyEvent(run-ended)` with `detail {outcome, run_id, closeout: <path>}` in a fresh read (source
- *                  `supervisor`): every deliverable done `delivered`; else the last run `blocked` `failed`; else
- *                  `partial` (32.1's rows from `in-progress` and from `partial`; no row changes).
+ *   the state      `applyEvent(run-ended)` with `detail {outcome, run_id, closeout: <path>, stories_left}` (the lib's
+ *                  list, as on the event) in a fresh read (source `supervisor`): every deliverable done `delivered`;
+ *                  else the last run `blocked` `failed`; else `partial` (32.1's rows from `in-progress` and from
+ *                  `partial`; no row changes).
  *   the issue      Jira-bound: `track.py close --engagement` (`Block Resolved` → `Done`, an open cap or ask block
  *                  closed with it): `engagement-issue {…, action: "closed", step: "closeout"}`, or a named refusal
  *                  `{…, action: "refused", step: "close", reason}`; a transient failure is retried at the next pass
  *                  (the row already applied, the report not rewritten), only while the record still sits in that
- *                  outcome's state (a `go {cap}` from `partial` or a `revise` since: no close, no notice, no event).
+ *                  outcome's state (a `go {cap}` from `partial` or a `revise` since: no close, no notice, no event);
+ *                  that path, and the `run-ended` row's once guard, count only a `run-ended` line for the run newer
+ *                  than the record's newest `go` line.
  *   the notice     one notifier line `engagement ENG-NNN <outcome>: <page url | closeout.md path>`, then
- *                  `engagement-closeout {engagement, project, run_id, outcome, page, ok, notify}`. A lib refusal by
- *                  name (`NoScope`, `EngagementRecordUnreadable`, `CloseoutInputInvalid`, …) is that event with `ok:
- *                  false` and `reason`, the state unmoved; a transient failure (`retry: true`) emits nothing.
+ *                  `engagement-closeout {engagement, project, run_id, outcome, page, ok, notify, stories_left}`
+ *                  (`stories_left` the lib's, an array of strings else `[]`; on the transient-close path, which runs
+ *                  no lib, the `run-ended` line's `stories_left`, strings only, else `[]`). A lib refusal by name
+ *                  (`NoScope`, `EngagementRecordUnreadable`, `CloseoutInputInvalid`, …) is that event with `ok: false` and `reason`, the state unmoved, retried
+ *                  at every pass (DW-52): the event and one notice only when the reason differs from the newest `ok:
+ *                  false` event for the run with no ok event after it (none yet counts as different); the same
+ *                  reason again writes nothing and notifies no one (still `refused`). A transient failure (`retry:
+ *                  true`) emits nothing.
  *   Never throws; serialised per served root with the approve module's passes. A `cancelled` (terminal) or `scoping`
  *   record is never closed out.
  */
@@ -58,8 +73,8 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  APPROVE_EVENT, applyRow, blockOwed, defaultNotify, eventsFor, landedStory, linksOf, serialised, stops, targetsOf,
-  type ApproveDeps, type Target,
+  APPROVE_EVENT, CLOSEOUT_EVENT, applyRow, blockOwed, defaultNotify, eventsFor, goAfterEnd, landedStory, linksOf, serialised,
+  stops, targetsOf, type ApproveDeps, type Target,
 } from "./approve";
 import { jobRunCosts } from "./board";
 import { findSpec, frontmatter, jiraBound } from "./closeout";
@@ -72,7 +87,7 @@ import { lastJsonObject, type RunResult } from "./server";
 import { isSlice } from "./hostverify";
 import { gh, runBranch, runner, studioScript, uvRunner } from "./worktree";
 
-export const CLOSEOUT_EVENT = "engagement-closeout";
+export { CLOSEOUT_EVENT };
 /** The `to` states a side exit names. */
 export const SIDE_EXIT_STATES = ["paused", "partial", "failed", "cancelled"] as const;
 export const closeoutRel = (id: string) => `_bmad-output/engagements/${id}/closeout.md`;
@@ -376,12 +391,27 @@ async function closeoutStep(queue: Queue, deps: DeliveryDeps, t: Target, out: Cl
   const project = record.project, id = t.engagement;
   const last = linksOf(queue, project, id).at(-1);
   if (!last) return;
-  const told = () => eventsFor(queue, CLOSEOUT_EVENT, project, id).some((e) => e.detail?.run_id === last.run_id);
-  if (told()) return; // once per last run
+  const goAt = (r: Engagement) => r.inputs.findLast((l) => l.verb === "go")?.at;
+  const runEvents = () => eventsFor(queue, CLOSEOUT_EVENT, project, id).filter((e) => e.detail?.run_id === last.run_id);
+  // done: an ok event for the run with no `go` line at or after it while the record sits in `in-progress` (an ok:
+  // false event never counts). The state is this pass's read at entry, never a later one: the pass's own run-ended
+  // moves it, and a go from partial re-capped to partial (step 2) leaves the earlier close-out standing.
+  const superseding = record.state === "in-progress";
+  const told = () => {
+    const go = superseding ? goAt(record) : undefined;
+    return runEvents().some((e) => e.detail?.ok === true && !(go !== undefined && go >= e.at));
+  };
+  if (told()) return;
   const run = queue.get(last.run_id);
   if (!run) return;
-  const ended = (r: Engagement) => r.inputs.findLast((l) => l.verb === "run-ended" && l.detail?.run_id === run.run_id);
-  let outcome: string, page: Detail | null;
+  // DW-53: a go after the unstopped end with stories left in the job's epic is step 7's resubmit, never a re-close
+  if (goAfterEnd(queue, project, id, record, run.run_id, last.job)?.storiesLeft.length) return;
+  // the run's run-ended line newer than the newest go line (an older one belongs to a close-out a go superseded)
+  const ended = (r: Engagement) => {
+    const go = goAt(r);
+    return r.inputs.findLast((l) => l.verb === "run-ended" && l.detail?.run_id === run.run_id && !(go !== undefined && go >= l.at));
+  };
+  let outcome: string, page: Detail | null, storiesLeft: string[] = [];
   const line = ended(record);
   if (line) {
     // the row already applied (an earlier pass's issue close was transient): the close, the notice, the event
@@ -389,6 +419,8 @@ async function closeoutStep(queue: Queue, deps: DeliveryDeps, t: Target, out: Cl
     outcome = String(line.detail?.outcome ?? "partial");
     if (record.state !== outcome) return;
     page = pageOf(isObject(record.closeout) ? record.closeout.page : null);
+    const left = line.detail?.stories_left; // the lib's list, kept on the row (the ok event's, so a later go resubmits)
+    storiesLeft = Array.isArray(left) ? left.filter((k: unknown): k is string => typeof k === "string") : [];
   } else {
     if (!lastRunEnded(queue, t, record, true)) return; // held back by more than a steady stop's PR
     const awaited = record.state === "in-progress" ? steadyPr(queue, project, id, run.run_id) : undefined;
@@ -403,6 +435,11 @@ async function closeoutStep(queue: Queue, deps: DeliveryDeps, t: Target, out: Cl
     if (lib.status === "blocked") {
       if (told()) return; // another process's pass told meanwhile
       const reason = clip(typeof lib.reason === "string" && lib.reason ? lib.reason : "engage refused");
+      // DW-52: retried every pass; told once per reason (the newest refusal no ok event follows; re-read here)
+      const events = runEvents();
+      const at = events.findLastIndex((e) => e.detail?.ok === false);
+      const prior = at >= 0 && !events.slice(at + 1).some((e) => e.detail?.ok === true) ? events[at]!.detail?.reason : undefined;
+      if (prior === reason) { out.refused.push(id); return; }
       const notify = await (deps.notify ?? ((n: EndNotice) => defaultNotify(deps, n)))(notice("closeout-refused", `engagement ${id} closeout refused: ${reason}`))
         .catch((e) => ({ ok: false, error: clip(message(e)) }));
       queue.serviceEvent(CLOSEOUT_EVENT, { engagement: id, project, run_id: run.run_id, outcome: null, page: null, ok: false, reason, notify }, nowIso(deps));
@@ -411,8 +448,9 @@ async function closeoutStep(queue: Queue, deps: DeliveryDeps, t: Target, out: Cl
     }
     outcome = String(lib.outcome);
     page = pageOf(lib.page);
+    storiesLeft = Array.isArray(lib.stories_left) ? lib.stories_left.filter((k: unknown): k is string => typeof k === "string") : [];
     const once = (f: Engagement) => !!ended(f);
-    if (!applyRow(queue, deps, t, "run-ended", { outcome, run_id: run.run_id, closeout: closeoutRel(id) }, once)) return; // refused or moved: the next pass
+    if (!applyRow(queue, deps, t, "run-ended", { outcome, run_id: run.run_id, closeout: closeoutRel(id), stories_left: storiesLeft }, once)) return; // refused or moved: the next pass
   }
   if (!(await closeIssue(queue, deps, t, project))) return; // transient: the next pass closes, then tells
   if (told()) return; // another process's pass told meanwhile (the events re-read right before the write)
@@ -422,7 +460,7 @@ async function closeoutStep(queue: Queue, deps: DeliveryDeps, t: Target, out: Cl
     state: outcome, reason: `engagement ${id} ${outcome}: ${link}`,
   };
   const notify = await (deps.notify ?? ((n: EndNotice) => defaultNotify(deps, n)))(notice).catch((e) => ({ ok: false, error: clip(message(e)) }));
-  queue.serviceEvent(CLOSEOUT_EVENT, { engagement: id, project, run_id: run.run_id, outcome, page, ok: true, notify }, nowIso(deps));
+  queue.serviceEvent(CLOSEOUT_EVENT, { engagement: id, project, run_id: run.run_id, outcome, page, ok: true, notify, stories_left: storiesLeft }, nowIso(deps));
   out.closed.push(id);
 }
 

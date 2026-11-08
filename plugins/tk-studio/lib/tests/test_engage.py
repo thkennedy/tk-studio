@@ -1934,6 +1934,7 @@ class CloseoutRenderTests(CloseoutTestCase):
         self.assert_status_block_last(result, "complete")
         self.assertEqual((result["mode"], result["outcome"]),
                          ("closeout", "delivered"))
+        self.assertEqual(result["stories_left"], [])
         text = self.report()
         sections = [line[3:] for line in text.split("\n")
                     if line.startswith("## ")]
@@ -2021,6 +2022,20 @@ class CloseoutRenderTests(CloseoutTestCase):
         self.assertEqual(third["page"]["version"], 2)
         self.assertIn("- Last run: q-3", self.report())
         self.assertEqual(self.record()["closeout"]["run_id"], "q-3")
+
+    def test_the_status_block_names_an_unlanded_story_in_stories_left(self):
+        before = self.record()
+        result = self.closeout(closeout_input(
+            stories=[story("41-1-csv-button")]))
+        self.assert_status_block_last(result, "complete")
+        self.assertEqual(result["outcome"], "partial")
+        self.assertEqual(result["stories_left"], ["41-2"])
+        # the record's closeout merge is unchanged by the field
+        after = self.record()["closeout"]
+        self.assertNotIn("stories_left", after)
+        self.assertEqual(set(after), {"path", "page", "outcome", "done",
+                                      "not_done", "run_id", "at"})
+        self.assertIsNone(before["closeout"])
 
     def test_no_confluence_binding_writes_the_file_with_page_null(self):
         self.config.write_text(self.unbound, encoding="utf-8")
@@ -2118,6 +2133,34 @@ class CloseoutVerdictTests(unittest.TestCase):
         self.assertEqual(self.verdicts("no headings at all\n"), [])
         self.assertEqual(engage.closeout_outcome([], closeout_input()),
                          "partial")
+
+    def test_stories_left_names_each_unlanded_key(self):
+        # DW-52/DW-53: engage.py's own not-landed verdict, additive
+        left = engage.closeout_stories_left
+        self.assertEqual(left(SCOPE, closeout_input()), [])
+        # a proposed story with no landed entry: its `N-m` key
+        self.assertEqual(left(SCOPE, closeout_input(
+            stories=[story("41-1-csv-button")])), ["41-2"])
+        # a landed entry not `spec_status: done`: its own key
+        self.assertEqual(left(SCOPE, closeout_input(
+            stories=[story("41-1-csv-button", status="in-review"),
+                     story("41-2-filtered-export")])), ["41-1-csv-button"])
+        self.assertEqual(left(SCOPE, closeout_input(stories=[])),
+                         ["41-1", "41-2"])
+        # a merged-PR gap alone leaves it empty
+        self.assertEqual(left(SCOPE, closeout_input(
+            stories=[story("41-1-csv-button", state="OPEN"),
+                     story("41-2-filtered-export")])), [])
+        # an unqueued epic's stories are `epic not run`, not unlanded
+        self.assertEqual(left(SCOPE, closeout_input(
+            stories=[], epics=[{"job": "run-epic-41", "queued": False}])),
+            [])
+        # no proposed stories: each landed entry not done, deduplicated
+        bare = "# s\n\n## Deliverables\n\n### Thing\n\nAcceptance " \
+            "signal: x.\n"
+        self.assertEqual(left(bare, closeout_input(
+            stories=[story("9-1-a", status="review"), story("9-2-b"),
+                     story("9-1-a", status="review")])), ["9-1-a"])
 
     def test_an_unqueued_epic_reads_epic_not_run(self):
         two = SCOPE + ("\n### Epic 2: Later\n\n#### Story 2.1: Date range "

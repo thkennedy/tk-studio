@@ -91,7 +91,14 @@
  *                - Story 32.8: a mid-run `revise` (any linked run of any cycle live while the record is `scoping`)
  *                  stops each live engine gracefully with reason `revise` (a still-queued run cancelled), once per
  *                  engine, and resubmits nothing (a re-approval starts a new cycle); a run that ends on its own (the
- *                  epic done, or failed) is `delivery.ts`'s closeout pass (`run-ended`, the report, the issue Done).
+ *                  epic done, or failed) is `delivery.ts`'s closeout pass (`run-ended`, the report, the issue Done);
+ *                - DW-53 (TKSTUDIO-218, option A): once that close-out left the record `partial` and an owner `go
+ *                  {cap}` moved it back to `in-progress` (a `go` line after the run's ok `engagement-closeout`, no
+ *                  stop and no `after_run` naming the run, under the cap), step 7 resubmits the run's job exactly as
+ *                  for a stopped run (same submit, `base_ref`, payload, recheck and `after_run`) when the close-out
+ *                  event's `stories_left` (engage.py's not-landed verdict) names a key of the job's epic (`N-…` for
+ *                  `run-epic-N`, any key for a job name not ending in digits; a missing field counts as none),
+ *                  else resubmits nothing and the closeout pass re-closes the run (`goAfterEnd`, shared by both).
  *                Events: `engagement-run-stop {engagement, project, run_id, engine_run_id, reason, story_key?, ok,
  *                detail}`, `engagement-cap {engagement, project, run_id, runs_usd, cap, notify}`,
  *                `engagement-continue {engagement, project, comment}`, `engagement-issue {…, action: "blocked", kind}`
@@ -157,6 +164,9 @@ export const RUN_QUEUED_EVENT = "engagement-run-queued";
 export const RUN_STOP_EVENT = "engagement-run-stop";
 export const CAP_EVENT = "engagement-cap";
 export const CONTINUE_EVENT = "engagement-continue";
+/** `delivery.ts`'s closeout event (re-exported there as `CLOSEOUT_EVENT`); defined here so step 7 reads it without
+ * importing delivery.ts (which imports this module). */
+export const CLOSEOUT_EVENT = "engagement-closeout";
 export const APPROVE_STEPS = ["append", "sync", "job", "commit", "pr", "queued"] as const;
 export type ApproveStep = typeof APPROVE_STEPS[number] | "done";
 
@@ -1123,6 +1133,30 @@ export function linksOf(queue: Queue, project: string, id: string, since?: strin
 
 export const stops = (queue: Queue, project: string, id: string) => eventsFor(queue, RUN_STOP_EVENT, project, id);
 
+/** DW-53 (TKSTUDIO-218, option A): an owner `go` after an unstopped end of `runId` (the linked run of `job`) — the
+ * record `in-progress`, the run terminal, no ok stop naming it, no `after_run` naming it, an ok `engagement-closeout`
+ * event for it and a `go` line at or after that event — answers the stories that remain in `job`'s epic: the newest
+ * ok close-out event's `stories_left` (engage.py's own not-landed verdict) filtered to the keys starting `N-` when
+ * the job name ends in the digits `N` (any key otherwise); a missing or non-array `stories_left` counts as none.
+ * Else undefined. The cap is the caller's (step 7 returns before it at or past the cap). Shared by step 7 (stories
+ * remain: resubmit) and the closeout pass (none remain: re-close). */
+export function goAfterEnd(
+  queue: Queue, project: string, id: string, record: Engagement, runId: string, job: string,
+): { storiesLeft: string[] } | undefined {
+  if (record.state !== "in-progress") return undefined;
+  const run = queue.get(runId);
+  if (!run || !isTerminal(run.state)) return undefined;
+  if (stops(queue, project, id).some((e) => e.detail?.run_id === runId && e.detail?.ok === true)) return undefined;
+  if (linksOf(queue, project, id).some((l) => l.after_run === runId)) return undefined;
+  const told = eventsFor(queue, CLOSEOUT_EVENT, project, id).findLast((e) => e.detail?.run_id === runId && e.detail?.ok === true);
+  if (!told) return undefined;
+  if (!record.inputs.some((l) => l.verb === "go" && l.at >= told.at)) return undefined;
+  const raw = told.detail?.stories_left;
+  const keys = Array.isArray(raw) ? raw.filter((k): k is string => typeof k === "string" && k !== "") : [];
+  const epic = /(\d+)$/.exec(job)?.[1];
+  return { storiesLeft: epic === undefined ? keys : keys.filter((k) => k.startsWith(`${epic}-`)) };
+}
+
 /** Stop one linked run's engine gracefully, recording `engagement-run-stop` (a failure equal to the newest one for
  * this run and reason not repeated). A run with no engine yet is not stopped (nothing recorded). */
 async function stopRun(queue: Queue, deps: ApproveDeps, t: Target, project: string, run: QueueRun, reason: string, storyKey?: string): Promise<boolean> {
@@ -1359,8 +1393,9 @@ async function runStep(queue: Queue, deps: ApproveDeps, t: Target, out: Engageme
   reread();
   // Story 36.3 (DW-47): the block a `go` or `continue` answered closes.
   if (jiraBound(t.root)) await unblockAnswered(queue, deps, t, project, record);
-  // 7. the resubmit: in-progress, the newest linked run stopped by this pass and ended, not resubmitted yet; never
-  // at or past the cap (an ask `continue` over the cap: the next pass's cap step makes it partial)
+  // 7. the resubmit: in-progress, the newest linked run stopped by this pass and ended, or (DW-53) ended on its own,
+  // closed out and answered by a `go` with stories left in its epic; not resubmitted yet; never at or past the cap
+  // (an ask `continue` over the cap: the next pass's cap step makes it partial)
   if (record.state !== "in-progress" || !links.length) return; // no run of this cycle: nothing to resubmit (F1)
   const capNow = isObject(record.quote) ? num(record.quote.cap) : undefined;
   if (capNow !== undefined && (num(record.spend?.runs_usd) ?? 0) >= capNow) return;
@@ -1368,8 +1403,23 @@ async function runStep(queue: Queue, deps: ApproveDeps, t: Target, out: Engageme
   const prev = runOf(last);
   if (!prev || !isTerminal(prev.state)) return;
   if (links.some((l) => l.after_run === prev.run_id)) return;
+  const resubmit = async (): Promise<void> => {
+    if (!deps.submit) return;
+    const baseRef = baseRefOf(record);
+    let queued: { run_id: string };
+    try { queued = await deps.submit(last.job, t.root, { ...(baseRef ? { baseRef } : {}), payload: { engagement: id, project } }); }
+    catch { return; } // the next pass asks again
+    if (linksOf(queue, project, id, since).some((l) => l.after_run === prev.run_id)) return; // another process resubmitted meanwhile
+    queue.serviceEvent(RUN_QUEUED_EVENT, { engagement: id, project, run_id: queued.run_id, job: last.job, after_run: prev.run_id }, nowIso(deps));
+    out.resubmitted.push(id);
+  };
   const prevStops = stops(queue, project, id).filter((e) => e.detail?.run_id === prev.run_id && e.detail?.ok === true);
-  if (!prevStops.length) return; // ended on its own (the epic done, or failed): 32.8's run end
+  if (!prevStops.length) {
+    // ended on its own (the epic done, or failed): 32.8's run end. DW-53: after its close-out, an owner `go` with
+    // stories left in the job's epic (`goAfterEnd`) resubmits the job; none left: the closeout pass re-closes
+    if (goAfterEnd(queue, project, id, record, prev.run_id, last.job)?.storiesLeft.length) await resubmit();
+    return;
+  }
   // an ask stop resumes only through the owner's `continue`: no `run-resumed` line after it, no resubmit (review P7)
   const askStop = prevStops.filter((e) => e.detail?.reason === "ask").at(-1);
   if (askStop && !record.inputs.some((l) => l.verb === "run-resumed" && l.at >= askStop.at)) return;
@@ -1382,14 +1432,7 @@ async function runStep(queue: Queue, deps: ApproveDeps, t: Target, out: Engageme
     const view = r.exit === 0 ? lastJsonObject(r.stdout) as Record<string, unknown> | null : null;
     if (typeof view?.state !== "string" || view.state.toUpperCase() !== "MERGED") return; // OPEN, CLOSED or gh failed
   }
-  if (!deps.submit) return;
-  const baseRef = baseRefOf(record);
-  let queued: { run_id: string };
-  try { queued = await deps.submit(last.job, t.root, { ...(baseRef ? { baseRef } : {}), payload: { engagement: id, project } }); }
-  catch { return; } // the next pass asks again
-  if (linksOf(queue, project, id, since).some((l) => l.after_run === prev.run_id)) return; // another process resubmitted meanwhile
-  queue.serviceEvent(RUN_QUEUED_EVENT, { engagement: id, project, run_id: queued.run_id, job: last.job, after_run: prev.run_id }, nowIso(deps));
-  out.resubmitted.push(id);
+  await resubmit();
 }
 
 /** The engagement-run pass (see the header). `only`: one engagement (the input route's). Never throws. */

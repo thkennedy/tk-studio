@@ -480,7 +480,8 @@ location: apps/supervisor/src/delivery.ts:274
 severity: medium
 reason: Blind Hunter; delivery.ts closeoutStep records the run_id on refusal (counts as done, accepted by consult 1 as deviation 4); the lib never moves state. Deferral class (a): AC1's state/issue/notifier outcome is not reached after a refusal.
 decision: owner 2026-11-05 (TKSTUDIO-218, ENG-B): A — both: the delivery pass retries a refused close-out on every pass (a notice only when the reason changes), and `go` after an unstopped end resubmits when stories remain, else re-runs the close-out at once; stays open for the sweep bundle
-status: open
+status: done 2026-11-08
+resolution: resolved by sweep bundle dw-delivery-closeout-retry-and-go
 
 ### DW-53: After a closeout leaves an engagement partial for a run that ended unstopped, an owner go {cap} moves it to in-progress with no run queued and no new closeout, so it stays in-progress indefinitely.
 origin: spec-deferred fcebc307be1b
@@ -489,7 +490,8 @@ location: apps/supervisor/src/delivery.ts (lastRunEnded / closeoutStep); apps/su
 severity: medium
 reason: Edge Case Hunter; step 7 resubmits only cap-stopped runs and the closeout pass treats the engagement-closeout event for that run_id as done. Deferral class (a): the go-past-a-cap input named by AC2 leaves no run and no report.
 decision: owner 2026-11-05 (TKSTUDIO-218, ENG-B): A — both: the delivery pass retries a refused close-out on every pass (a notice only when the reason changes), and `go` after an unstopped end resubmits when stories remain, else re-runs the close-out at once; stays open for the sweep bundle
-status: open
+status: done 2026-11-08
+resolution: resolved by sweep bundle dw-delivery-closeout-retry-and-go
 
 ### DW-54: Follow-up review still recommended for 32-8-delivery-the-closeout-report-and-change-requests after the damping cap was spent
 origin: review-budget-followup

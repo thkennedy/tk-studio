@@ -11,6 +11,7 @@ import {
   addJobId, appendEpics, approvePass, engagementRunPass, engagementRunSpendPass, proposedEpics, rekeyBands,
   APPROVE_EVENT, CAP_EVENT, RUN_QUEUED_EVENT, RUN_STOP_EVENT, type ApproveDeps, type Submitter,
 } from "../src/approve";
+import { CLOSEOUT_EVENT, closeoutPass } from "../src/delivery";
 import { applyInput, newEngagement, readEngagement, writeEngagement, type Autonomy, type Engagement } from "../src/engagement";
 import type { EndNotice } from "../src/hygiene";
 import { Queue, type Owner } from "../src/queue";
@@ -1530,6 +1531,64 @@ describe("Story 32.8: revise mid-run, go past the cap, the run-end hand-off", ()
     expect(out.stopped).toEqual([]);
     expect(fx.submitted).toEqual([]);
     expect(readEngagement(root, ENG)!.state).toBe("in-progress");
+  });
+
+  /** DW-53: the run ended on its own, its close-out (ok, `stories_left` as given, absent when undefined) left the
+   * record partial, then the owner's `go {cap}` after that event. */
+  async function goAfterUnstopped(queue: Queue, fx: ReturnType<typeof approveDeps>, storiesLeft: unknown) {
+    const { root, run } = linkedRoot(queue, { state: "in-progress", autonomy: "full" });
+    await launch(queue, run);
+    queue.end(run, "complete", null, { detail: { pr: PR } });
+    writeEngagement(root, { ...readEngagement(root, ENG)!, state: "partial" });
+    queue.serviceEvent(CLOSEOUT_EVENT, {
+      engagement: ENG, project: "p", run_id: run, outcome: "partial", page: null, ok: true, notify: { ok: true },
+      ...(storiesLeft === undefined ? {} : { stories_left: storiesLeft }),
+    }, "2026-10-25T05:50:00.000Z");
+    input(root, fx.deps, "go", { cap: 90 });
+    expect(readEngagement(root, ENG)!.state).toBe("in-progress");
+    return { root, run };
+  }
+  const engageCalls = (fx: ReturnType<typeof approveDeps>) => fx.uvCalls.filter((c) => c.script === "engage.py");
+
+  test("DW-53: go after an unstopped end with stories left in its epic: step 7 resubmits last.job with after_run, once; the closeout pass never re-closes", async () => {
+    const queue = newQueue();
+    const fx = approveDeps(queue);
+    const { root, run } = await goAfterUnstopped(queue, fx, ["41-3", "41-3-later"]);
+    expect((await engagementRunPass(queue, fx.deps, { root, engagement: ENG })).resubmitted).toEqual([ENG]);
+    expect(fx.submitted).toEqual([{ jobId: "run-epic-41", root, payload: { engagement: ENG, project: "p" } }]);
+    const queued = queue.serviceEvents(RUN_QUEUED_EVENT).map((e) => e.detail as Record<string, any>);
+    expect(queued.at(-1)).toEqual({ engagement: ENG, project: "p", run_id: expect.any(String), job: "run-epic-41", after_run: run });
+    expect((await engagementRunPass(queue, fx.deps)).resubmitted).toEqual([]);
+    expect(fx.submitted).toHaveLength(1);
+    expect(await closeoutPass(queue, fx.deps)).toEqual({ closed: [], refused: [] });
+    expect(engageCalls(fx)).toEqual([]);
+  });
+
+  test("DW-53: stories left only in another epic, or the field absent or not an array: no resubmit (the closeout pass re-closes)", async () => {
+    for (const left of [["31-2"], undefined, "41-2", []]) {
+      const queue = newQueue();
+      const fx = approveDeps(queue);
+      const { root } = await goAfterUnstopped(queue, fx, left);
+      const out = await engagementRunPass(queue, fx.deps, { root, engagement: ENG });
+      expect(out.resubmitted).toEqual([]);
+      expect(fx.submitted).toEqual([]);
+      expect(readEngagement(root, ENG)!.state).toBe("in-progress");
+    }
+  });
+
+  test("DW-53: stories left, the submit throwing: nothing queued, the closeout pass does not re-close; the next pass resubmits", async () => {
+    const queue = newQueue();
+    const failing = fakeSubmit(queue, { fail: "submit refused" });
+    const fx = approveDeps(queue, { submit: failing.submit });
+    const { root, run } = await goAfterUnstopped(queue, fx, ["41-2"]);
+    expect((await engagementRunPass(queue, fx.deps, { root, engagement: ENG })).resubmitted).toEqual([]);
+    expect(failing.calls).toHaveLength(1);
+    expect(queue.serviceEvents(RUN_QUEUED_EVENT).some((e) => e.detail?.after_run === run)).toBe(false);
+    expect(await closeoutPass(queue, fx.deps)).toEqual({ closed: [], refused: [] });
+    expect(engageCalls(fx)).toEqual([]);
+    expect(readEngagement(root, ENG)!.state).toBe("in-progress");
+    const ok = fakeSubmit(queue);
+    expect((await engagementRunPass(queue, { ...fx.deps, submit: ok.submit })).resubmitted).toEqual([ENG]);
   });
 });
 

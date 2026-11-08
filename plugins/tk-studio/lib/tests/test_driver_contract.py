@@ -3705,6 +3705,39 @@ class DriverContractTestCase(unittest.TestCase):
                        if line.startswith("| Story / rulings"))
         self.assertRegex(stories, r"Story 38\.1, Story 38\.2, Story 38\.3, Story 38\.4(, Story 38\.\d+)* \(Epic 38\)")
 
+    def test_0_1_34_dw_52_dw_53_closeout_retry_and_go_after_an_unstopped_end(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.34**", header)
+        self.assertNotIn("**0.1.35**", header)
+        engage_row = next(line for line in self.text.splitlines()
+                          if line.startswith("| `tk-studio-engage`"))
+        self.assertIn("closeout, done, not_done, stories_left, written[], notes[]}", engage_row)
+        self.assertIn("`stories_left`, 0.1.34 (DW-52, DW-53), additive", engage_row)
+        flat = " ".join(self.text.split())
+        self.assertEqual(flat.count("**0.1.34 (DW-52, DW-53, additive).**"), 1)
+        self.assertLess(flat.index("**0.1.34 (DW-51, additive).**"),
+                        flat.index("**0.1.34 (DW-52, DW-53, additive).**"))
+        note = flat[flat.index("**0.1.34 (DW-52, DW-53, additive).**"):]
+        note = note[:note.index("## 8. Conformance")]
+        subs = ("**The result:**", "**The retry:**", "**The `go` rule:**", "**The serve process:**")
+        self.assertEqual([note.index(s) for s in subs], sorted(note.index(s) for s in subs))
+        for phrase in ("TKSTUDIO-218", "adds `stories_left` to its result",
+                       "`story <key> not landed`", "`[]` when every story landed",
+                       "The record's `closeout` merge is unchanged",
+                       "an `ok: false` event never counts",
+                       "calls `engage.py closeout` again at every pass",
+                       "only when the refusal's `reason` differs from the newest `ok: false` event",
+                       "the same reason again writes no event and sends no notice",
+                       "a `go` after an unstopped end",
+                       "a key starting `N-` for a job name ending in the digits `N`",
+                       "a missing or non-array field counts as none",
+                       "step 7 resubmits the job exactly as for a stopped run",
+                       "the closeout pass never re-closes the run",
+                       "applies `run-ended` from `in-progress` and tells again",
+                       "newer than the newest `go` line"):
+            self.assertIn(phrase, note)
+
     def test_0_1_34_dw_51_a_reapproval_drops_the_superseded_cycles_issues(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))

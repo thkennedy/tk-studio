@@ -189,7 +189,14 @@ leaves `page: null` with a note, never a refusal. Then `closeout {path,
 page, outcome, done, not_done, run_id, at}` alone is merged into a fresh
 read of the record; the state does not move here (the supervisor applies
 `run-ended`). A 429, a 5xx or an OS refusal ends `partial` with `retry:
-true`. The result is `{status, engagement, outcome, page, written[]}`.
+true`. The result is `{status, engagement, outcome, page, stories_left,
+written[]}`: `stories_left` (DW-52/DW-53, additive) the keys, deduplicated
+in first-seen order, of every story judged `story <key> not landed` (each
+proposed story of a queued epic whose landed entry is missing or not
+`spec_status: done`; with no proposed stories, each landed entry not
+`done`), `[]` when every story landed — the supervisor's "stories remain"
+predicate for a `go` after an unstopped run end. The record's `closeout`
+merge is unchanged.
 
 Refusals end `blocked` (exit 2), each named in `reason`: `BadEngagement`,
 `UnknownEngagement` (no record), `EngagementRecordUnreadable` (not JSON, or
@@ -1925,15 +1932,10 @@ def _cell(value) -> str:
     return text.replace("|", "\\|").replace("\n", " ")
 
 
-def closeout_verdicts(text: str, data: dict) -> list[dict]:
-    """Each deliverable's verdict (Settled shape 3): `[{title, signal,
-    done, why, stories: [key], prs: [url]}]`. A deliverable's stories are
-    the proposed stories naming its title (case-insensitive), else every
-    proposed story; the i-th proposed epic is the i-th declared job
-    (`run-epic-N`), its story `m` the landed key `N-m-…`. `done` when each
-    landed (`spec_status: done`) and its PR is `MERGED`; else the first
-    why of `no acceptance signal`, `epic not run`, `story <key> not
-    landed`, `PR <url> not merged`."""
+def _closeout_members(text: str, data: dict) -> list[dict]:
+    """Every proposed story with its epic's `queued`, its landed entry (the
+    newest `done` hit of `N-m`, else the newest hit, else None) and the key
+    it is shown under: `[{title, body, queued, entry, key}]`."""
     epics = data.get("epics") or []
     landed = data.get("stories") or []
     proposed = _proposed_stories(text)
@@ -1957,6 +1959,43 @@ def closeout_verdicts(text: str, data: dict) -> list[dict]:
             members_all.append({"title": story["title"],
                                 "body": story["body"], "queued": queued,
                                 "entry": entry, "key": shown})
+    return members_all
+
+
+def closeout_stories_left(text: str, data: dict) -> list[str]:
+    """DW-52/DW-53 (contract 0.1.34, additive): the keys, deduplicated in
+    first-seen order, of every story `closeout_verdicts` judges not
+    landed — each proposed story of a queued epic whose landed entry is
+    missing or not `spec_status: done`, under the key `story <key> not
+    landed` shows (with no proposed stories, each landed entry not
+    `done`). Empty when every story landed; a PR not merged alone leaves
+    it empty. The supervisor's single "stories remain" predicate."""
+    members_all = _closeout_members(text, data)
+    if not members_all:
+        members_all = [{"queued": True, "entry": s, "key": s.get("key")}
+                       for s in data.get("stories") or []]
+    out: list[str] = []
+    for s in members_all:
+        landed_done = (s["entry"] or {}).get("spec_status") == "done"
+        if not s["queued"] or landed_done:
+            continue
+        key = str(s["key"])
+        if key not in out:
+            out.append(key)
+    return out
+
+
+def closeout_verdicts(text: str, data: dict) -> list[dict]:
+    """Each deliverable's verdict (Settled shape 3): `[{title, signal,
+    done, why, stories: [key], prs: [url]}]`. A deliverable's stories are
+    the proposed stories naming its title (case-insensitive), else every
+    proposed story; the i-th proposed epic is the i-th declared job
+    (`run-epic-N`), its story `m` the landed key `N-m-…`. `done` when each
+    landed (`spec_status: done`) and its PR is `MERGED`; else the first
+    why of `no acceptance signal`, `epic not run`, `story <key> not
+    landed`, `PR <url> not merged`."""
+    landed = data.get("stories") or []
+    members_all = _closeout_members(text, data)
     out = []
     for d in closeout_deliverables(text):
         folded = d["title"].casefold()
@@ -2306,7 +2345,9 @@ def closeout(project_root: Path, engagement: str, data, dry_run: bool = False,
                                meter, reports)
         done = sum(1 for v in verdicts if v["done"])
         result.update({"outcome": outcome, "closeout": rel, "done": done,
-                       "not_done": len(verdicts) - done})
+                       "not_done": len(verdicts) - done,
+                       "stories_left": closeout_stories_left(scoped["text"],
+                                                             data)})
         if dry_run:
             result["notes"].append("dry run: closeout.md was not written, "
                                    "the page not published")

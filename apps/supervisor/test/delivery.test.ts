@@ -202,7 +202,7 @@ describe("Story 32.8: the closeout pass (AC1)", () => {
     // one notifier line with the link, then the event
     expect(fx.notices).toHaveLength(1);
     expect(fx.notices[0]).toMatchObject({ run_id: second, job_id: "run-epic-41", project_id: "p", studio_run_id: "s-2", state: "delivered", reason: `engagement ${ENG} delivered: ${PAGE.url}` });
-    expect(closeouts(queue)).toEqual([{ engagement: ENG, project: "p", run_id: second, outcome: "delivered", page: { id: PAGE.id, url: PAGE.url, version: 1 }, ok: true, notify: { ok: true, via: "fake" } }]);
+    expect(closeouts(queue)).toEqual([{ engagement: ENG, project: "p", run_id: second, outcome: "delivered", page: { id: PAGE.id, url: PAGE.url, version: 1 }, ok: true, notify: { ok: true, via: "fake" }, stories_left: [] }]);
     // once per last run
     expect(await closeoutPass(queue, fx.deps)).toEqual({ closed: [], refused: [] });
     expect(fx.uvCalls).toHaveLength(2);
@@ -479,16 +479,40 @@ describe("Story 32.8 review: partial closes out past a stop; an unmetered run is
 });
 
 describe("Story 32.8: refusals and retries (never throws)", () => {
-  test("a lib refusal by name: the event ok false with the reason, the state unmoved, one notice; not called again", async () => {
+  test("a lib refusal by name: the event ok false with the reason, the state unmoved, one notice; retried every pass, told once per reason (DW-52)", async () => {
     const queue = newQueue();
     const { root, second } = await deliveredEngagement(queue);
-    const fx = deps({ lib: () => ({ ok: false, status: "blocked", engagement: ENG, outcome: null, page: null, written: [], reason: "engage refused: NoScope: no _bmad-output/engagements/ENG-001/scope.md" }) });
+    const R1 = "engage refused: NoScope: no _bmad-output/engagements/ENG-001/scope.md";
+    const R2 = "engage refused: CloseoutInputInvalid: runs";
+    let answer: Record<string, unknown> = { ok: false, status: "blocked", engagement: ENG, outcome: null, page: null, written: [], reason: R1 };
+    const fx = deps({ prStates: { [PR_1]: "MERGED", [PR_2]: "MERGED" }, lib: () => answer });
+    // first: one ok:false event, one notice, refused, the state unmoved
     expect(await closeoutPass(queue, fx.deps)).toEqual({ closed: [], refused: [ENG] });
     expect(readEngagement(root, ENG)!.state).toBe("in-progress");
-    expect(closeouts(queue)).toEqual([{ engagement: ENG, project: "p", run_id: second, outcome: null, page: null, ok: false, reason: "engage refused: NoScope: no _bmad-output/engagements/ENG-001/scope.md", notify: { ok: true, via: "fake" } }]);
+    expect(closeouts(queue)).toEqual([{ engagement: ENG, project: "p", run_id: second, outcome: null, page: null, ok: false, reason: R1, notify: { ok: true, via: "fake" } }]);
+    expect(fx.notices.map((n) => n.state)).toEqual(["closeout-refused"]);
     expect(trackCalls(fx)).toEqual([]);
-    await closeoutPass(queue, fx.deps);
-    expect(libCalls(fx)).toHaveLength(1);
+    // the same reason next pass: the lib IS called; no new event, no notice; still refused
+    expect(await closeoutPass(queue, fx.deps)).toEqual({ closed: [], refused: [ENG] });
+    expect(libCalls(fx)).toHaveLength(2);
+    expect(closeouts(queue)).toHaveLength(1);
+    expect(fx.notices).toHaveLength(1);
+    // the reason changes: a second ok:false event and a second notice
+    answer = { ...answer, reason: R2 };
+    expect(await closeoutPass(queue, fx.deps)).toEqual({ closed: [], refused: [ENG] });
+    expect(libCalls(fx)).toHaveLength(3);
+    expect(closeouts(queue).map((e) => [e.ok, e.reason])).toEqual([[false, R1], [false, R2]]);
+    expect(fx.notices).toHaveLength(2);
+    expect(fx.notices[1]!.reason).toBe(`engagement ${ENG} closeout refused: ${R2}`);
+    // then success: run-ended applied, the issue closed, one ok event, a notice; the next pass calls no lib
+    answer = { ok: true, status: "complete", engagement: ENG, outcome: "delivered", page: PAGE, written: [REPORT], stories_left: [] };
+    expect(await closeoutPass(queue, fx.deps)).toEqual({ closed: [ENG], refused: [] });
+    expect(readEngagement(root, ENG)!.inputs.at(-1)).toMatchObject({ verb: "run-ended", from: "in-progress", to: "delivered", run_id: second });
+    expect(trackCalls(fx)).toHaveLength(1);
+    expect(closeouts(queue).map((e) => e.ok)).toEqual([false, false, true]);
+    expect(fx.notices).toHaveLength(3);
+    expect(await closeoutPass(queue, fx.deps)).toEqual({ closed: [], refused: [] });
+    expect(libCalls(fx)).toHaveLength(4);
   });
 
   test("a transient lib failure (retry: true, a throw, no JSON) emits nothing and is called again", async () => {
@@ -571,7 +595,7 @@ describe("Story 32.8 follow-up review: a closed PR, a record moved on, another p
     expect(fx.ghCalls).toEqual([]);
   });
 
-  test("run-ended applied, the issue close transient, the record since moved on (go {cap} → in-progress, revise → scoping): no close, no notice, no event", async () => {
+  test("run-ended applied, the issue close transient, the record since moved on (revise → scoping): no close, no notice, no event; a go {cap} → in-progress supersedes that line (DW-53): re-closed from in-progress", async () => {
     for (const verb of ["go", "revise"] as const) {
       const queue = newQueue();
       const root = servedRoot(queue);
@@ -587,6 +611,14 @@ describe("Story 32.8 follow-up review: a closed PR, a record moved on, another p
       writeEngagement(root, moved.record);
       expect(readEngagement(root, ENG)!.state).toBe(verb === "go" ? "in-progress" : "scoping");
       const fx = deps({ lib: partialLib });
+      if (verb === "go") {
+        // the run-ended line predates the go: not the transient path's; the unstopped run is closed out again
+        expect(await closeoutPass(queue, fx.deps)).toEqual({ closed: [ENG], refused: [] });
+        expect(libCalls(fx)).toHaveLength(1);
+        expect(readEngagement(root, ENG)!.inputs.at(-1)).toMatchObject({ verb: "run-ended", from: "in-progress", to: "partial", run_id: run });
+        expect(closeouts(queue).map((e) => [e.run_id, e.ok])).toEqual([[run, true]]);
+        continue;
+      }
       expect(await closeoutPass(queue, fx.deps)).toEqual({ closed: [], refused: [] });
       expect(fx.uvCalls).toEqual([]);
       expect(fx.notices).toEqual([]);
@@ -609,9 +641,154 @@ describe("Story 32.8 follow-up review: a closed PR, a record moved on, another p
     const { second: second2 } = await deliveredEngagement(queue2);
     const other2 = { ...other, run_id: second2, outcome: null, ok: false, reason: "engage refused: NoScope" };
     const fx2 = deps({ lib: () => { queue2.serviceEvent(CLOSEOUT_EVENT, other2); return { ok: false, status: "blocked", engagement: ENG, outcome: null, page: null, written: [], reason: "engage refused: NoScope" }; } });
-    expect(await closeoutPass(queue2, fx2.deps)).toEqual({ closed: [], refused: [] });
+    // DW-52: the same reason as the newest refusal: no notice, no event (still refused)
+    expect(await closeoutPass(queue2, fx2.deps)).toEqual({ closed: [], refused: [ENG] });
     expect(fx2.notices).toEqual([]);
     expect(closeouts(queue2)).toEqual([other2]);
+  });
+});
+
+describe("DW-53: go after an unstopped end (TKSTUDIO-218, option A)", () => {
+  /** One linked run ended on its own, closed out `partial` with `stories_left`, then the owner's `go {cap}`. */
+  async function goAfterUnstopped(queue: Queue, storiesLeft: string[] | undefined) {
+    const root = servedRoot(queue, { bound: false });
+    const run = link(queue, root);
+    await launch(queue, run);
+    queue.end(run, "complete");
+    const libAnswers: Record<string, unknown>[] = [];
+    const fx = deps({ lib: () => libAnswers.shift() ?? { ok: false, status: "partial", retry: true } });
+    libAnswers.push({ ok: true, status: "complete", engagement: ENG, outcome: "partial", page: null, written: [REPORT], ...(storiesLeft ? { stories_left: storiesLeft } : {}) });
+    expect((await closeoutPass(queue, fx.deps)).closed).toEqual([ENG]);
+    expect(readEngagement(root, ENG)!.state).toBe("partial");
+    expect(closeouts(queue)[0]!.stories_left).toEqual(storiesLeft ?? []);
+    const go = applyInput(readEngagement(root, ENG)!, { verb: "go", payload: { cap: 80 }, source: "bearer", at: "2026-10-25T09:00:00.000Z" });
+    if (!go.ok) throw new Error("go refused");
+    writeEngagement(root, go.record);
+    const submitted: string[] = [];
+    fx.deps.submit = async (job) => { submitted.push(job); throw new Error("submit refused"); };
+    return { root, run, fx, libAnswers, submitted };
+  }
+
+  test("none remain: step 7 resubmits nothing; the same tick's closeout pass re-closes from in-progress (a second ok event for the run)", async () => {
+    for (const left of [[], undefined, ["31-2"]]) {
+      const queue = newQueue();
+      const { root, run, fx, libAnswers, submitted } = await goAfterUnstopped(queue, left);
+      expect(readEngagement(root, ENG)!.state).toBe("in-progress");
+      expect((await engagementRunPass(queue, fx.deps)).resubmitted).toEqual([]);
+      expect(submitted).toEqual([]);
+      libAnswers.push({ ok: true, status: "complete", engagement: ENG, outcome: "delivered", page: PAGE, written: [REPORT], stories_left: [] });
+      expect(await closeoutPass(queue, fx.deps)).toEqual({ closed: [ENG], refused: [] });
+      expect(libCalls(fx)).toHaveLength(2);
+      const r = readEngagement(root, ENG)!;
+      expect(r.state).toBe("delivered");
+      expect(r.inputs.at(-1)).toMatchObject({ verb: "run-ended", from: "in-progress", to: "delivered", run_id: run });
+      expect(closeouts(queue).map((e) => [e.run_id, e.ok, e.outcome])).toEqual([[run, true, "partial"], [run, true, "delivered"]]);
+      expect(fx.notices).toHaveLength(2);
+      // told: the next pass calls no lib
+      expect(await closeoutPass(queue, fx.deps)).toEqual({ closed: [], refused: [] });
+      expect(libCalls(fx)).toHaveLength(2);
+    }
+  });
+
+  test("none remain, the lib transient on the re-close: nothing emitted, retried at the next pass", async () => {
+    const queue = newQueue();
+    const { root, fx, libAnswers } = await goAfterUnstopped(queue, []);
+    await engagementRunPass(queue, fx.deps);
+    expect(await closeoutPass(queue, fx.deps)).toEqual({ closed: [], refused: [] }); // the default answer: retry
+    expect(readEngagement(root, ENG)!.state).toBe("in-progress");
+    expect(closeouts(queue)).toHaveLength(1);
+    libAnswers.push({ ok: true, status: "complete", engagement: ENG, outcome: "partial", page: null, written: [REPORT], stories_left: [] });
+    expect((await closeoutPass(queue, fx.deps)).closed).toEqual([ENG]);
+    expect(readEngagement(root, ENG)!.state).toBe("partial");
+    expect(closeouts(queue)).toHaveLength(2);
+  });
+
+  test("stories remain in the job's epic: step 7 resubmits with after_run; the closeout pass calls no lib — nor after a submit throwing", async () => {
+    const queue = newQueue();
+    const { root, run, fx, submitted } = await goAfterUnstopped(queue, ["41-2"]);
+    // the submit throws: nothing queued, no re-close
+    expect((await engagementRunPass(queue, fx.deps)).resubmitted).toEqual([]);
+    expect(submitted).toEqual(["run-epic-41"]);
+    expect(await closeoutPass(queue, fx.deps)).toEqual({ closed: [], refused: [] });
+    expect(libCalls(fx)).toHaveLength(1);
+    expect(readEngagement(root, ENG)!.state).toBe("in-progress");
+    // the submit answers: the new run linked after the ended one; still no re-close
+    fx.deps.submit = async (job, served, opts) => {
+      submitted.push(job);
+      return { run_id: queue.enqueue({ jobId: job, root: served, projectId: "p", definition: { id: job }, payload: opts.payload }).run.run_id };
+    };
+    expect((await engagementRunPass(queue, fx.deps)).resubmitted).toEqual([ENG]);
+    expect(submitted).toEqual(["run-epic-41", "run-epic-41"]);
+    const queued = queue.serviceEvents(RUN_QUEUED_EVENT).map((e) => e.detail as Record<string, any>).filter((d) => d.after_run === run);
+    expect(queued).toEqual([{ engagement: ENG, project: "p", run_id: expect.any(String), job: "run-epic-41", after_run: run }]);
+    expect(await closeoutPass(queue, fx.deps)).toEqual({ closed: [], refused: [] });
+    expect(libCalls(fx)).toHaveLength(1);
+  });
+
+  test("a go from partial with a cap at or below runs_usd: step 2 re-caps to partial; the earlier close-out stands (no lib, no second event)", async () => {
+    for (const cap of [40, 50]) {
+      const queue = newQueue();
+      const root = servedRoot(queue, { bound: false, runsUsd: 50 });
+      const run = link(queue, root);
+      await launch(queue, run);
+      queue.end(run, "complete");
+      const fx = deps({ lib: () => ({ ok: true, status: "complete", engagement: ENG, outcome: "partial", page: null, written: [REPORT], stories_left: [] }) });
+      expect((await closeoutPass(queue, fx.deps)).closed).toEqual([ENG]);
+      expect(readEngagement(root, ENG)!.state).toBe("partial");
+      const go = applyInput(readEngagement(root, ENG)!, { verb: "go", payload: { cap }, source: "bearer", at: "2026-10-25T09:00:00.000Z" });
+      if (!go.ok) throw new Error("go refused");
+      writeEngagement(root, go.record);
+      expect(readEngagement(root, ENG)!.state).toBe("in-progress");
+      const submitted: string[] = [];
+      fx.deps.submit = async (job) => { submitted.push(job); throw new Error("submit refused"); };
+      expect((await engagementRunPass(queue, fx.deps)).resubmitted).toEqual([]);
+      expect(submitted).toEqual([]);
+      const r = readEngagement(root, ENG)!;
+      expect(r.state).toBe("partial");
+      expect(r.inputs.at(-1)).toMatchObject({ verb: "cap", from: "in-progress", to: "partial" });
+      expect(await closeoutPass(queue, fx.deps)).toEqual({ closed: [], refused: [] });
+      expect(libCalls(fx)).toHaveLength(1);
+      expect(closeouts(queue)).toHaveLength(1);
+      expect(fx.notices.filter((n) => (n.reason ?? "").startsWith(`engagement ${ENG} partial: `))).toHaveLength(1); // the close-out's, not the cap's
+    }
+  });
+
+  test("the issue close transient on the first pass: the run-ended row keeps the lib's stories_left; the retry's ok event carries it, so a later go resubmits, never re-closes", async () => {
+    const queue = newQueue();
+    const job = "run-epic-32";
+    const root = servedRoot(queue, { jobs: [job] });
+    const run = link(queue, root, { job });
+    await launch(queue, run);
+    queue.end(run, "complete");
+    let transient = true;
+    const fx = deps({
+      lib: () => ({ ok: true, status: "complete", engagement: ENG, outcome: "partial", page: null, written: [REPORT], stories_left: ["32-3"] }),
+      track: () => (transient ? { ok: false, status: "partial", retry: true } : { ok: true, status: "complete", issue: ISSUE }),
+    });
+    expect((await closeoutPass(queue, fx.deps)).closed).toEqual([]);
+    expect(readEngagement(root, ENG)!.inputs.at(-1)).toMatchObject({ verb: "run-ended", to: "partial", detail: { outcome: "partial", run_id: run, closeout: REPORT, stories_left: ["32-3"] } });
+    expect(closeouts(queue)).toEqual([]);
+    // the retry pass: no lib, the ok event with the row's stories_left
+    transient = false;
+    expect((await closeoutPass(queue, fx.deps)).closed).toEqual([ENG]);
+    expect(libCalls(fx)).toHaveLength(1);
+    expect(closeouts(queue).map((e) => [e.run_id, e.ok, e.stories_left])).toEqual([[run, true, ["32-3"]]]);
+    // the owner's go {cap}: step 7 resubmits after the run; the closeout pass calls no lib and writes no event
+    const go = applyInput(readEngagement(root, ENG)!, { verb: "go", payload: { cap: 80 }, source: "bearer", at: "2026-10-25T09:00:00.000Z" });
+    if (!go.ok) throw new Error("go refused");
+    writeEngagement(root, go.record);
+    const submitted: string[] = [];
+    fx.deps.submit = async (j, served, opts) => {
+      submitted.push(j);
+      return { run_id: queue.enqueue({ jobId: j, root: served, projectId: "p", definition: { id: j }, payload: opts.payload }).run.run_id };
+    };
+    expect((await engagementRunPass(queue, fx.deps)).resubmitted).toEqual([ENG]);
+    expect(submitted).toEqual([job]);
+    const queued = queue.serviceEvents(RUN_QUEUED_EVENT).map((e) => e.detail as Record<string, any>).filter((d) => d.after_run === run);
+    expect(queued).toEqual([{ engagement: ENG, project: "p", run_id: expect.any(String), job, after_run: run }]);
+    expect(await closeoutPass(queue, fx.deps)).toEqual({ closed: [], refused: [] });
+    expect(libCalls(fx)).toHaveLength(1);
+    expect(closeouts(queue)).toHaveLength(1);
   });
 });
 
