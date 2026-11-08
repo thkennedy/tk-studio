@@ -5,8 +5,9 @@
  *              (worktree and engine recorded) has the story its engine paused on read from its latest
  *              `paused` event (`engine.paused_story_key`, carried by `engineStatus`), and that story's spec
  *              found in the worktree (`_bmad-output/implementation-artifacts/spec-<key>.md`, else the single
- *              match of `_bmad-output/specs/<any>/stories/<key>-*.md`; only the frontmatter `status` and
- *              `reconcile_verdict` are read). Six outcomes:
+ *              match of `_bmad-output/specs/<any>/stories/<key>-*.md`; Story 38.5 (DW-177): the exact
+ *              `<key>-spec.md` there first, and the glob only when one file matches with the `-s<n>` and `-r<n>`
+ *              names excluded; only the frontmatter `status` and `reconcile_verdict` are read). Six outcomes:
  *                - Story 33.6, checked first among the stories that did not land: a stale render view (hole 65) —
  *                  paused at stage `escalation` on `CRITICAL escalation from dev session`, the reason quoting a
  *                  renderer message (`corrupt existing generation`, `generation contains unexpected or missing
@@ -64,13 +65,24 @@
  *                  block, call and record, once per (story key, engine run id) since the latest `paused`, the
  *                  `--reason` the `paused` event's engine `paused_reason` (clipped; "story escalated: awaiting a
  *                  ruling" when empty); no `awaiting-ruling` event, no notification, the run left `paused` for
- *                  `POST /runs/{id}/resume`;
+ *                  `POST /runs/{id}/resume`; Story 38.5 (DW-176): a pause the engine's own clock caused
+ *                  (`engineClockPause`: the `paused_reason` naming a `session timeout`, or the journal's latest
+ *                  `session-end` before `run-paused` reading `status: "timeout"`) is blocked with `--reason "engine
+ *                  clock: <paused_reason>" --resolves "the supervisor resumes the run (POST /runs/<id>/resume)"
+ *                  --kind engine` (no owner action, no mention), its `track-block` gaining `kind: "engine"`;
  *                - anything else (no story key, no spec, a spec not done at another paused stage): nothing is
  *                  done — the run stays `paused` for `POST /runs/{id}/resume` (`resumePaused`).
  *              The pass takes the run as the sweep does (`Queue.takeForCloseOut`, released after), so `serve`
  *              and a tick never close the same run out twice.
  *              Story 35.7: a `run-sweep` run (`isSweep`) is never taken here — a sweep is never relaunched as an
  *              epic; the engine sweep closes a paused sweep out as an end (`sweep.ts`).
+ *   the leg    Story 38.5 (CAP-13, superseding 37.3's leg in the engines loop): `pausedLegs`, the last pass of every
+ *              recover, drain and run (after `sweepEnds`): at most one paused non-sweep run per pass, oldest pause
+ *              first, whose landing owes nothing unsent and with no leg recorded for its code head (`codeHead`),
+ *              gets its leg under `takeForCloseOut` — a dirty tree one `host-verify {skipped: true, reason: "paused:
+ *              dirty tree", code_head}`, else the code leg and the paused PR flipped (green: ready; otherwise a
+ *              draft), noted as one `host-verify {…, code_head, paused_leg: {pr, flip}}`. The boundary's leg
+ *              (`boundaryLeg`) reuses a leg recorded for the same code head: one commit set, one leg.
  *   close-out  in the run's kept worktree, on its `supervisor/run-<id>` branch, in this order, each step
  *              idempotent; a failed step leaves the run `paused` with one `close-out-failed` event per
  *              (step, error), never undoes a done step, and the next pass retries:
@@ -131,11 +143,11 @@ import { join, relative, resolve } from "node:path";
 import { jiraBound } from "./planseams";
 import { notifier, sbxBin } from "./env";
 import { canonicalPr, isWithin, notify, NOTICE_MAX_BYTES, sendText, TRUNCATED_MARKER, type EndNotice } from "./hygiene";
-import { hostVerify, inconclusiveReason, isInconclusive, isRed, isSlice, legGuard, legHistory, noteCloseOutLease, redReason, type HostVerifyResult, type LegHistoryEntry } from "./hostverify";
+import { hostVerify, inconclusiveReason, isInconclusive, isRed, isSlice, legGuard, legHistory, legVerdict, noteCloseOutLease, redReason, type HostVerifyResult, type LegHistoryEntry } from "./hostverify";
 import { engineRoot, isSweep, isTerminal, RunTerminal, selfOwner, servedRoot, STUDIO_END_RETRY_LIMIT, type EngineWhere, type Owner, type Queue, type QueueEvent, type QueueRun, type TerminalState } from "./queue";
 import { HOLD_TIMEOUT_S, parseEnginePid, sameStart, type HoldChild } from "./sandbox";
 import { lastJsonObject, runProcess, toVmPath, type RunResult } from "./server";
-import { applyTransition, autoRunResult, blockingCondition, closeOut, closeOutDetail, ENGINE_ENDED, engineState, findSpec, finishStudio, frontmatter, killedEngine, launchedCloseOutInput, meteredCost, priorPr, recordedVerify, release, renderSignature, renderSnapshot, runner, snapshotReady, specUntracked, stashedSpec, studioScript, uvRunner, type PendingTransition, type WorktreeDeps } from "./worktree";
+import { applyTransition, autoRunResult, blockingCondition, closeOut, closeOutDetail, codeHead, commitsAhead, editPrBody, ENGINE_ENDED, engineState, findSpec, finishStudio, frontmatter, killedEngine, launchedCloseOutInput, legForHead, markPrDraft, markPrReady, meteredCost, PAUSED_DIRTY, prBody, priorPr, recordedVerify, release, renderSignature, renderSnapshot, runner, snapshotReady, specUntracked, stashedSpec, studioScript, treeClean, uvRunner, type PendingTransition, type WorktreeDeps } from "./worktree";
 import { engineStopArgv, stopEngine } from "./runners";
 
 type Env = Record<string, string | undefined>;
@@ -459,7 +471,11 @@ interface BoundaryLeg { verify?: HostVerifyResult; slice: boolean; legs: readonl
  * else one leg, one `host-verify`. */
 async function boundaryLeg(queue: Queue, run: QueueRun, deps: PausedDeps): Promise<BoundaryLeg> {
   const slice = isSlice(queue.definition(run));
-  let verify = recordedVerify(queue.events(run.run_id)), killed = false;
+  // Story 38.5 (CAP-13): read after the harvest commit (`git add -A`): one holding only `_bmad-output/` leaves the code head
+  // where the pause's leg found it, and that leg is reused (one commit set, one leg); one that also commits code the engine
+  // left uncommitted moves the head, and a fresh leg runs. A slice run never reuses a code-only leg (its assets and proof).
+  const head = await codeHead(run, deps);
+  let verify = recordedVerify(queue.events(run.run_id), head, slice), killed = false;
   if (!verify) {
     killed = !!(await killedEngine(queue, run));
     if (!killed) {
@@ -467,7 +483,7 @@ async function boundaryLeg(queue: Queue, run: QueueRun, deps: PausedDeps): Promi
       const g = legGuard(queue.definition(run));
       noteCloseOutLease(queue, run.run_id, deps.self ?? selfOwner());
       verify = await hostVerify(run, g.seconds, deps, { ...(slice ? { slice } : {}), guardKey: g.key });
-      queue.note(run.run_id, "host-verify", verify as Record<string, unknown>);
+      queue.note(run.run_id, "host-verify", { ...verify, ...(head ? { code_head: head } : {}) } as Record<string, unknown>);
     }
   }
   return { ...(verify ? { verify } : {}), slice, legs: verify ? legHistory(queue.events(run.run_id)) : [], killed };
@@ -678,7 +694,9 @@ export function trackBlockSincePause(events: readonly QueueEvent[]): Record<stri
 
 /** Story 31.5: what a block names — the story key, its spec (a path) and the reason. The awaiting-ruling path
  * and a dev session's `blocked` end share it. */
-export interface BlockInput { story_key: string; spec: string; reason: string }
+export interface BlockInput { story_key: string; spec: string; reason: string;
+  /** Story 38.5 (DW-176): an engine-clock pause's block (`track.py block --kind engine`): no owner action, no mention. */
+  kind?: "engine" }
 
 /** The `--reason` of a dev session's `blocked` end when its spec names none. */
 export const DEV_BLOCKED_REASON = "dev session ended blocked";
@@ -700,17 +718,50 @@ export const ESCALATION_BLOCKED_REASON = "story escalated: awaiting a ruling";
  * neither `done` nor `blocked` (an engine-raised escalation awaiting a ruling): the latest `paused` event's engine
  * `paused_reason`, else `ESCALATION_BLOCKED_REASON`; undefined otherwise (reads only). A spec `blocked` is
  * `devBlocked`'s. */
-export function escalationBlocked(run: Pick<QueueRun, "worktree" | "prefix">, events: readonly QueueEvent[]): BlockInput | undefined {
+export function escalationBlocked(run: Pick<QueueRun, "worktree" | "prefix"> & { engine_run_id?: string | null }, events: readonly QueueEvent[]): BlockInput | undefined {
   const { key, stage, spec, fm } = storySpec(run, events);
   if (!key || !spec || stage !== "escalation") return undefined;
   const status = fmString(fm?.status);
   if (status === "done" || status === "blocked") return undefined;
-  return { story_key: key, spec, reason: clip(pausedStory(events).reason ?? "") || ESCALATION_BLOCKED_REASON };
+  const reason = pausedStory(events).reason;
+  // Story 38.5 (DW-176): the engine's own clock paused it (a session timeout): blocked with no owner action, no mention.
+  const served = servedRoot(run);
+  const runDir = served && run.engine_run_id ? join(served, ".bmad-loop", "runs", run.engine_run_id) : undefined;
+  if (engineClockPause(runDir, reason)) return { story_key: key, spec, reason: `engine clock: ${clip(reason ?? "") || "session timeout"}`, kind: "engine" };
+  return { story_key: key, spec, reason: clip(reason ?? "") || ESCALATION_BLOCKED_REASON };
 }
 
-/** `track.py block` argv (argv only, no shell). */
-export const trackArgs = (root: string, storyKey: string, reason: string, specPath: string): string[] =>
-  ["block", "--directory", root, "--story", storyKey, "--reason", reason, "--resolves", `a ruling in the spec (${specPath})`, "--source", "run"];
+/** Story 38.5 (DW-176): was the pause the engine's own clock — the `paused_reason` naming a `session timeout`, or the engine
+ * run dir's `journal.jsonl` segment after its latest `run-start`/`run-resume` whose latest `session-end` before its latest
+ * `run-paused` reads `status: "timeout"`? Reads only (`gracefulStopInForce`'s pattern); a missing or unreadable journal is
+ * no. Never throws. */
+export function engineClockPause(runDir: string | undefined, pausedReason: string | undefined): boolean {
+  try {
+    if (pausedReason && /\bsession timeout\b/.test(pausedReason)) return true;
+    if (!runDir) return false;
+    let text: string;
+    try { text = readFileSync(join(runDir, "journal.jsonl"), "utf-8"); } catch { return false; }
+    const entries: Record<string, unknown>[] = [];
+    for (const line of text.split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      try {
+        const e = JSON.parse(line);
+        if (e && typeof e === "object" && !Array.isArray(e)) entries.push(e as Record<string, unknown>);
+      } catch { /* an unparsable line is skipped */ }
+    }
+    const segment = entries.slice(entries.findLastIndex((e) => e.kind === "run-start" || e.kind === "run-resume") + 1);
+    const paused = segment.findLastIndex((e) => e.kind === "run-paused");
+    if (paused < 0) return false;
+    return segment.slice(0, paused).findLast((e) => e.kind === "session-end")?.status === "timeout";
+  } catch { return false; }
+}
+
+/** `track.py block` argv (argv only, no shell). Story 38.5 (DW-176): `kind: "engine"` (an engine-clock pause) resolves when
+ * the supervisor resumes the run (`runId`), `--kind engine`. */
+export const trackArgs = (root: string, storyKey: string, reason: string, specPath: string, kind?: "engine", runId?: string): string[] =>
+  kind === "engine"
+    ? ["block", "--directory", root, "--story", storyKey, "--reason", reason, "--resolves", `the supervisor resumes the run (POST /runs/${runId ?? "<run id>"}/resume)`, "--source", "run", "--kind", "engine"]
+    : ["block", "--directory", root, "--story", storyKey, "--reason", reason, "--resolves", `a ruling in the spec (${specPath})`, "--source", "run"];
 
 /** Is a block still owed for this pause (a bound project, none recorded)? */
 const trackOwed = (run: QueueRun, events: readonly QueueEvent[], storyKey: string): boolean =>
@@ -724,7 +775,7 @@ async function trackBlock(queue: Queue, run: QueueRun, l: BlockInput, deps: Paus
     const served = servedRoot(run);
     const spec = served ? relative(served, l.spec).split("\\").join("/") : l.spec;
     let r: RunResult;
-    try { r = await uvRunner(deps)(run.root, studioScript(deps, "lib", "track.py"), trackArgs(run.root, l.story_key, l.reason, spec), 120); }
+    try { r = await uvRunner(deps)(run.root, studioScript(deps, "lib", "track.py"), trackArgs(run.root, l.story_key, l.reason, spec, l.kind, run.run_id), 120); }
     catch { return false; /* transient: the next pass calls it again */ }
     const out = lastJsonObject(r.stdout) as Record<string, any> | null;
     if (!out || typeof out.status !== "string" || out.retry === true || (out.ok !== true && out.status !== "blocked")) return false; // transient
@@ -733,7 +784,7 @@ async function trackBlock(queue: Queue, run: QueueRun, l: BlockInput, deps: Paus
       : [];
     queue.note(run.run_id, "track-block", {
       story_key: l.story_key, engine_run_id: run.engine_run_id, ok: out.ok === true, status: out.status,
-      reason: typeof out.reason === "string" ? clip(out.reason, 500) : null, issues,
+      reason: typeof out.reason === "string" ? clip(out.reason, 500) : null, issues, ...(l.kind ? { kind: l.kind } : {}),
     });
     return true;
   } catch { return false; }
@@ -947,6 +998,103 @@ export async function closeOutPaused(queue: Queue, deps: PausedDeps = {}): Promi
     } catch { /* the next pass tries again */ }
     finally {
       // Let go of the lease on a run still paused (a relaunched run belongs to its drive, or the engine).
+      if (taken && queue.get(r.run_id)?.state === "paused") { try { queue.releaseCloseOut(r.run_id, self); } catch { /* re-taken once its owner is dead */ } }
+    }
+  }
+  return out;
+}
+
+// ------------------------------------------------------------ Story 38.5: the pause's leg, in its own pass
+
+/** Story 38.5 (CAP-13): does the paused run's landing owe nothing unsent, so its leg may run? An `awaiting-ruling` landing
+ * once its ruling is recorded and no block is owed; a story that did not land once the block it owes (if any) is recorded;
+ * never a `close-out` landing (`closeOutLanded` and its `boundaryLeg` own it). Reads only. */
+function legMayRun(run: QueueRun, events: readonly QueueEvent[]): boolean {
+  const l = landing(run, events);
+  if (l.outcome === "close-out") return false;
+  if (l.outcome === "awaiting-ruling") return rulingRecorded(events, l.story_key, run.engine_run_id) && !trackOwed(run, events, l.story_key);
+  const b = devBlocked(run, events) ?? escalationBlocked(run, events);
+  return !(b && trackOwed(run, events, b.story_key));
+}
+
+/** Story 38.5 (CAP-13): has this pause a leg for the code head — any `host-verify` since the latest `paused` with that head
+ * (a dirty skip too; with no head known, any)? */
+function legRecorded(events: readonly QueueEvent[], head: string | undefined): boolean {
+  const pause = events.findLastIndex((e) => e.kind === "paused");
+  return events.slice(pause + 1).some((e) => e.kind === "host-verify" && (head === undefined || e.detail?.code_head === head));
+}
+
+/** Story 38.5 (CAP-13, superseding 37.3's leg in the engines loop): the pause's leg, the last pass of every recover, drain
+ * and run (after `closeOutPaused`'s notice and block, and `sweepEnds`), so no other run's tick waits behind it. At most one
+ * leg per pass: the oldest `paused` non-sweep run (its latest `paused` first) whose worktree exists, whose engine the
+ * supervisor did not kill (`killedEngine`), whose landing owes nothing unsent (`legMayRun`; a no-story pause, its engine
+ * ended, never), and with no `host-verify` since its latest `paused` for its code head (`legRecorded`). Under
+ * `takeForCloseOut` (released in `finally`; a resume meanwhile answers `RunNotPaused`, "held by a live process"): a dirty tree
+ * (`treeClean`) notes one `host-verify {skipped: true, reason: "paused: dirty tree", code_head}` and nothing else; a clean
+ * tree whose head already has a ran leg (`legForHead`, reused by the pause's close-out) nothing; else the code leg
+ * (`hostVerify`, 38.1's `legGuard`, the close-out's lease noted first), the PR the pause recorded (`priorPr`) flipped —
+ * green (ran, `green: true`, not inconclusive): `gh pr ready` then `gh pr edit`; red, inconclusive or skipped: `gh pr ready
+ * --undo` then `gh pr edit` — and one `host-verify` = the leg + `code_head` + `paused_leg: {pr?, flip: "ready" | "draft" |
+ * "error: <…>" | "none"}`. Answers the runs it noted a leg for. Never throws. */
+export async function pausedLegs(queue: Queue, deps: PausedDeps = {}): Promise<string[]> {
+  const out: string[] = [];
+  const self = deps.self ?? selfOwner();
+  let runs: { run: QueueRun; at: number }[];
+  try {
+    runs = queue.runs().filter((r) => r.state === "paused" && r.worktree && r.engine_run_id && !isSweep(queue.definition(r)))
+      .map((run) => ({ run, at: queue.events(run.run_id).findLast((e) => e.kind === "paused")?.seq ?? 0 }))
+      .sort((a, b) => a.at - b.at);
+  } catch { return out; }
+  for (const { run: r } of runs) {
+    let taken = false;
+    try {
+      if (!existsSync(r.worktree!) || !existsSync(servedRoot(r)!)) continue;
+      const events = queue.events(r.run_id);
+      const engine = (events.findLast((e) => e.kind === "paused")?.detail?.engine ?? {}) as Record<string, unknown>;
+      if (engine.paused_stage === "no-story") continue; // an ended engine the sweep paused: no leg (38.2's no-changes skip)
+      if (!legMayRun(r, events)) continue;
+      const head = await codeHead(r, deps);
+      if (legRecorded(events, head)) continue;
+      if (legForHead(events, head) && await treeClean(r, deps)) continue; // reused by the pause's close-out
+      if (await killedEngine(queue, r)) continue;
+      const run = queue.takeForCloseOut(r.run_id, self);
+      if (!run || run.state !== "paused") continue;
+      taken = true;
+      // Re-read under the lease: a concurrent pass may have noted the leg between the read above and the take.
+      const held = queue.events(run.run_id);
+      if (legRecorded(held, head) || !legMayRun(run, held)) continue;
+      const headed = head ? { code_head: head } : {};
+      if (!(await treeClean(run, deps))) {
+        queue.note(run.run_id, "host-verify", { skipped: true, reason: PAUSED_DIRTY, ...headed });
+        out.push(run.run_id);
+        break;
+      }
+      // A clean tree whose head already has a ran leg (an earlier pause's): the pause's close-out reused it, never a second.
+      if (legForHead(held, head)) continue;
+      const g = legGuard(queue.definition(run));
+      noteCloseOutLease(queue, run.run_id, self);
+      // The code leg only: no assets verb writes into the tree the engine resumes (a slice's proof stays with its end).
+      const verify = await hostVerify(run, g.seconds, deps, { guardKey: g.key });
+      const pr = priorPr(held);
+      let flip = "none";
+      if (pr) {
+        const green = !verify.skipped && verify.green === true && !isInconclusive(verify);
+        const errors: string[] = [];
+        const marked = green ? await markPrReady(deps, run.worktree!, pr) : await markPrDraft(deps, run.worktree!, pr);
+        if (marked) errors.push(marked);
+        const now = queue.events(run.run_id);
+        const input = launchedCloseOutInput(now, run);
+        const commits = await commitsAhead(run, deps);
+        const legs = legHistory(now, { leg: "close-out", verdict: legVerdict(verify), recorded_at: new Date().toISOString() });
+        const edited = await editPrBody(deps, run.worktree!, pr, prBody({ ...input, engineRunId: run.engine_run_id, commits: commits ?? [], runId: run.run_id, verify, legs }));
+        if (edited) errors.push(edited);
+        flip = errors.length ? `error: ${errors.join("; ")}` : green ? "ready" : "draft";
+      }
+      queue.note(run.run_id, "host-verify", { ...verify, ...headed, paused_leg: { ...(pr ? { pr } : {}), flip } } as Record<string, unknown>);
+      out.push(run.run_id);
+      break;
+    } catch { /* the next pass tries again */ }
+    finally {
       if (taken && queue.get(r.run_id)?.state === "paused") { try { queue.releaseCloseOut(r.run_id, self); } catch { /* re-taken once its owner is dead */ } }
     }
   }

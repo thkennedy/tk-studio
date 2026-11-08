@@ -35,6 +35,12 @@
  *              Story 37.3 (DW-148): a paused run (not a sweep) on a clean tree gets the host leg for the commits already
  *              landed and its PR opens (or is marked) ready on green; a dirty paused tree skips the leg
  *              (`paused: dirty tree`) and the PR stays a draft (one an earlier green pause marked ready returns to a draft). The pause's leg is never reused for the engine's later end.
+ *              Story 38.5 (CAP-13, superseding the two sentences above): the engines loop runs no leg for a pause — it closes the
+ *              pause out reusing only a leg already recorded for the run's code head (`codeHead`), else as a draft with none —
+ *              and the leg is `pausedLegs`' (closeout.ts), after the pause's notice and block; every leg recorded here carries
+ *              `code_head`, and an end reuses the leg recorded for the same code head (`recordedVerify`), one commit set, one
+ *              leg. Story 38.5 (DW-166): the late terminal close-out opens or marks a PR ready only on a `complete` end a recorded
+ *              green or skipped leg vouches for (or a run that launched no engine); otherwise `killed` (the PR a draft).
  *              Story 27.4: an engine that ended on its own (not paused, not killed) first gets the host
  *              verify leg (`hostverify.ts`, a `host-verify` event); red ends the run `partial` naming the
  *              command and opens the PR as a draft carrying the failures (an open PR: `gh pr ready --undo` and
@@ -223,37 +229,110 @@ export const isDefaultBranch = (branch: string, theDefault: string): boolean => 
 /** The untracked runtime copied from the checkout into a worktree, each only when present. */
 export const COPIED_RUNTIME = [".bmad-loop/policy.toml", ".bmad-loop/routing.current.json", ".tk-studio/config.local.yaml"] as const;
 
-/** Story 37.3: the engine policy `materialise` edits (or writes) in a run worktree. */
+/** Story 37.3: the engine policy `materialise` edits in a run worktree. */
 const RUN_POLICY = ".bmad-loop/policy.toml";
 
-/** Story 37.3 (DW-148): `[scm] rollback_on_failure = true` in a policy's text, every other byte kept: the key's value
- * replaced inside `[scm]`, the key added right under the table header when the table lacks it, the table appended when
- * the policy has none. What the engine then removes on a failed attempt is its own rule (`verify.py safe_rollback`). */
-export function withRunWorktreeRollback(text: string): string {
+/** Story 38.5 (CAP-14): a TOML value token `rollback_on_failure` may carry in place: a bare boolean, or a basic or literal
+ * string (the quoted form the engine's own parse would refuse). */
+const ROLLBACK_VALUE = String.raw`(?:(?:true|false)\b|"(?:[^"\\]|\\.)*"|'[^']*')`;
+
+/** Story 38.5 (CAP-14): the targeted line edit by the form that defines `scm.rollback_on_failure` (TOML allows one
+ * definition site): (a) a bare boolean or (b) a quoted value under `[scm]` (the value token replaced, indentation and a
+ * trailing comment kept; the key absent there: inserted right under the header, 37.3); (c) a dotted root key
+ * `scm.rollback_on_failure` before the first header (replaced; other `scm.` dotted keys only: inserted after the last);
+ * (d) a one-line inline table `scm = { … }` (the key replaced inside the braces, else appended before `}`); no `scm` at
+ * all: the table appended (37.3). Undefined: no in-place form (a multi-line inline table, an `[scm.<sub>]`-only
+ * definition, another value) — the caller re-serialises. CRLF kept. */
+function rollbackLineEdit(text: string): string | undefined {
   const lines = text.split("\n");
   const header = (l: string) => /^\s*\[\[?\s*([^\]]+?)\s*\]\]?\s*(#.*)?\r?$/.exec(l);
+  const eolOf = (l: string) => (l.endsWith("\r") ? "\r" : "");
+  const firstHeader = lines.findIndex((l) => header(l));
+  const root = firstHeader < 0 ? lines.length : firstHeader;
   const scm = lines.findIndex((l) => header(l)?.[1] === "scm");
-  if (scm < 0) return `${text}${text === "" ? "" : text.endsWith("\n") ? "\n" : "\n\n"}[scm]\nrollback_on_failure = true\n`;
-  for (let i = scm + 1; i < lines.length && !header(lines[i]!); i++) {
-    const m = /^(\s*rollback_on_failure\s*=\s*)(true|false)\b/.exec(lines[i]!);
-    if (m) { lines[i] = `${m[1]}true${lines[i]!.slice(m[0].length)}`; return lines.join("\n"); }
+  if (scm >= 0) {
+    for (let i = scm + 1; i < lines.length && !header(lines[i]!); i++) {
+      const m = new RegExp(`^(\\s*rollback_on_failure\\s*=\\s*)${ROLLBACK_VALUE}`).exec(lines[i]!);
+      if (m) { lines[i] = `${m[1]}true${lines[i]!.slice(m[0].length)}`; return lines.join("\n"); }
+      if (/^\s*rollback_on_failure\s*=/.test(lines[i]!)) return undefined; // another value: no in-place form
+    }
+    lines.splice(scm + 1, 0, `rollback_on_failure = true${eolOf(lines[scm]!)}`);
+    return lines.join("\n");
   }
-  const eol = lines[scm]!.endsWith("\r") ? "\r" : "";
-  lines.splice(scm + 1, 0, `rollback_on_failure = true${eol}`);
-  return lines.join("\n");
+  let lastDotted = -1;
+  for (let i = 0; i < root; i++) {
+    const l = lines[i]!;
+    const dotted = new RegExp(`^(\\s*scm\\s*\\.\\s*rollback_on_failure\\s*=\\s*)${ROLLBACK_VALUE}`).exec(l);
+    if (dotted) { lines[i] = `${dotted[1]}true${l.slice(dotted[0].length)}`; return lines.join("\n"); }
+    if (/^\s*scm\s*\.\s*rollback_on_failure\s*=/.test(l)) return undefined;
+    if (/^\s*scm\s*\./.test(l)) lastDotted = i;
+    if (/^\s*scm\s*=\s*\{/.test(l)) {
+      const eol = eolOf(l);
+      const inline = /^(\s*scm\s*=\s*\{)(.*)\}(\s*(?:#.*)?)$/.exec(eol ? l.slice(0, -1) : l);
+      if (!inline) return undefined; // a multi-line inline table
+      const inner = inline[2]!;
+      const key = new RegExp(`(^|,)(\\s*rollback_on_failure\\s*=\\s*)${ROLLBACK_VALUE}`).exec(inner);
+      let body: string;
+      if (key) body = `${inner.slice(0, key.index)}${key[1]}${key[2]}true${inner.slice(key.index + key[0].length)}`;
+      else if (/rollback_on_failure/.test(inner)) return undefined;
+      else if (!inner.trim()) body = " rollback_on_failure = true ";
+      else body = `${inner.replace(/\s*$/, "")}, rollback_on_failure = true${inner.match(/\s*$/)![0]}`;
+      lines[i] = `${inline[1]}${body}}${inline[3]}${eol}`;
+      return lines.join("\n");
+    }
+  }
+  if (lastDotted >= 0) {
+    lines.splice(lastDotted + 1, 0, `scm.rollback_on_failure = true${eolOf(lines[lastDotted]!)}`);
+    return lines.join("\n");
+  }
+  // `[scm.<sub>]` (or `[[scm]]`) defines the table without a header of its own: no in-place form.
+  if (lines.some((l) => /^scm\s*\./.test(header(l)?.[1] ?? ""))) return undefined;
+  return `${text}${text === "" ? "" : text.endsWith("\n") ? "\n" : "\n\n"}[scm]\nrollback_on_failure = true\n`;
 }
 
-/** Story 37.3 (DW-148): the run worktree's policy (copied, or already there) edited atomically (a tmp file renamed onto
- * it) and verified with `Bun.TOML.parse`; a worktree with none gets one holding only `[scm] rollback_on_failure = true`
- * (the engine default is false). A policy that does not parse to `scm.rollback_on_failure = true` is restored (one that
- * did not exist removed) and refused by name. */
+/** Story 37.3 (DW-148), Story 38.5 (CAP-14): `scm.rollback_on_failure = true` in a policy's text by the targeted line
+ * edit (`rollbackLineEdit`); a form with no in-place edit is answered unchanged (the caller re-serialises). What the
+ * engine then removes on a failed attempt is its own rule (`verify.py safe_rollback`). */
+export function withRunWorktreeRollback(text: string): string {
+  return rollbackLineEdit(text) ?? text;
+}
+
+const isTable = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v) && !(v instanceof Date);
+
+/** Story 37.3 (DW-148), Story 38.5 (CAP-14): the run worktree's policy edited atomically (a tmp file renamed onto it) and
+ * verified with `Bun.TOML.parse`. A worktree with no policy after the copy is refused by name (`worktree policy: none in
+ * the checkout`), never given a stub; one that does not parse is refused untouched; one already reading
+ * `scm.rollback_on_failure = true` is not written. The candidate — the targeted line edit, else (no in-place form, or a
+ * candidate that does not hold) the document re-serialised with `Bun.TOML.stringify` (comments and layout not kept,
+ * every value kept) — is accepted only when it parses to the original document with that one key set; no serialiser, or
+ * a re-serialised policy that does not hold, is refused by name. A write whose parse after does not hold is restored and
+ * refused by name. */
 function runWorktreeRollback(policy: string): void {
-  const original = existsSync(policy) ? readFileSync(policy, "utf-8") : null;
-  const edited = withRunWorktreeRollback(original ?? "");
-  if (edited === original) return;
+  if (!existsSync(policy)) throw new WorktreeFailed("policy", "none in the checkout");
+  const refused = (why: string, after = "the original kept") => new WorktreeFailed("policy", `${RUN_POLICY} rollback_on_failure = true refused (${why}); ${after}`);
+  let original: string, doc: Record<string, unknown>;
+  try { original = readFileSync(policy, "utf-8"); } catch (e) { throw new WorktreeFailed("policy", `${RUN_POLICY}: ${clip(message(e))}`); }
+  try { doc = Bun.TOML.parse(original) as Record<string, unknown>; } catch (e) { throw refused(`does not parse: ${clip(message(e))}`); }
+  if (isTable(doc.scm) && doc.scm.rollback_on_failure === true) return;
+  if (doc.scm !== undefined && !isTable(doc.scm)) throw refused("scm is not a table");
+  const want = { ...doc, scm: { ...(doc.scm as Record<string, unknown> | undefined), rollback_on_failure: true } };
+  const holds = (text: string): boolean => {
+    try {
+      const d = Bun.TOML.parse(text) as Record<string, any>;
+      return d?.scm?.rollback_on_failure === true && Bun.deepEquals(d, want);
+    } catch { return false; }
+  };
+  let edited = rollbackLineEdit(original);
+  if (edited === undefined || !holds(edited)) {
+    const stringify = (Bun.TOML as { stringify?: (input: unknown) => string | undefined }).stringify;
+    if (typeof stringify !== "function") throw refused("no in-place form and no TOML serialiser");
+    let serialised: string | undefined;
+    try { serialised = stringify(want); } catch { serialised = undefined; }
+    if (typeof serialised !== "string" || !holds(serialised)) throw refused("no in-place form, and the re-serialised policy does not hold it");
+    edited = serialised;
+  }
   const tmp = `${policy}.tmp-${process.pid}`;
   try {
-    mkdirSync(dirname(policy), { recursive: true });
     writeFileSync(tmp, edited, "utf-8");
     renameSync(tmp, policy); // a tmp file renamed onto a file: replaced on win32 too
   } catch (e) { rmSync(tmp, { force: true }); throw new WorktreeFailed("policy", `${RUN_POLICY}: ${clip(message(e))}`); }
@@ -261,9 +340,8 @@ function runWorktreeRollback(policy: string): void {
   try { ok = (Bun.TOML.parse(readFileSync(policy, "utf-8")) as any)?.scm?.rollback_on_failure === true; }
   catch (e) { why = `does not parse: ${clip(message(e))}`; }
   if (ok) return;
-  if (original === null) rmSync(policy, { force: true });
-  else writeFileSync(policy, original, "utf-8");
-  throw new WorktreeFailed("policy", `${RUN_POLICY} rollback_on_failure = true refused (${why}); ${original === null ? "the written policy removed" : "the original restored"}`);
+  writeFileSync(policy, original, "utf-8");
+  throw refused(why, "the original restored");
 }
 
 /** What `materialise` did about the base: `tk install` ran because the fresh worktree reported drift, or
@@ -302,8 +380,8 @@ export function driftingPlanes(out: Record<string, any> | null | undefined): str
  * committed config into a dirty tree the launch refuses), the policy/routing/overlay files copied from the
  * checkout (when present), and `tk activate` clean inside it on the planes materialise judges (hole 75:
  * the `sandbox-login` plane is reported, never judged). Story 37.3 (DW-148): the worktree's policy then reads
- * `[scm] rollback_on_failure = true` — copied or not, written when it has none (`runWorktreeRollback`; the
- * checkout's copy untouched). Throws `WorktreeFailed` naming the step. */
+ * `[scm] rollback_on_failure = true` (`runWorktreeRollback`; the checkout's copy untouched); Story 38.5 (CAP-14): a
+ * worktree with none is refused (`worktree policy: none in the checkout`). Throws `WorktreeFailed` naming the step. */
 export async function materialise(checkout: string, worktree: string, deps: WorktreeDeps = {}): Promise<{ copied: string[]; install: MaterialiseInstall }> {
   const uv = uvRunner(deps);
   const driftCheck = async (): Promise<{ out: Record<string, any> | null; res: RunResult }> => {
@@ -334,8 +412,8 @@ export async function materialise(checkout: string, worktree: string, deps: Work
       copied.push(rel);
     }
   } catch (e) { throw new WorktreeFailed("copy", clip(message(e))); }
-  // Story 37.3 (DW-148): the run worktree's policy turns the engine's own rollback on (never a main checkout's), whether
-  // copied, already in the worktree, or absent (then written with only that table; `copied` never lists it).
+  // Story 37.3 (DW-148): the run worktree's policy turns the engine's own rollback on (never a main checkout's), copied or
+  // already in the worktree. Story 38.5 (CAP-14): absent, the run is refused by name (never a stub).
   runWorktreeRollback(join(worktree, RUN_POLICY));
   const { out: drift, res: last } = await driftCheck();
   if (!worktreeClean(drift)) throw new WorktreeFailed("activate drift", drift ? driftingPlanes(drift) : failed(last));
@@ -649,11 +727,31 @@ const BMAD_ARTIFACTS = ":(exclude,glob)_bmad-outpu[t]/**";
  * leaves the tree clean)? A failed probe reads dirty (the leg never judges an unknown tree). Never throws. */
 export async function treeClean(run: Pick<QueueRun, "worktree" | "prefix">, deps: WorktreeDeps = {}): Promise<boolean> {
   if (!run.worktree || !existsSync(run.worktree)) return false;
-  const artifacts = run.prefix ? BMAD_ARTIFACTS.replace(":(exclude,glob)", () => `:(exclude,glob)${globLiteral(run.prefix!)}`) : BMAD_ARTIFACTS;
   try {
-    const st = await git(deps, run.worktree, ["status", "--porcelain", "--untracked-files=all", "--", ".", ...engineState(run.prefix), artifacts], 60);
+    const st = await git(deps, run.worktree, ["status", "--porcelain", "--untracked-files=all", "--", ...attemptPathspec(run.prefix)], 60);
     return st.exit === 0 && st.stdout.trim() === "";
   } catch { return false; }
+}
+
+/** The attempt's pathspecs (argv only, bracketed globs): everything but the engine's runtime state, the materialised copies
+ * and the BMAD artifact folder at the project's prefix (`treeClean`'s, shared by `codeHead`). */
+function attemptPathspec(prefix?: string | null): string[] {
+  const artifacts = prefix ? BMAD_ARTIFACTS.replace(":(exclude,glob)", () => `:(exclude,glob)${globLiteral(prefix)}`) : BMAD_ARTIFACTS;
+  return [".", ...engineState(prefix), artifacts];
+}
+
+/** Story 38.5 (CAP-13): the run's code head — `git -C <worktree> log -1 --format=%H -- <the attempt's pathspecs>`, the
+ * newest commit touching anything but the engine state, the materialised copies and `_bmad-output/` (the `treeClean`
+ * pathspecs), so a harvest commit holding only `_bmad-output/` (spec status, stage rows) does not move it; the harvest is a
+ * `git add -A`, so one that also commits code the engine left uncommitted moves it (and a fresh leg runs). Undefined on any failure (no
+ * worktree, git failed, no such commit). Never throws. */
+export async function codeHead(run: Pick<QueueRun, "worktree" | "prefix">, deps: WorktreeDeps = {}): Promise<string | undefined> {
+  if (!run.worktree || !existsSync(run.worktree)) return undefined;
+  try {
+    const r = await git(deps, run.worktree, ["log", "-1", "--format=%H", "--", ...attemptPathspec(run.prefix)], 60);
+    const head = r.stdout.trim();
+    return r.exit === 0 && /^[0-9a-f]{7,64}$/.test(head) ? head : undefined;
+  } catch { return undefined; }
 }
 
 /** Story 36.3: a paused bundle's WIP commit's message. */
@@ -964,10 +1062,34 @@ export function priorPr(events: readonly QueueEvent[]): string | undefined {
   return undefined;
 }
 
+/** Story 38.5: may this `host-verify` record be reused as a leg? Never a `paused: dirty tree` skip (it vouches for nothing:
+ * the pause's tree was not judged); on a slice run (`slice`), never a ran leg with no `assets` record (`pausedLegs`' code-only
+ * leg: the slice's assets, contact sheet and proof commit still owe their own leg). */
+const reusableLeg = (e: QueueEvent, slice: boolean): boolean => {
+  if (e.kind !== "host-verify" || !e.detail || typeof e.detail !== "object") return false;
+  if (e.detail.skipped === true) return e.detail.reason !== PAUSED_DIRTY;
+  return !slice || e.detail.assets !== undefined;
+};
+
+/** Story 38.5 (CAP-13): the latest ran (not skipped) `host-verify` recorded for `codeHead`, at any position; on a slice run
+ * (`slice`), only one that recorded its `assets` step. */
+export function legForHead(events: readonly QueueEvent[], codeHead: string | undefined, slice = false): HostVerifyResult | undefined {
+  if (!codeHead) return undefined;
+  const d = events.findLast((e) => e.detail?.code_head === codeHead && e.detail?.skipped !== true && reusableLeg(e, slice))?.detail;
+  return d && typeof d === "object" ? d as unknown as HostVerifyResult : undefined;
+}
+
 /** Story 27.4: the `host-verify` recorded for the latest engine completion (after the latest `launched`): a
- * close-out that crashed, or whose transition and record both failed, perhaps after removing the worktree. */
-export function recordedVerify(events: readonly QueueEvent[]): HostVerifyResult | undefined {
-  const at = events.findLastIndex((e) => e.kind === "host-verify");
+ * close-out that crashed, or whose transition and record both failed, perhaps after removing the worktree.
+ * Story 38.5 (CAP-13, superseding 37.3's position-only rule): with a code head (`codeHead`), the latest ran leg recorded
+ * for that head at any position (`legForHead`: one commit set, one leg, across a pause and the boundary); else the
+ * position rule (after the latest `launched` or `paused`) over the records with no `code_head` (pre-38.5) or an equal
+ * one; with no head known (the late close-out, a worktree gone), the position rule as before. A `paused: dirty tree` skip is
+ * never returned, and on a slice run (`slice`) a ran leg with no `assets` record is never returned (`reusableLeg`). */
+export function recordedVerify(events: readonly QueueEvent[], codeHead?: string, slice = false): HostVerifyResult | undefined {
+  const byHead = legForHead(events, codeHead, slice);
+  if (byHead) return byHead;
+  const at = events.findLastIndex((e) => reusableLeg(e, slice) && (!codeHead || e.detail?.code_head === undefined || e.detail?.code_head === codeHead));
   // Story 37.3 (DW-148): a pause's leg vouched for the commits landed at the pause, never for the engine's later end.
   const since = Math.max(events.findLastIndex((e) => e.kind === "launched"), events.findLastIndex((e) => e.kind === "paused"));
   const d = at > since ? events[at]!.detail : undefined;
@@ -1031,21 +1153,32 @@ export function frontmatter(text: string): Record<string, unknown> {
 /** A frontmatter value as a trimmed non-empty string; anything else is missing. */
 const fmWord = (v: unknown): string | undefined => (typeof v === "string" && v.trim() ? v.trim() : undefined);
 
-/** A story's spec in the worktree (`reconcile.md` §1): `_bmad-output/implementation-artifacts/spec-<key>.md`,
- * else the single match of `_bmad-output/specs/<any>/stories/<key>-*.md`. Undefined: none, or several. */
+/** Story 38.5 (DW-177): the rest of a name after `<key>-` that a later half (`-s2`) or a remediation (`-r1`) carries,
+ * excluded from the first half's glob. */
+export const SPLIT_SPEC_REST = /^(s|r)\d+(-.*)?\.md$/;
+
+/** A story's spec in the worktree (`reconcile.md` §1): `_bmad-output/implementation-artifacts/spec-<key>.md`, else —
+ * Story 38.5 (DW-177), one rule with `plansync._stage_target` and task-planning.md §3 — the exact
+ * `_bmad-output/specs/<any>/stories/<key>-spec.md` (one hit; several folders: none), else the single match of the prefix
+ * glob `<key>.md` / `<key>-*.md` there, the `-s<n>` and `-r<n>` names excluded (`SPLIT_SPEC_REST`). Undefined: none, or
+ * several. */
 export function findSpec(worktree: string, key: string): string | undefined {
   if (!key || /[\\/]/.test(key) || key.includes("..")) return undefined;
   const direct = join(worktree, "_bmad-output", "implementation-artifacts", `spec-${key}.md`);
   if (existsSync(direct)) return direct;
   const specs = join(worktree, "_bmad-output", "specs");
-  const hits: string[] = [];
+  const exact: string[] = [], hits: string[] = [];
   let folders: string[] = [];
   try { folders = readdirSync(specs); } catch { return undefined; }
   for (const f of folders) {
     let names: string[] = [];
     try { names = readdirSync(join(specs, f, "stories")); } catch { continue; }
-    for (const n of names) if (n.startsWith(`${key}-`) && n.endsWith(".md")) hits.push(join(specs, f, "stories", n));
+    for (const n of names) {
+      if (n === `${key}-spec.md`) exact.push(join(specs, f, "stories", n));
+      if (n === `${key}.md` || (n.startsWith(`${key}-`) && n.endsWith(".md") && !SPLIT_SPEC_REST.test(n.slice(key.length + 1)))) hits.push(join(specs, f, "stories", n));
+    }
   }
+  if (exact.length) return exact.length === 1 ? exact[0] : undefined;
   return hits.length === 1 ? hits[0] : undefined;
 }
 
@@ -1451,6 +1584,15 @@ async function notifyText(deps: WorktreeDeps, text: string): Promise<Record<stri
   } catch (e) { return { ok: false, error: clip(message(e)) }; }
 }
 
+/** Story 38.5 (DW-166): does a recorded leg vouch for a `complete` end — green, or a by-design skip (`no verify.host`, a
+ * host-tier run, no changes); never red nor inconclusive, never a `paused: dirty tree` or paused-sweep (`paused sweep: …`) skip? */
+const leavesReady = (v: HostVerifyResult | undefined): boolean => !!v
+  && (v.skipped ? !(v.reason === PAUSED_DIRTY || v.reason.startsWith("paused sweep:")) : v.green === true && !isInconclusive(v));
+
+/** Story 38.5 (DW-166): a run that launched no engine (no `launched` event, no engine run id): a skill run, no leg by design. */
+export const launchedNoEngine = (run: Pick<QueueRun, "engine_run_id">, events: readonly QueueEvent[]): boolean =>
+  !run.engine_run_id && !events.some((e) => e.kind === "launched");
+
 /** The engine-end sweep (see the header). Idempotent: a run is taken atomically before its
  * close-out (`Queue.takeForCloseOut`), a paused run is not closed out again while still paused, and a
  * PR recorded on its `paused` event is marked ready, never opened twice. Answers the run ids it
@@ -1488,7 +1630,10 @@ export async function sweepEngines(queue: Queue, deps: WorktreeDeps = {}): Promi
           const late = r.engine_run_id && existsSync(r.worktree!) ? await engineStatus(servedRoot(r)!, r.engine_run_id, deps, { tier: r.tier, sandbox: r.sandbox }) : undefined;
           if (late?.phase === "ended") lateStatus = engineEndStatus(events, r.engine_run_id, String(late.detail.status ?? "unknown"));
         }
-        const c = await closeOut(r, { paused: false, ...launchedCloseOutInput(events, r, { workerOnly: !!lateSweep }), ...(existingPr ? { existingPr } : {}), ...(verify ? { verify } : {}), ...(isSlice(queue.definition(r)) ? { slice: true } : {}), ...(legs.length ? { legs } : {}), ...(lateSweep ? { sweep: lateSweep } : {}) }, deps);
+        // Story 38.5 (DW-166, DW-64's remainder): ready only on a `complete` end a recorded green or skipped leg vouches for,
+        // or a run that launched no engine; any other late close-out leaves the PR a draft.
+        const vouched = r.state === "complete" && (leavesReady(verify) || launchedNoEngine(r, events));
+        const c = await closeOut(r, { paused: false, ...launchedCloseOutInput(events, r, { workerOnly: !!lateSweep }), ...(existingPr ? { existingPr } : {}), ...(verify ? { verify } : {}), ...(isSlice(queue.definition(r)) ? { slice: true } : {}), ...(legs.length ? { legs } : {}), ...(lateSweep ? { sweep: lateSweep } : {}), ...(vouched ? {} : { killed: true }) }, deps);
         // The sweep's end rule, applied here too: the terminal row is never updated, so its three-way end is
         // recorded on the `closed_out` (`sweep_end`), beside the `sweep` record the inbox line reads.
         // Story 36.2: `finish` already ran on the worker's cost, so the priced engine goes on as its own `job-run` line.
@@ -1590,13 +1735,20 @@ export async function sweepEngines(queue: Queue, deps: WorktreeDeps = {}): Promi
       // run before the close-out pushes and opens the PR; one `host-verify` event, skipped or ran.
       // A `host-verify` already recorded for this engine completion is reused whatever a later kill says: the
       // leg never re-run (nor replaced by a `worktree gone` skip), no second event.
-      // Story 37.3 (DW-148): a pause (not a sweep's) gets the leg too, for the commits already landed.
-      let verify = recordedVerify(events);
+      // Story 38.5 (CAP-13, superseding 37.3's leg here): a pause (not a sweep's) runs no leg in this loop: it reuses only a
+      // leg already recorded for its code head, else closes out with none (a draft); its leg is `pausedLegs`' (closeout.ts),
+      // after the pause's notice and block. Every leg recorded here carries the code head (`codeHead`), and an end reuses a
+      // leg recorded for the same head at any position (one commit set, one leg).
+      const head = !sweep && existsSync(run.worktree!) ? await codeHead(run, deps) : undefined;
+      const headed = head ? { code_head: head } : {};
+      // Story 34.8: a slice run, decided once here from the resolved definition, passed to the leg and the close-out.
+      const slice = isSlice(queue.definition(run));
+      // A pause reuses a head's leg only on a clean tree (a dirty tree closes out with no verify: a draft); an end on a slice run
+      // never reuses a code-only leg (`pausedLegs`'), so its assets and proof get their own leg.
+      let verify = paused ? (await treeClean(run, deps) ? legForHead(events, head) : undefined) : recordedVerify(events, head, slice);
       // An engine the supervisor killed runs no leg, its status ended (it handled TERM, or its worktree is
       // gone) or not (its end and reason computed as before).
       const notKilled = !st.detail.killed && !(await killedEngine(queue, run));
-      // Story 34.8: a slice run, decided once here from the resolved definition, passed to the leg and the close-out.
-      const slice = isSlice(queue.definition(run));
       // Story 36.3 (DW-121): a sweep the supervisor stopped (this tick or an earlier one) has its half-written tree
       // committed as WIP first; with WIP, or a stop never answered, no leg runs and the PR stays a draft.
       const stoppedSweep = sweep && (st.phase === "paused" || stopUnanswered || engineEndStatus(events, run.engine_run_id, String(st.detail.status ?? "unknown")) === undefined);
@@ -1604,11 +1756,6 @@ export async function sweepEngines(queue: Queue, deps: WorktreeDeps = {}): Promi
         ? await wipCommit(run, String(st.detail.paused_story_key ?? sweepSummary(queue, run).bundles.find((b) => !b.landed)?.key ?? "unknown"), deps) : undefined;
       if (wip?.committed || wip?.error || stopUnanswered) {
         verify = { skipped: true, reason: wip?.committed ? "paused sweep: WIP committed, leg skipped" : wip?.error ? `paused sweep: WIP not committed (${wip.error}), leg skipped` : "paused sweep: stop unanswered, leg skipped" };
-        queue.note(run.run_id, "host-verify", verify as Record<string, unknown>);
-      }
-      // Story 37.3 (DW-148): never the leg on a half-written tree: a dirty paused tree skips it and the PR stays a draft.
-      if (!verify && paused && notKilled && !(await treeClean(run, deps))) {
-        verify = { skipped: true, reason: PAUSED_DIRTY };
         queue.note(run.run_id, "host-verify", verify as Record<string, unknown>);
       }
       // Story 38.2 (CAP-4): an engine that ended on its own (not paused, not a sweep, not killed, no PR open) with no commit
@@ -1620,20 +1767,18 @@ export async function sweepEngines(queue: Queue, deps: WorktreeDeps = {}): Promi
       const noChanges = ahead !== undefined && ahead.length === 0;
       if (!verify && noChanges) {
         verify = { skipped: true, reason: NO_CHANGES_SKIP };
-        queue.note(run.run_id, "host-verify", verify as Record<string, unknown>);
+        queue.note(run.run_id, "host-verify", { ...verify, ...headed } as Record<string, unknown>);
       }
       const servedAt = servedRoot(run);
       const noStory = noChanges && run.engine_run_id && servedAt && existsSync(servedAt) ? noStoryEnd(servedAt, run.engine_run_id, String(st.detail.status ?? "unknown")) : undefined;
       if (noStory) await stageCarry(queue, run, noStory.story_key, deps);
       const haltPause = !!noStory && await haltedOnRender(queue.events(run.run_id), servedAt!, noStory, deps);
-      if (!verify && notKilled) {
+      if (!verify && notKilled && !paused) {
         // Story 38.1 (CAP-1): the leg's own guard, never the worker's; the close-out's lease noted first (CAP-3).
         const g = legGuard(queue.definition(run));
         noteCloseOutLease(queue, run.run_id, (deps as { self?: Owner }).self ?? selfOwner());
-        // Story 37.3 (DW-148): a paused slice run's leg is the code leg only: no assets verb writes into the tree the engine
-        // resumes, and the slice proof stays with the final close-out (`!input.paused` in its commit guard).
-        verify = await hostVerify(run, g.seconds, deps, { ...(slice && !paused ? { slice } : {}), guardKey: g.key });
-        queue.note(run.run_id, "host-verify", verify as Record<string, unknown>);
+        verify = await hostVerify(run, g.seconds, deps, { ...(slice ? { slice } : {}), guardKey: g.key });
+        queue.note(run.run_id, "host-verify", { ...verify, ...(sweep ? {} : headed) } as Record<string, unknown>);
       }
       // A resumed run (its `launched` written when the resolve child exited) or a relaunched one (its latest
       // `launched` after a `close-out`, from the relaunch's `mirror`): the end is the engine's own terminal

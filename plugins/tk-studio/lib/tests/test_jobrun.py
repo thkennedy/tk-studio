@@ -612,6 +612,37 @@ class JobRunTestCase(unittest.TestCase):
         both = dict(capped, stop={"max_runs": 2, "on_status": ["blocked"]})
         self.assertIsNone(jobrun.evaluate_stop(both, [done, own]))
 
+    def test_story_38_5_max_own_blocks_bounds_a_recurring_jobs_own_blocks(self):
+        """B8: a recurring job's trailing own_block streak stops scheduling at
+        stop.max_own_blocks (default 3), the line naming the cause; a one-shot
+        never; a counted run without own_block breaks the streak."""
+        recurring = dict(self._core_defn("cad", trigger="loop"),
+                         stop={"max_runs": 50})
+        own = {"run_id": "b", "state": "blocked", "own_block": "pin"}
+        lock = {"run_id": "c", "state": "blocked", "own_block": "lock"}
+        done = {"run_id": "a", "state": "complete"}
+        err = {"run_id": "e", "error": "spawn failed"}
+        self.assertIsNone(jobrun.evaluate_stop(recurring, [own, own]))
+        self.assertEqual(
+            jobrun.evaluate_stop(recurring, [done, own, own, lock]),
+            "stop: max_own_blocks (3) reached — the last 3 runs ended on "
+            "the supervisor's own block (lock)")
+        # an error record is not counted; a counted run without one breaks it
+        self.assertIn("max_own_blocks (3)",
+                      jobrun.evaluate_stop(recurring, [own, own, err, own]))
+        self.assertIsNone(jobrun.evaluate_stop(recurring, [own, own, done, own]))
+        # the bound is configurable
+        two = dict(recurring, stop={"max_runs": 50, "max_own_blocks": 2})
+        self.assertIn("stop: max_own_blocks (2) reached",
+                      jobrun.evaluate_stop(two, [own, own]))
+        # checked after max_runs
+        capped = dict(recurring, stop={"max_runs": 1, "max_own_blocks": 1})
+        self.assertIn("stop: max_runs (1)",
+                      jobrun.evaluate_stop(capped, [done, own]))
+        # a one-shot job is never stopped by it
+        oneshot = dict(self._core_defn("once"), stop={"max_runs": 50})
+        self.assertIsNone(jobrun.evaluate_stop(oneshot, [own, own, own, own]))
+
     def test_story_36_5_finish_own_block_lands_in_run_json_and_wakes_the_next(self):
         self._declare("eng", self._skill_defn(
             "eng", stop={"on_status": ["blocked"]}))

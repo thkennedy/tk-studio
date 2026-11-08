@@ -2438,6 +2438,11 @@ def insert_stage_rows(text: str, rows: list[dict]) -> str:
     return "\n".join(lines)
 
 
+# Story 38.5 (DW-177): the rest of a name after `<key>-` that a later half
+# (`-s2`) or a remediation (`-r1`) carries, excluded from the first half's glob.
+SPLIT_SPEC_RE = re.compile(r"^(s|r)\d+(-.*)?\.md$")
+
+
 def _stage_target(root: Path, story: str | None, entity: str | None
                   ) -> tuple[Path | None, str]:
     """(the document holding the table — None while the spec is unwritten,
@@ -2452,8 +2457,15 @@ def _stage_target(root: Path, story: str | None, entity: str | None
     if not sid or re.search(r"[\\/*?\[\]]", sid):
         raise PlanSyncError("stage: --story <key> or --entity <id> names "
                             "the document")
-    stories = sorted({p for pattern in (f"{sid}.md", f"{sid}-*.md")
-                      for p in (root / SPECS_REL).glob(f"*/stories/{pattern}")})
+    # Story 38.5 (DW-177): a split story's spec by its exact `<key>-spec.md`
+    # first; else the prefix glob, a later half's (`-s<n>`) and a
+    # remediation's (`-r<n>`) names excluded, used only when one file matches.
+    stories = sorted((root / SPECS_REL).glob(f"*/stories/{sid}-spec.md"))
+    if not stories:
+        stories = sorted({
+            p for pattern in (f"{sid}.md", f"{sid}-*.md")
+            for p in (root / SPECS_REL).glob(f"*/stories/{pattern}")
+            if not SPLIT_SPEC_RE.match(p.name[len(sid) + 1:])})
     if len(stories) > 1:
         raise PlanSyncError(
             f"stage: several specs match story {sid}: "

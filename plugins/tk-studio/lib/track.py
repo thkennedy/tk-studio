@@ -12,7 +12,20 @@ owner, names the reason and says what resolves it:
     Blocked by: <story's key>          (a dependent's comment only)
 
   uv run track.py block --directory ROOT --story <ST-NNN | N-M-slug>
-      --reason TEXT --resolves TEXT [--source run|engagement] [--dry-run]
+      --reason TEXT --resolves TEXT [--source run|engagement]
+      [--kind engine] [--dry-run]
+
+Story 38.5 (DW-176): `--kind engine` (a `--source run` form only) is the
+supervisor's block for a pause the engine's own clock caused (a session
+timeout): nothing is asked of the owner, so its comment carries no mention:
+
+    Blocked (engine): <reason> — no owner action
+    Resolves when: <resolves>
+    Blocked by: <story's key>          (a dependent's comment only)
+
+The transition, the skip rules, the owner-id refusal (the agent-comment rule
+reads it) and the dependents are unchanged; any other `--kind` with
+`--story` is refused by name (exit 2).
 
 The transition is by the target status's name, never its category, and is
 skipped for an issue already in the status; the comment is skipped only when
@@ -308,12 +321,22 @@ def transient(exc: Exception) -> bool:
     return syncback.classify(exc) in ("rate-limited", "unreachable")
 
 
+STORY_KINDS = ("engine",)
+
+
 def comment_body(owner: str, reason: str, resolves: str,
-                 blocked_by: str | None = None) -> str:
+                 blocked_by: str | None = None,
+                 kind: str | None = None) -> str:
     """The block comment: the owner's wiki mention (REST v2), the reason and
-    what resolves it; a dependent's names the story's issue."""
-    body = (f"[~accountid:{owner}] Blocked: {reason.strip()}\n"
-            f"Resolves when: {resolves.strip()}")
+    what resolves it; a dependent's names the story's issue. Story 38.5:
+    `kind="engine"` (an engine-clock pause) asks nothing of the owner, so it
+    carries no mention."""
+    if kind == "engine":
+        body = (f"Blocked (engine): {reason.strip()} — no owner action\n"
+                f"Resolves when: {resolves.strip()}")
+    else:
+        body = (f"[~accountid:{owner}] Blocked: {reason.strip()}\n"
+                f"Resolves when: {resolves.strip()}")
     if blocked_by:
         body += f"\nBlocked by: {blocked_by}"
     return body
@@ -450,16 +473,22 @@ def _block_issue(client, owner: str, front: dict, key: str, role: str,
 
 def block(project_root: Path, story: str, reason: str, resolves: str,
           source: str = "run", dry_run: bool = False, transport=None,
-          sleep=None) -> dict:
+          sleep=None, kind: str | None = None) -> dict:
     """The `block` verb (see the module docstring)."""
     root = Path(project_root).resolve()
     result = _result(story, source, dry_run)
+    if kind is not None:
+        result["kind"] = kind
 
     def refuse(why: str) -> dict:
         return _finish(result, "blocked", f"track refused: {why}")
 
     if source not in SOURCES:
         return refuse(f"--source {source!r} is not one of {', '.join(SOURCES)}")
+    if kind is not None and (kind not in STORY_KINDS or source != "run"):
+        return refuse(f"--kind {kind!r} with --story: only --kind engine "
+                      f"with --source run (Story 38.5); no Atlassian call "
+                      f"made")
     if source == "sweep":
         return refuse("--source sweep takes --triage and --run-id, not "
                       "--story; no Atlassian call made")
@@ -496,7 +525,8 @@ def block(project_root: Path, story: str, reason: str, resolves: str,
     notes = result["notes"]
     try:
         entry = _block_issue(client, owner, front, key, "story",
-                             comment_body(owner, reason, resolves), dry_run,
+                             comment_body(owner, reason, resolves,
+                                          kind=kind), dry_run,
                              notes)
     except jirabackend.JiraError as exc:
         result["issues"].append({"issue": key, "entity": front["id"],
@@ -529,7 +559,8 @@ def block(project_root: Path, story: str, reason: str, resolves: str,
         try:
             dep_entry = _block_issue(
                 client, owner, dep, dep_key, "dependent",
-                comment_body(owner, reason, resolves, blocked_by=key),
+                comment_body(owner, reason, resolves, blocked_by=key,
+                             kind=kind),
                 dry_run, notes)
         except jirabackend.JiraError as exc:
             dep_entry = {"issue": dep_key, "entity": dep["id"],
@@ -1630,8 +1661,9 @@ def unblock_comment(reason: str) -> str:
 def _open_blocks(client, key: str, owner: str) -> tuple[set[str], bool]:
     """What the agent's comments since its last `Resolved:` hold on an issue:
     the keys named by an exact `Blocked by: <key>` line, and whether a
-    `Blocked:` comment with no such line (the issue's own block) is among
-    them. Jira lists oldest first."""
+    `Blocked:` comment, or an engine block (`Blocked (engine): `, Story
+    38.5), with no such line (the issue's own block) is among them. Jira
+    lists oldest first."""
     named: set[str] = set()
     own = False
     for c in jirabackend.issue_comments(client, key):
@@ -1647,7 +1679,8 @@ def _open_blocks(client, key: str, owner: str) -> tuple[set[str], bool]:
               if line.strip().startswith("Blocked by: ")]
         if by:
             named.update(by)
-        elif "Blocked: " in body:
+        elif ("Blocked: " in body
+              or body.strip().startswith("Blocked (engine): ")):
             own = True
     return named, own
 
@@ -2074,11 +2107,13 @@ def main(argv: list[str] | None = None) -> int:
                                       reason=args.reason)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 2 if result.get("status") == "blocked" else 0
-    if args.kind is not None:
+    if args.kind is not None and not (args.kind in STORY_KINDS
+                                      and args.source in (None, "run")):
         result = _finish(_result(args.story, args.source or "run",
                                  args.dry_run), "blocked",
                          "track refused: --kind is --engagement's (Story "
-                         "32.6), not --story's; no Atlassian call made")
+                         "32.6), not --story's — but --kind engine with "
+                         "--source run (Story 38.5); no Atlassian call made")
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 2
     if args.story is None or args.reason is None or args.resolves is None:
@@ -2089,7 +2124,8 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 2
     result = block(directory, args.story, args.reason, args.resolves,
-                   source=args.source or "run", dry_run=args.dry_run)
+                   source=args.source or "run", dry_run=args.dry_run,
+                   kind=args.kind)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     # `partial` exits 0 (a temporary failure too: its JSON names `retry`)
     return 2 if result.get("status") == "blocked" else 0

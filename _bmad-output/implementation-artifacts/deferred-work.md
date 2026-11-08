@@ -1410,7 +1410,7 @@ source_spec: `36-3-a-paused-or-resumed-run-is-never-parked-spec.md` (:304)
 location: apps/supervisor/src/closeout.ts (the late terminal close-out); apps/supervisor/src/cli.ts `closeOutNow`; the `cancel` path
 severity: low
 reason: 36.3 closed DW-64 for the paths its criteria named; its status line records the remainder, and the spec says it has no open entry of its own.
-status: open
+status: resolved 2026-11-08 by Story 38.5 (the late terminal close-out, `closeOutNow` and the cancel open or mark a PR ready only on a `complete` end a recorded green or skipped leg vouches for, or a run that launched no engine; else a draft, with `closeout.result "draft PR"`, the `pr` and one job-run line)
 
 ### DW-167: No gate runs `command-line.test.ts`: `tools/verify_host.py` excludes it and the spec's Verification command leaves `TK_STUDIO_ROOT` unset, so the e2e suite goes unrun.
 origin: retrospective C8 (`_bmad-output/specs/spec-epic-36/RETROSPECTIVE.md`:77)
@@ -1494,7 +1494,7 @@ source_spec: `37-3-a-timed-out-session-keeps-its-stop-and-its-records-spec.md`; 
 location: apps/supervisor/src/closeout.ts (the paused-run pass's `track.py block` call for a landing left `paused`: `--reason <the landing's reason> --resolves "a ruling in the spec (<spec path>)"`); plugins/tk-studio/lib/track.py `block` (the comment always @mentions `planning.jira.owner_account_id`)
 severity: low
 reason: Story 37.3 turns the engine's rollback on in a run worktree, so a timed-out dev session is retried or deferred rather than paused, and the pause close-out now runs the host leg; but a pause that does reach the paused-run pass for an engine reason (an engine clock, a budget, a rollback the engine refused) still goes through the same block as an escalation: the issue moves to `Blocked - Awaiting User` with the owner tagged (hole 101's class), though nothing is the owner's to answer. Fix to make: the paused-run pass tells an engine-clock pause from a ruling (the journal's `session-end status timeout` / `paused_reason`), and blocks it with a comment that says `no owner action` and carries no mention (a `track.py block --kind engine` or a `--no-mention` form), or skips the block and sends only the notifier line; the contract names the rule.
-status: open
+status: resolved 2026-11-08 by Story 38.5 (an engine-clock pause, by `paused_reason` or the journal's `session-end status timeout`, is blocked with `track.py block --kind engine`: `Blocked (engine): … — no owner action`, no mention, `track-block` kind engine, cleared by the resume's unblock)
 
 ### DW-177: A split story's `<key>-s2` spec matches the first half's `<key>-*.md` prefix glob once both specs exist, so a spec lookup by the first half's key is ambiguous.
 origin: spec-deferred 256a8ba5f54a
@@ -1502,7 +1502,7 @@ source_spec: `37-3-a-timed-out-session-keeps-its-stop-and-its-records-spec.md`
 location: .bmad-loop/plugins/studio-pipeline/task-planning.md section 3; plugins/tk-studio/lib/plansync.py _stage_target; apps/supervisor/src/closeout.ts findSpec
 severity: medium
 reason: task-planning.md section 3 (both copies) mints `<key>-s2` entries (plan Settled shape 3); `plansync._stage_target` globs `<sid>-*.md` and raises "several specs match"; `closeout.findSpec` matches `${key}-` and returns undefined on two hits; the engine resolves a spec by the glob `<id>-*.md` (story 21-6). The `<key>-r<n>` remediation ids share the collision (no such spec exists on disk yet). The engine's glob is outside this repo.
-status: open
+status: resolved 2026-11-08 by Story 38.5 (the exact `<key>-spec.md` first, else the prefix glob with the `-s<n>`/`-r<n>` names excluded and only when one file matches, in `plansync._stage_target`, `closeout.findSpec` and task-planning.md section 3; the engine's own glob stays outside this repo)
 
 ### DW-178: The `ask` autonomy's check-in model is wrong by the owner's ruling: a finished story is not a check-in point, Jira is not where the owner says continue, and `no` has no visible shutdown — the check-in points are agreed at approval and answered from the inbox message's link into the web UI.
 origin: owner decision TKSTUDIO-215 (Tim 2026-11-05, on DW-48: "this entire premise needs to be re-evaluated"), ingested 2026-11-06 (day-8n)

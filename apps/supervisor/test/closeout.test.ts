@@ -8,7 +8,7 @@ import { hostname } from "node:os";
 import { join, resolve } from "node:path";
 import { createApi } from "../src/api";
 import { closeOutOrphans, launchStopGraceful, relauncher, type Started } from "../src/cli";
-import { AUTO_RESUME, autoResumeRefusedLine, armingRefusedStop, closableVerdict, closeOutPaused, ESCALATION_BLOCKED_REASON, renderSignature, RENDER_UNREADABLE_RE, secondHaltLine, staleRenderView, findSpec, frontmatter, gracefulStopInForce, harvestMessage, jiraBound, landing, launchedSinceMove, NOT_HANDED, REARM_SKIPPED, rearmFailedLine, resumePaused, ResumeRefused, trackArgs, unblocksOwed, type PausedDeps } from "../src/closeout";
+import { AUTO_RESUME, autoResumeRefusedLine, armingRefusedStop, closableVerdict, closeOutPaused, engineClockPause, ESCALATION_BLOCKED_REASON, pausedLegs, renderSignature, RENDER_UNREADABLE_RE, secondHaltLine, staleRenderView, findSpec, frontmatter, gracefulStopInForce, harvestMessage, jiraBound, landing, launchedSinceMove, NOT_HANDED, REARM_SKIPPED, rearmFailedLine, resumePaused, ResumeRefused, trackArgs, unblocksOwed, type PausedDeps } from "../src/closeout";
 import { renderPage, type PageData } from "../src/page";
 import { Queue, STUDIO_END_RETRY_LIMIT, type Owner, type Probes } from "../src/queue";
 import { runProcess, toVmPath, type RunResult } from "../src/server";
@@ -157,11 +157,37 @@ describe("the paused story's spec and verdict", () => {
     expect(findSpec(wt, KEY)).toBe(join(wt, "_bmad-output", "specs", "a", "stories", `${KEY}-spec.md`));
     mkdirSync(join(wt, "_bmad-output", "specs", "b", "stories"), { recursive: true });
     writeFileSync(join(wt, "_bmad-output", "specs", "b", "stories", `${KEY}-other.md`), spec("done"));
-    expect(findSpec(wt, KEY)).toBeUndefined(); // two matches: none
+    // Story 38.5 (DW-177): the exact `<key>-spec.md` first, whatever else the glob matches
+    expect(findSpec(wt, KEY)).toBe(join(wt, "_bmad-output", "specs", "a", "stories", `${KEY}-spec.md`));
+    rmSync(join(wt, "_bmad-output", "specs", "a", "stories", `${KEY}-spec.md`));
+    writeFileSync(join(wt, "_bmad-output", "specs", "a", "stories", `${KEY}-draft.md`), spec("done"));
+    expect(findSpec(wt, KEY)).toBeUndefined(); // two glob matches, no exact name: none
+    rmSync(join(wt, "_bmad-output", "specs", "a", "stories", `${KEY}-draft.md`));
+    writeFileSync(join(wt, "_bmad-output", "specs", "a", "stories", `${KEY}-spec.md`), spec("done"));
     mkdirSync(join(wt, "_bmad-output", "implementation-artifacts"), { recursive: true });
     writeFileSync(join(wt, "_bmad-output", "implementation-artifacts", `spec-${KEY}.md`), spec("done"));
     expect(findSpec(wt, KEY)).toBe(join(wt, "_bmad-output", "implementation-artifacts", `spec-${KEY}.md`));
     expect(findSpec(wt, "../escape")).toBeUndefined();
+  });
+
+  test("Story 38.5 (DW-177): a split story's spec — the exact `<key>-spec.md` beside `<key>-s2-spec.md`; else the glob with the `-s<n>`/`-r<n>` names excluded, only when one file matches", () => {
+    const wt = tempDir("tk-sup-co-split-");
+    const stories = join(wt, "_bmad-output", "specs", "spec-epic-9", "stories");
+    mkdirSync(stories, { recursive: true });
+    writeFileSync(join(stories, `${KEY}-s2-spec.md`), spec("in-progress"));
+    expect(findSpec(wt, KEY)).toBeUndefined(); // only the second half: the first half's spec is not written yet
+    expect(findSpec(wt, `${KEY}-s2`)).toBe(join(stories, `${KEY}-s2-spec.md`)); // the second half resolves its own
+    writeFileSync(join(stories, `${KEY}-spec.md`), spec("done"));
+    expect(findSpec(wt, KEY)).toBe(join(stories, `${KEY}-spec.md`));
+    rmSync(join(stories, `${KEY}-spec.md`));
+    writeFileSync(join(stories, `${KEY}-r1.md`), spec("done"));
+    writeFileSync(join(stories, `${KEY}-r2-follow-up.md`), spec("done"));
+    writeFileSync(join(stories, `${KEY}-first-half.md`), spec("done"));
+    expect(findSpec(wt, KEY)).toBe(join(stories, `${KEY}-first-half.md`)); // the one left after the exclusion
+    mkdirSync(join(wt, "_bmad-output", "specs", "spec-epic-10", "stories"), { recursive: true });
+    writeFileSync(join(wt, "_bmad-output", "specs", "spec-epic-10", "stories", `${KEY}-spec.md`), spec("done"));
+    writeFileSync(join(stories, `${KEY}-spec.md`), spec("done"));
+    expect(findSpec(wt, KEY)).toBeUndefined(); // the exact name in two folders: today's ambiguity answer
   });
 
   test("the verdict is read as YAML: comments, any case of `escalate`, null/~/empty, block scalars and non-strings never close out", async () => {
@@ -807,6 +833,64 @@ describe("Story 31.5: a bound project's paused run is blocked on Jira once per (
     expect(t.calls).toHaveLength(0);
     expect(ev(fx.queue, fx.run.run_id, "track-block")).toHaveLength(0);
   });
+
+  test("Story 38.5 (DW-176): an engine-clock pause (`paused_reason` naming a session timeout) is blocked `--kind engine`: no owner action, the resume as what resolves it, `track-block` kind engine, no notifier line", async () => {
+    const fx = await pausedRun({ status: "in-progress", paused: false });
+    const why = "resolved-escalation re-drive did not converge — re-escalating instead of deferring: dev session timeout";
+    fx.queue.markPaused(fx.run.run_id, { engine: { run_id: E1, status: "running", paused_stage: "escalation", paused_reason: why, paused_story_key: KEY }, pr: PR });
+    bind(fx.run.root);
+    const t = tracked(fx, answer({ ...BLOCKED, kind: "engine" }));
+    expect(await closeOutPaused(fx.queue, t.deps)).toEqual({ closed: [], awaiting: [] });
+    expect(t.calls.map((c) => c.args)).toEqual([["block", "--directory", fx.run.root, "--story", KEY, "--reason", `engine clock: ${why}`,
+      "--resolves", `the supervisor resumes the run (POST /runs/${fx.run.run_id}/resume)`, "--source", "run", "--kind", "engine"]]);
+    expect(t.calls[0]!.args).toEqual(trackArgs(fx.run.root, KEY, `engine clock: ${why}`, SPEC_REL, "engine", fx.run.run_id));
+    expect(ev(fx.queue, fx.run.run_id, "track-block").map((e) => e.detail)).toEqual([expect.objectContaining({ story_key: KEY, engine_run_id: E1, ok: true, kind: "engine" })]);
+    expect(ev(fx.queue, fx.run.run_id, "awaiting-ruling")).toHaveLength(0);
+    expect(t.sent).toHaveLength(0);
+    await closeOutPaused(fx.queue, t.deps);
+    expect(t.calls).toHaveLength(1); // once per pause
+    // the resume's unblock pairs with it as with any block
+    expect(unblocksOwed(fx.queue.events(fx.run.run_id))).toEqual([{ story_key: KEY, engine_run_id: E1 }]);
+  });
+
+  test("Story 38.5 (DW-176): the journal's latest `session-end` before `run-paused` reading `timeout` marks the pause the engine's clock; another status, or an earlier segment's timeout, does not", async () => {
+    const fx = await pausedRun({ status: "in-progress", stage: "escalation" });
+    const lines = (entries: Record<string, unknown>[]) => writeFileSync(join(fx.runDir, "journal.jsonl"), entries.map((e) => JSON.stringify(e)).join("\n") + "\n");
+    lines([{ kind: "run-start" }, { kind: "session-start", task_id: "d1" }, { kind: "session-end", task_id: "d1", status: "timeout" }, { kind: "run-paused", reason: "x" }]);
+    expect(engineClockPause(fx.runDir, "reconcile asks for a ruling")).toBe(true);
+    lines([{ kind: "run-start" }, { kind: "session-end", task_id: "d1", status: "timeout" }, { kind: "run-resume" }, { kind: "session-end", task_id: "d2", status: "completed" }, { kind: "run-paused" }]);
+    expect(engineClockPause(fx.runDir, "reconcile asks for a ruling")).toBe(false);
+    expect(engineClockPause(join(fx.runDir, "missing"), undefined)).toBe(false);
+    expect(engineClockPause(undefined, "dev session timeout")).toBe(true);
+    lines([{ kind: "run-start" }, { kind: "session-end", task_id: "d1", status: "timeout" }, { kind: "run-paused" }]);
+    bind(fx.run.root);
+    const t = tracked(fx, answer(BLOCKED));
+    await closeOutPaused(fx.queue, t.deps);
+    expect(t.calls.map((c) => c.args.slice(-2))).toEqual([["--kind", "engine"]]);
+    expect(t.calls[0]!.args[t.calls[0]!.args.indexOf("--reason") + 1]).toBe("engine clock: reconcile asks for a ruling");
+    expect(ev(fx.queue, fx.run.run_id, "track-block")[0]!.detail).toMatchObject({ kind: "engine" });
+  });
+
+  test("Story 38.5 (CAP-13): `pausedLegs` waits for the block the pause owes: a transient block answer runs no leg; once recorded, the leg runs after it", async () => {
+    const fx = await pausedRun({ verdict: "escalate" });
+    bind(fx.run.root);
+    fx.queue.db.run("UPDATE runs SET base_ref = 'main' WHERE run_id = ?", [fx.run.run_id]);
+    let out: unknown = { ok: false, status: "partial", retry: true };
+    const t = tracked(fx, async () => ({ exit: 0, stdout: JSON.stringify(out), stderr: "" }));
+    const gh = fakeGh();
+    const deps: PausedDeps = { ...t.deps, env: { ...t.deps.env, GH_BIN: gh.bin } };
+    expect(await closeOutPaused(fx.queue, deps)).toEqual({ closed: [], awaiting: [fx.run.run_id] });
+    expect(ev(fx.queue, fx.run.run_id, "track-block")).toHaveLength(0);
+    expect(await pausedLegs(fx.queue, deps)).toEqual([]); // the block is owed and unsent: no leg
+    expect(ev(fx.queue, fx.run.run_id, "host-verify")).toHaveLength(0);
+    out = BLOCKED;
+    await closeOutPaused(fx.queue, deps);
+    expect(await pausedLegs(fx.queue, deps)).toEqual([fx.run.run_id]);
+    const k = kinds(fx.queue, fx.run.run_id);
+    expect(k.indexOf("awaiting-ruling")).toBeLessThan(k.indexOf("track-block"));
+    expect(k.indexOf("track-block")).toBeLessThan(k.indexOf("host-verify"));
+    expect(fx.get()).toMatchObject({ state: "paused", owner_pid: null }); // the lease let go of
+  }, 60_000);
 
   test("a fresh pause of the same story and engine blocks again", async () => {
     const fx = await pausedRun({ verdict: "escalate" });
@@ -1566,6 +1650,93 @@ describe("Story 35.2: no relaunch across a story boundary while a graceful stop 
   const bunCmd = (script: string) => `"${process.execPath}" -e "${script}"`;
   const verifies = (fx: Awaited<ReturnType<typeof pausedRun>>) => ev(fx.queue, fx.run.run_id, "host-verify");
   const end = `story boundary: ${KEY} landed under a graceful stop`;
+
+  test("Story 38.5 (CAP-13): pause, then the boundary on the same commits — the notice first, then one leg in `pausedLegs` (the PR ready), reused by the boundary: one `host-verify` for the commit set", async () => {
+    const fx = await pausedRun(); // landed, no verdict: awaiting a ruling
+    fx.queue.db.run("UPDATE runs SET base_ref = 'main' WHERE run_id = ?", [fx.run.run_id]);
+    mkdirSync(join(fx.repo.checkout, ".tk-studio"), { recursive: true });
+    writeFileSync(join(fx.repo.checkout, ".tk-studio", "config.yaml"), `vcs: git\nverify:\n  host: ${JSON.stringify(bunCmd("console.log('ok')"))}\n`);
+    testGit(fx.repo.checkout, "add", ".tk-studio/config.yaml");
+    testGit(fx.repo.checkout, "commit", "-q", "-m", "the base's verify");
+    const p = passDeps(fx);
+    const gh = fakeGh();
+    const deps: PausedDeps = { ...p.deps, env: { ...p.deps.env, GH_BIN: gh.bin }, verbs: async () => ({ ok: true }) };
+    const readies = () => gh.calls().filter((c) => c.argv[1] === "ready").map((c) => c.argv.includes("--undo") ? "undo" : "ready");
+    expect(await closeOutPaused(fx.queue, deps)).toEqual({ closed: [], awaiting: [fx.run.run_id] });
+    expect(verifies(fx)).toHaveLength(0); // the notice went out with no leg run
+    expect(p.sent).toHaveLength(1);
+    expect(await pausedLegs(fx.queue, deps)).toEqual([fx.run.run_id]);
+    const head = testGit(fx.wt, "rev-parse", "HEAD");
+    expect(verifies(fx).map((e) => e.detail)).toEqual([expect.objectContaining({ green: true, code_head: head, paused_leg: { pr: PR, flip: "ready" } })]);
+    const k = kinds(fx.queue, fx.run.run_id);
+    expect(k.indexOf("awaiting-ruling")).toBeLessThan(k.indexOf("host-verify-leg"));
+    expect(readies()).toEqual(["ready"]);
+    expect(gh.calls().find((c) => c.argv[1] === "edit")!.body).toMatch(/## Host verify\n\nLegs: 1 — close-out green/);
+    expect(await pausedLegs(fx.queue, deps)).toEqual([]); // one leg per code head
+    expect(fx.get()).toMatchObject({ state: "paused", owner_pid: null });
+    // The ruling lands and a graceful stop is in force: the boundary's harvest commit touches only `_bmad-output/`.
+    writeFileSync(join(fx.wt, "_bmad-output", "specs", "spec-epic-9", "stories", `${KEY}-spec.md`), spec("done", "no-impact"));
+    writeFileSync(join(fx.runDir, "stop-request.json"), "{}");
+    expect(await closeOutPaused(fx.queue, deps)).toEqual({ closed: [fx.run.run_id], awaiting: [] });
+    expect(testGit(fx.repo.checkout, "log", "-1", "--format=%s", `supervisor/run-${fx.run.run_id}`)).toBe(harvestMessage(KEY, fx.run.run_id, E1));
+    expect(verifies(fx)).toHaveLength(1); // the boundary reused the pause's leg
+    expect(ev(fx.queue, fx.run.run_id, "host-verify-leg")).toHaveLength(1);
+    expect(readies()).toEqual(["ready", "ready"]);
+    expect(fx.get()).toMatchObject({ state: "complete", reason: end });
+    expect(ev(fx.queue, fx.run.run_id, "ended").at(-1)!.detail).toMatchObject({ pr: PR, closeout: { host_verify: "green" } });
+  }, 60_000);
+
+  test("Story 38.5: a `paused: dirty tree` skip never vouches — paused dirty (the skip noted), the tree cleaned with no commit, the boundary on the same head runs a fresh leg", async () => {
+    const fx = await pausedRun(); // landed, no verdict: awaiting a ruling
+    fx.queue.db.run("UPDATE runs SET base_ref = 'main' WHERE run_id = ?", [fx.run.run_id]);
+    mkdirSync(join(fx.repo.checkout, ".tk-studio"), { recursive: true });
+    writeFileSync(join(fx.repo.checkout, ".tk-studio", "config.yaml"), `vcs: git\nverify:\n  host: ${JSON.stringify(bunCmd("console.log('ok')"))}\n`);
+    testGit(fx.repo.checkout, "add", ".tk-studio/config.yaml");
+    testGit(fx.repo.checkout, "commit", "-q", "-m", "the base's verify");
+    const p = passDeps(fx);
+    const gh = fakeGh();
+    const deps: PausedDeps = { ...p.deps, env: { ...p.deps.env, GH_BIN: gh.bin }, verbs: async () => ({ ok: true }) };
+    writeFileSync(join(fx.wt, "half.txt"), "half-written");
+    expect(await closeOutPaused(fx.queue, deps)).toEqual({ closed: [], awaiting: [fx.run.run_id] });
+    expect(await pausedLegs(fx.queue, deps)).toEqual([fx.run.run_id]);
+    const head = testGit(fx.wt, "rev-parse", "HEAD");
+    expect(verifies(fx).map((e) => e.detail)).toEqual([{ skipped: true, reason: "paused: dirty tree", code_head: head }]);
+    rmSync(join(fx.wt, "half.txt")); // the engine discarded the dirty work: no commit
+    writeFileSync(join(fx.wt, "_bmad-output", "specs", "spec-epic-9", "stories", `${KEY}-spec.md`), spec("done", "no-impact"));
+    writeFileSync(join(fx.runDir, "stop-request.json"), "{}");
+    expect(await closeOutPaused(fx.queue, deps)).toEqual({ closed: [fx.run.run_id], awaiting: [] });
+    expect(verifies(fx).map((e) => e.detail?.green ?? e.detail?.reason)).toEqual(["paused: dirty tree", true]);
+    expect(verifies(fx)[1]!.detail).toMatchObject({ code_head: head });
+    expect(fx.get()).toMatchObject({ state: "complete", reason: end });
+  }, 60_000);
+
+  test("Story 38.5 (CAP-13): `pausedLegs` holds the run under `takeForCloseOut`: a resume mid-leg answers `RunNotPaused` (held by a live process); the lease let go of after; a dirty tree notes only the skip", async () => {
+    const b = await atBoundary(bunCmd("console.log('ok')"));
+    rmSync(join(b.fx.runDir, "stop-request.json"));
+    writeFileSync(join(b.fx.wt, "_bmad-output", "specs", "spec-epic-9", "stories", `${KEY}-spec.md`), spec("in-progress"));
+    let refused: unknown;
+    const other: Owner = { pid: process.pid + 1, host: hostname(), nonce: "closeout-test-api" }; // another live process (serve)
+    const deps: PausedDeps = { ...b.deps, run: async (bin, args, o) => {
+      if (bin === process.execPath && refused === undefined) refused = await resumePaused(b.fx.queue, b.fx.run.run_id, {}, { ...b.deps, self: other }).catch((e) => e);
+      return b.deps.run!(bin, args, o);
+    } };
+    expect(await pausedLegs(b.fx.queue, deps)).toEqual([b.fx.run.run_id]);
+    expect(refused).toBeInstanceOf(ResumeRefused);
+    expect((refused as ResumeRefused).code).toBe("RunNotPaused");
+    expect((refused as ResumeRefused).message).toContain("held by a live process");
+    expect(b.fx.get()).toMatchObject({ state: "paused", owner_pid: null });
+    expect(verifies(b.fx).map((e) => e.detail?.paused_leg)).toEqual([{ pr: PR, flip: "ready" }]);
+    // a new commit and uncommitted work: one dirty skip with the new head, nothing run, nothing flipped
+    writeFileSync(join(b.fx.wt, "more.txt"), "more\n");
+    testGit(b.fx.wt, "add", "more.txt");
+    testGit(b.fx.wt, "commit", "-q", "-m", "feat: more");
+    writeFileSync(join(b.fx.wt, "half.txt"), "half-written");
+    const calls = b.gh.calls().length;
+    expect(await pausedLegs(b.fx.queue, b.deps)).toEqual([b.fx.run.run_id]);
+    expect(verifies(b.fx).at(-1)!.detail).toEqual({ skipped: true, reason: "paused: dirty tree", code_head: testGit(b.fx.wt, "rev-parse", "HEAD") });
+    expect(b.gh.calls()).toHaveLength(calls);
+    expect(await pausedLegs(b.fx.queue, b.deps)).toEqual([]);
+  }, 60_000);
 
   test("Story 36.3: the boundary runs the leg: green, one `host-verify`, the PR ready, `complete`", async () => {
     const b = await atBoundary(bunCmd("console.log('ok')"));

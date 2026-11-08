@@ -409,11 +409,20 @@ export function gitInit(checkout: string, files: Record<string, string> = {}): s
   return origin;
 }
 
-/** A throwaway git repository (`gitInit`) with the runtime `.gitignore` and the files given. */
-export function gitRepo(files: Record<string, string> = {}): { checkout: string; origin: string; git: Git } {
+/** Story 38.5 (CAP-14): the untracked engine policy every fixture checkout holds by default (a run worktree with none is
+ * refused `worktree policy: none in the checkout`), already reading the rollback the run worktree needs. */
+export const FIXTURE_POLICY = "[scm]\nrollback_on_failure = true\n";
+
+/** A throwaway git repository (`gitInit`) with the runtime `.gitignore` and the files given. Story 38.5 (CAP-14): plus the
+ * untracked `.bmad-loop/policy.toml` (`FIXTURE_POLICY`; `policy: false` opts out, a string replaces it). */
+export function gitRepo(files: Record<string, string> = {}, opts: { policy?: string | false } = {}): { checkout: string; origin: string; git: Git } {
   const checkout = join(tempDir("tk-sup-repo-"), "checkout");
   mkdirSync(checkout, { recursive: true });
   const origin = gitInit(checkout, { ".gitignore": RUNTIME_GITIGNORE, ...files });
+  if (opts.policy !== false) {
+    mkdirSync(join(checkout, ".bmad-loop"), { recursive: true });
+    writeFileSync(join(checkout, ".bmad-loop", "policy.toml"), opts.policy ?? FIXTURE_POLICY); // gitignored: untracked
+  }
   return { checkout, origin, git: testGit };
 }
 

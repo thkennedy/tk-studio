@@ -6,7 +6,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync }
 import { hostname, tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { cancelRun, closeOutOrphans, endAfterDriveFailure, finishRun, mirror, resolveCheckout, type Started } from "../src/cli";
-import { AUTO_RESUME, closeOutPaused, engineState, harvestMessage, type PausedDeps } from "../src/closeout";
+import { AUTO_RESUME, closeOutPaused, engineState, harvestMessage, pausedLegs, type PausedDeps } from "../src/closeout";
 import { checkoutKey, Queue, selfOwner, servedRoot } from "../src/queue";
 import { invokeSkill, runProcess, toVmPath, type RunResult, type Spawner } from "../src/server";
 import {
@@ -16,7 +16,8 @@ import {
 } from "../src/worktree";
 import { FRAMES_DIR, legVerdict, type HostVerifyResult, type PlayableJudge } from "../src/hostverify";
 import { endNotice, noticeText } from "../src/hygiene";
-import { fakeGh, fakeSbx, gitRepo, LEG_GUARD_ROWS, testGit } from "./fakes";
+import { supervisorRows } from "../src/planstatus";
+import { fakeGh, fakeSbx, FIXTURE_POLICY, gitRepo, LEG_GUARD_ROWS, testGit } from "./fakes";
 import { sliceRecorder } from "./helpers/slice";
 import { tempDir, track } from "./tmp";
 
@@ -24,8 +25,8 @@ const me = { pid: process.pid, host: hostname(), nonce: "worktree-test" };
 
 /** One fixture: a real repo + bare origin, the fake gh, a work folder, a queue with a claimed run,
  * a recording git/gh runner, and an injected studio-script runner (install, drift, launch status). */
-async function fixture(opts: { baseRef?: string; files?: Record<string, string>; skill?: string; nested?: string } = {}) {
-  const repo = gitRepo(opts.files);
+async function fixture(opts: { baseRef?: string; files?: Record<string, string>; skill?: string; nested?: string; policy?: string | false } = {}) {
+  const repo = gitRepo(opts.files, opts.policy !== undefined ? { policy: opts.policy } : {});
   const gh = fakeGh();
   const work = tempDir("tk-sup-wt-work-");
   const argvs: { bin: string; args: string[]; cwd: string }[] = [];
@@ -61,6 +62,8 @@ async function fixture(opts: { baseRef?: string; files?: Record<string, string>;
   const defn = { id: "j", target: { skill: opts.skill ?? "tk-studio-launch" } };
   // Story 28.5: a project nested below the repository's top-level (its lock key and prefix as a submission resolves them).
   const root = opts.nested ? join(repo.checkout, opts.nested) : repo.checkout;
+  // Story 38.5 (CAP-14): a nested project's checkout holds its own untracked policy too (the run worktree's is refused without one).
+  if (opts.nested && opts.policy !== false) { mkdirSync(join(root, ".bmad-loop"), { recursive: true }); writeFileSync(join(root, ".bmad-loop", "policy.toml"), FIXTURE_POLICY); }
   const where = opts.nested ? await resolveCheckout(root) : {};
   const queued = queue.enqueue({ jobId: "j", root, projectId: "proj", definition: defn, owner: me, ...(opts.baseRef ? { base_ref: opts.baseRef } : {}), ...where }).run;
   const claim = await queue.claim(queued.run_id, me);
@@ -237,17 +240,61 @@ describe("AC2: the untracked runtime is materialised by the studio's own motions
     expect(readFileSync(join(wt, ".bmad-loop", "policy.toml"), "utf-8")).toBe(BROKEN);
   });
 
-  test("Story 37.3 (DW-148): a checkout with no policy → the run worktree gets one holding only `[scm] rollback_on_failure = true`, unlisted in `copied`; the checkout still has none", async () => {
-    const fx = await fixture({ baseRef: "main" });
+  test("Story 38.5 (CAP-14): a checkout with no policy → refused by name (`worktree policy: none in the checkout`), never a stub; nothing written, the run blocked as a prepare step", async () => {
+    const fx = await fixture({ baseRef: "main", policy: false });
     expect(existsSync(join(fx.repo.checkout, ".bmad-loop", "policy.toml"))).toBe(false);
-    const wt = await prepareWorktree(fx.queue, fx.run, "proj", fx.repo.checkout, fx.deps);
-    const written = readFileSync(join(wt, ".bmad-loop", "policy.toml"), "utf-8");
-    expect(written).toBe("[scm]\nrollback_on_failure = true\n");
-    expect((Bun.TOML.parse(written) as any).scm).toEqual({ rollback_on_failure: true });
+    const failed = await prepareWorktree(fx.queue, fx.run, "proj", fx.repo.checkout, fx.deps).then(() => undefined, (e: unknown) => e);
+    expect(failed).toBeInstanceOf(WorktreeFailed);
+    expect((failed as WorktreeFailed).message).toBe("worktree policy: none in the checkout");
+    const wt = worktreePath(fx.work, "proj", fx.run.run_id);
+    expect(existsSync(join(wt, ".bmad-loop", "policy.toml"))).toBe(false);
     expect(existsSync(join(wt, ".bmad-loop", `policy.toml.tmp-${process.pid}`))).toBe(false);
-    const detail = fx.queue.events(fx.run.run_id).find((e) => e.kind === "materialised")!.detail as { copied: string[] };
-    expect(detail.copied).not.toContain(".bmad-loop/policy.toml");
+    expect(fx.queue.events(fx.run.run_id).some((e) => e.kind === "materialised")).toBe(false);
     expect(existsSync(join(fx.repo.checkout, ".bmad-loop", "policy.toml"))).toBe(false);
+  });
+
+  test("Story 38.5 (CAP-14): the four forms — a bare boolean with a comment, a quoted value under `[scm]`, a dotted root key, a one-line inline table — the value replaced, every other byte kept (CRLF too); a parse after reads true", async () => {
+    const forms: [string, string, string][] = [
+      ["bare", "[run]\nx = 1\n\n[scm]\nrollback_on_failure = false  # in-place recovery\nkeep = 2\n", "[run]\nx = 1\n\n[scm]\nrollback_on_failure = true  # in-place recovery\nkeep = 2\n"],
+      ["quoted", "[scm]\r\nisolation = \"none\"\r\nrollback_on_failure = \"false\" # a string\r\n", "[scm]\r\nisolation = \"none\"\r\nrollback_on_failure = true # a string\r\n"],
+      ["single-quoted", "[scm]\nrollback_on_failure = 'no'\n", "[scm]\nrollback_on_failure = true\n"],
+      ["dotted", "scm.isolation = \"none\"\nscm.rollback_on_failure = false # dotted\n\n[run]\nx = 1\n", "scm.isolation = \"none\"\nscm.rollback_on_failure = true # dotted\n\n[run]\nx = 1\n"],
+      ["dotted, key absent", "scm.isolation = \"none\"\r\n[run]\r\nx = 1\r\n", "scm.isolation = \"none\"\r\nscm.rollback_on_failure = true\r\n[run]\r\nx = 1\r\n"],
+      ["inline", "scm = { isolation = \"none\", rollback_on_failure = false } # inline\n", "scm = { isolation = \"none\", rollback_on_failure = true } # inline\n"],
+      ["inline, key absent", "scm = { isolation = \"none\" }\r\n", "scm = { isolation = \"none\", rollback_on_failure = true }\r\n"],
+      ["inline, empty", "scm = {}\n", "scm = { rollback_on_failure = true }\n"],
+    ];
+    for (const [name, policy, expected] of forms) {
+      expect([name, withRunWorktreeRollback(policy)]).toEqual([name, expected]);
+      const fx = await fixture({ baseRef: "main", policy });
+      const wt = await prepareWorktree(fx.queue, fx.run, "proj", fx.repo.checkout, fx.deps);
+      const copy = readFileSync(join(wt, ".bmad-loop", "policy.toml"), "utf-8");
+      expect([name, copy]).toEqual([name, expected]);
+      expect((Bun.TOML.parse(copy) as any).scm.rollback_on_failure).toBe(true);
+      expect(readFileSync(join(fx.repo.checkout, ".bmad-loop", "policy.toml"), "utf-8")).toBe(policy); // the checkout untouched
+    }
+  });
+
+  test("Story 38.5 (CAP-14): no in-place form (a multi-line inline table, an `[scm.sub]`-only definition) → re-serialised with `Bun.TOML.stringify`, every value kept; already true → no write", async () => {
+    for (const policy of ["a = 1\nscm = { isolation = \"none\",\n  rollback_on_failure = false }\n", "a = 1\n\n[scm.sub]\nk = 1\n"]) {
+      expect(withRunWorktreeRollback(policy)).toBe(policy); // the line edit answers it unchanged
+      const fx = await fixture({ baseRef: "main", policy });
+      const wt = await prepareWorktree(fx.queue, fx.run, "proj", fx.repo.checkout, fx.deps);
+      const copy = readFileSync(join(wt, ".bmad-loop", "policy.toml"), "utf-8");
+      const original = Bun.TOML.parse(policy) as any;
+      expect(Bun.TOML.parse(copy)).toEqual({ ...original, scm: { ...original.scm, rollback_on_failure: true } });
+      expect(copy).toBe(Bun.TOML.stringify({ ...original, scm: { ...original.scm, rollback_on_failure: true } })!);
+    }
+    const TRUE = "# kept as is\n[scm]\nrollback_on_failure = true # on\n";
+    const fx = await fixture({ baseRef: "main", policy: TRUE });
+    const wt = await prepareWorktree(fx.queue, fx.run, "proj", fx.repo.checkout, fx.deps);
+    expect(readFileSync(join(wt, ".bmad-loop", "policy.toml"), "utf-8")).toBe(TRUE);
+  });
+
+  test("Story 38.5 (CAP-14): a form whose value cannot be kept (`scm` not a table) → refused by name, the original kept", async () => {
+    const fx = await fixture({ baseRef: "main", policy: "scm = 1\n" });
+    await expect(prepareWorktree(fx.queue, fx.run, "proj", fx.repo.checkout, fx.deps)).rejects.toThrow("worktree policy: .bmad-loop/policy.toml rollback_on_failure = true refused (scm is not a table); the original kept");
+    expect(readFileSync(join(worktreePath(fx.work, "proj", fx.run.run_id), ".bmad-loop", "policy.toml"), "utf-8")).toBe("scm = 1\n");
   });
 
   test("materialise: `tk install` at the pin runs only when the fresh worktree reports drift (hole 42), then `tk activate` clean", async () => {
@@ -418,8 +465,8 @@ describe("AC3: the engine-end sweep (operator-decisions §2)", () => {
     expect(pausedEv).toMatchObject({ kind: "paused", from_state: "running", to_state: "paused" });
     expect(pausedEv.detail).toMatchObject({ pr: "https://github.com/acme/widget/pull/42", closeout: { result: "draft PR", worktree: "kept" }, engine: { paused_stage: "review" } });
     expect(fx.gh.calls().find((c) => c.argv[1] === "create")!.argv).toContain("--draft");
-    // Story 37.3 (DW-148): the pause gets the leg for the landed commits; a skipped one (here the host tier) is no green, so a draft.
-    expect(fx.queue.events(fx.run.run_id).filter((e) => e.kind === "host-verify").map((e) => e.detail)).toEqual([expect.objectContaining({ skipped: true })]);
+    // Story 38.5 (CAP-13): the engines loop runs no leg for a pause (`pausedLegs` does, after the notice): a draft.
+    expect(fx.queue.events(fx.run.run_id).filter((e) => e.kind === "host-verify")).toEqual([]);
     expect(existsSync(fx.wt)).toBe(true);
     // The lock is kept: another run on the checkout waits on the paused run.
     const other = fx.queue.enqueue({ jobId: "k", root: fx.repo.checkout, definition: { id: "k" }, owner: me }).run;
@@ -454,8 +501,8 @@ describe("AC3: the engine-end sweep (operator-decisions §2)", () => {
     expect(fx.gh.calls().at(-2)!.argv).toEqual(["pr", "ready", "https://github.com/acme/widget/pull/42"]);
     expect(fx.gh.calls().at(-1)!.argv.slice(0, 4)).toEqual(["pr", "edit", "https://github.com/acme/widget/pull/42", "--body-file"]);
     // Story 35.1: the close-out's first body carries `Legs: 1 — close-out …` under the heading.
-    // Story 37.3 (DW-148): the pause ran its own leg (skipped: host tier), so the body's history names both.
-    expect(fx.gh.calls().at(-1)!.body).toMatch(/## Host verify\n\nLegs: 2 — close-out skipped \S+; close-out skipped \S+\n\nSkipped: host-tier run: the worker ran on the host/);
+    // Story 38.5 (CAP-13): the pause ran no leg in the engines loop, so the end's leg is the only one.
+    expect(fx.gh.calls().at(-1)!.body).toMatch(/## Host verify\n\nLegs: 1 — close-out skipped \S+\n\nSkipped: host-tier run: the worker ran on the host/);
     expect(existsSync(fx.wt)).toBe(false);
     expect(fx.queue.lock(fx.repo.checkout)).toBeNull();
     expect(fx.head()).toEqual(fx.headBefore);
@@ -490,16 +537,20 @@ describe("AC3: the engine-end sweep (operator-decisions §2)", () => {
     expect(fx.gh.calls().find((c) => c.argv[1] === "create")!.body).toContain("$3.5000");
   });
 
-  test("cancel of a launched run: the engine stopped, then closed out before the `cancelled` end — pushed, its PR on `ended`, the worktree removed", async () => {
+  test("cancel of a launched run: the engine stopped, then closed out before the `cancelled` end — pushed, its PR (a draft: Story 38.5, DW-166) on `ended`, the worktree removed", async () => {
     const fx = await launched();
     commitIn(fx.wt, "a.txt", "engine: partial work");
     const stops: string[][] = [];
-    const verbs = async (_r: string, a: string[]) => a[0] === "status" ? { runs: [{ run_id: "j-20261016T101010Z", state: "running" }] } : { state: "cancelled" };
+    const lines: string[][] = [];
+    const verbs = async (_r: string, a: string[]) => { lines.push(a); return a[0] === "status" ? { runs: [{ run_id: "j-20261016T101010Z", state: "running" }] } : { state: "cancelled" }; };
     const ended = await cancelRun(fx.queue, fx.run.run_id, { verbRunner: verbs, launchStop: async (root, id) => { stops.push([root, id]); fx.answers.engineLive = false; return { ok: true, detail: "stopping" }; }, worktree: fx.deps });
+    // Story 38.5 (DW-166): the cancel's one job-run line, its cost carried (`cancelCostUsd`).
+    expect(lines.filter((a) => a[0] !== "status").map((a) => [a[0], a[a.indexOf("--total-cost-usd") + 1]])).toEqual([["finish", "0.25"]]);
     expect(ended.state).toBe("cancelled");
     expect(stops).toEqual([[fx.wt, "E1"]]);
     const ev = fx.queue.events(fx.run.run_id).find((e) => e.kind === "ended")!;
-    expect(ev.detail).toMatchObject({ pr: "https://github.com/acme/widget/pull/42", closeout: { result: "PR", worktree: "removed" }, engine_stop: { ok: true } });
+    expect(ev.detail).toMatchObject({ pr: "https://github.com/acme/widget/pull/42", closeout: { result: "draft PR", worktree: "removed" }, engine_stop: { ok: true } });
+    expect(fx.gh.calls().find((c) => c.argv[1] === "create")!.argv).toContain("--draft"); // Story 38.5 (DW-166): no leg vouches for a cancel
     expect(testGit(fx.repo.origin, "rev-parse", `refs/heads/supervisor/run-${fx.run.run_id}`)).toMatch(/^[0-9a-f]{40}$/);
     expect(existsSync(fx.wt)).toBe(false);
     expectNoForbiddenArgv(fx.argvs, fx.gh.calls());
@@ -807,21 +858,25 @@ describe("Story 27.4: the host verify leg runs before any PR opens", () => {
     expect(flag(fx.verbs[0]!, "--total-cost-usd")).toBe("0.25");
   });
 
-  test("red on a paused run's existing draft: the pause's leg red (a draft); at the end a fresh leg, no `gh pr ready`, `gh pr edit <pr> --body-file` with the failures", async () => {
+  test("red on a paused run's existing draft: the pause's leg red (a draft, `pausedLegs`); at the end the same code head reuses it (Story 38.5), no `gh pr ready`, `gh pr edit <pr> --body-file` with the failures", async () => {
     const fx = await launchedSbx(RED);
     fx.answers.launch = { ok: true, run: { status: "running", paused_stage: "review", paused_reason: "escalation" } };
     expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
     expect(fx.get().state).toBe("paused");
-    // Story 37.3 (DW-148): a clean paused tree runs the leg for the landed commits; red keeps the draft.
-    expect(hv(fx).map((e) => e.detail!.green)).toEqual([false]);
+    // Story 38.5 (CAP-13): no leg in the engines loop; the pass runs it for the landed commits, red keeps the draft.
+    expect(hv(fx)).toHaveLength(0);
     expect(fx.gh.calls().find((c) => c.argv[1] === "create")!.argv).toContain("--draft");
+    expect(await pausedLegs(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
+    const pr = "https://github.com/acme/widget/pull/42";
+    expect(hv(fx).map((e) => [e.detail!.green, e.detail!.paused_leg])).toEqual([[false, { pr, flip: "draft" }]]);
+    expect(hv(fx)[0]!.detail!.code_head).toBe(testGit(fx.wt, "rev-parse", "HEAD"));
     fx.answers.launch = { ok: true, run: { status: "finished" } };
     expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
-    expect(hv(fx)).toHaveLength(2); // the pause's leg is never reused for the end
+    expect(hv(fx)).toHaveLength(1); // Story 38.5: one commit set, one leg — the pause's reused for the end
     expect(fx.get().state).toBe("partial");
-    const pr = "https://github.com/acme/widget/pull/42";
-    expect(prCalls(fx).map((c) => c.argv[1])).toEqual(["list", "create", "ready", "edit"]);
-    expect(prCalls(fx)[2]!.argv).toEqual(["pr", "ready", pr, "--undo"]); // a no-op on the draft: never marked ready
+    expect(prCalls(fx).map((c) => c.argv[1])).toEqual(["list", "create", "ready", "edit", "ready", "edit"]);
+    expect(prCalls(fx)[2]!.argv).toEqual(["pr", "ready", pr, "--undo"]); // the pass's red flip: a no-op on the draft
+    expect(prCalls(fx)[4]!.argv).toEqual(["pr", "ready", pr, "--undo"]); // never marked ready
     const edit = prCalls(fx).at(-1)!;
     expect(edit.argv.slice(0, 4)).toEqual(["pr", "edit", pr, "--body-file"]);
     expect(edit.body).toContain("FAIL win32 path test");
@@ -833,7 +888,7 @@ describe("Story 27.4: the host verify leg runs before any PR opens", () => {
     const fx = await launchedSbx(undefined);
     fx.answers.launch = { ok: true, run: { status: "finished" } };
     expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
-    expect(hv(fx).map((e) => e.detail)).toEqual([{ skipped: true, reason: "no verify.host" }]);
+    expect(hv(fx).map((e) => e.detail)).toEqual([{ skipped: true, reason: "no verify.host", code_head: expect.any(String) }]); // Story 38.5: the code head recorded
     const create = fx.gh.calls().find((c) => c.argv[1] === "create")!;
     expect(create.argv).not.toContain("--draft");
     expect(create.body).toContain("Skipped: no verify.host");
@@ -844,7 +899,7 @@ describe("Story 27.4: the host verify leg runs before any PR opens", () => {
     const fx = await launchedSbx(RED, "host");
     fx.answers.launch = { ok: true, run: { status: "finished" } };
     expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
-    expect(hv(fx).map((e) => e.detail)).toEqual([{ skipped: true, reason: "host-tier run: the worker ran on the host" }]);
+    expect(hv(fx).map((e) => e.detail)).toEqual([{ skipped: true, reason: "host-tier run: the worker ran on the host", code_head: expect.any(String) }]); // Story 38.5: the code head recorded
     expect(fx.argvs.some((a) => a.bin === process.execPath)).toBe(false);
     expect(fx.gh.calls().find((c) => c.argv[1] === "create")!.argv).not.toContain("--draft");
     expect(fx.get().state).toBe("complete");
@@ -918,16 +973,21 @@ describe("Story 27.4: the host verify leg runs before any PR opens", () => {
     expect(prCalls(fx).map((c) => c.argv[1])).toEqual(["list", "ready", "edit"]);
   });
 
-  test("Story 37.3 (DW-148): a dirty paused tree skips the leg (`paused: dirty tree`), the PR a draft, the uncommitted work left in place", async () => {
+  test("Story 37.3 (DW-148), Story 38.5 (`pausedLegs`): a dirty paused tree skips the leg (`paused: dirty tree`, the code head), the PR a draft, the uncommitted work left in place", async () => {
     const fx = await launchedSbx(bunCmd("console.log('all green')"));
     writeFileSync(join(fx.wt, "half.txt"), "half-written"); // the attempt's uncommitted work
     fx.answers.launch = { ok: true, run: { status: "running", paused_stage: "dev", paused_reason: "rollback-manual-required" } };
     expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
     expect(fx.get().state).toBe("paused");
-    expect(hv(fx).map((e) => e.detail)).toEqual([{ skipped: true, reason: "paused: dirty tree" }]);
+    expect(hv(fx)).toHaveLength(0);
+    expect(fx.queue.events(fx.run.run_id).at(-1)!.detail).toMatchObject({ closeout: { result: "draft PR", worktree: "kept" } });
+    expect(await pausedLegs(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
+    expect(hv(fx).map((e) => e.detail)).toEqual([{ skipped: true, reason: "paused: dirty tree", code_head: testGit(fx.wt, "rev-parse", "HEAD") }]);
+    expect(await pausedLegs(fx.queue, fx.deps)).toEqual([]); // noted once
+    expect(hv(fx)).toHaveLength(1);
     expect(fx.argvs.some((a) => a.bin === process.execPath)).toBe(false); // the leg's command never ran
     expect(fx.gh.calls().find((c) => c.argv[1] === "create")!.argv).toContain("--draft");
-    expect(fx.queue.events(fx.run.run_id).at(-1)!.detail).toMatchObject({ closeout: { result: "draft PR", host_verify: "skipped", worktree: "kept" } });
+    expect(prCalls(fx).map((c) => c.argv[1])).toEqual(["list", "create"]); // the PR stays the pause's draft
     expect(readFileSync(join(fx.wt, "half.txt"), "utf-8")).toBe("half-written");
     expect(testGit(fx.wt, "status", "--porcelain")).toContain("half.txt"); // never committed nor stashed
   });
@@ -940,54 +1000,63 @@ describe("Story 27.4: the host verify leg runs before any PR opens", () => {
     fx.answers.launch = { ok: true, run: { status: "running", paused_stage: "review", paused_reason: "escalation" } };
     expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
     expect(fx.get().state).toBe("paused");
+    expect(fx.gh.calls().find((c) => c.argv[1] === "create")!.argv).toContain("--draft"); // Story 38.5: the pause's own close-out
+    expect(await pausedLegs(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
     expect(hv(fx).map((e) => e.detail!.green)).toEqual([true]);
-    expect(fx.gh.calls().find((c) => c.argv[1] === "create")!.argv).not.toContain("--draft");
+    expect(prCalls(fx).map((c) => c.argv.slice(1, 3))).toEqual([["list", "--head"], ["create", "--base"], ["ready", "https://github.com/acme/widget/pull/42"], ["edit", "https://github.com/acme/widget/pull/42"]]);
     expect(testGit(fx.wt, "status", "--porcelain")).toContain("_bmad-output/"); // left in place, never committed
     writeFileSync(join(fx.wt, "code.ts"), "half-written");
     expect(await treeClean(fx.get(), fx.deps)).toBe(false);
   });
 
-  test("Story 37.3 (DW-148): pause 1 green → the PR opened ready; resumed, pause 2 on a dirty tree → `gh pr ready --undo` and `gh pr edit`, a draft again", async () => {
+  test("Story 37.3 (DW-148), Story 38.5: pause 1 green → the PR marked ready by `pausedLegs`; resumed, pause 2 on a new commit and a dirty tree → `gh pr ready --undo` and `gh pr edit`, a draft again, the dirty skip noted by the pass", async () => {
     const fx = await launchedSbx(bunCmd("console.log('all green')"));
     fx.answers.launch = { ok: true, run: { status: "running", paused_stage: "review", paused_reason: "escalation" } };
     expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
     expect(fx.get().state).toBe("paused");
-    expect(fx.gh.calls().find((c) => c.argv[1] === "create")!.argv).not.toContain("--draft");
+    expect(fx.gh.calls().find((c) => c.argv[1] === "create")!.argv).toContain("--draft");
+    expect(await pausedLegs(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
+    expect(hv(fx).at(-1)!.detail!.paused_leg).toEqual({ pr: "https://github.com/acme/widget/pull/42", flip: "ready" });
     // The engine resumed (`POST /runs/{id}/resume`) and its driver let go; then it pauses again with uncommitted work.
     const launched = fx.queue.events(fx.run.run_id).findLast((e) => e.kind === "launched")!.detail!;
     fx.queue.resumeFromPause(fx.run.run_id, "engine-resume", {});
     fx.queue.note(fx.run.run_id, "launched", launched);
     fx.queue.db.run("UPDATE runs SET owner_pid = NULL, owner_nonce = NULL WHERE run_id = ?", [fx.run.run_id]); // its driver gone
+    commitIn(fx.wt, "b.txt", "engine: story two"); // a new code head: the first pause's leg does not vouch for it
     writeFileSync(join(fx.wt, "half.txt"), "half-written");
     expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
     expect(fx.get().state).toBe("paused");
-    expect(hv(fx).map((e) => e.detail!.reason ?? e.detail!.green)).toEqual([true, "paused: dirty tree"]);
     const pr = "https://github.com/acme/widget/pull/42";
-    expect(prCalls(fx).map((c) => c.argv[1])).toEqual(["list", "create", "ready", "edit"]);
-    expect(prCalls(fx)[2]!.argv).toEqual(["pr", "ready", pr, "--undo"]);
-    expect(prCalls(fx)[3]!.argv.slice(0, 4)).toEqual(["pr", "edit", pr, "--body-file"]);
-    expect(fx.queue.events(fx.run.run_id).at(-1)!.detail).toMatchObject({ pr, closeout: { result: "draft PR", host_verify: "skipped", worktree: "kept" } });
+    expect(prCalls(fx).map((c) => c.argv[1])).toEqual(["list", "create", "ready", "edit", "ready", "edit"]);
+    expect(prCalls(fx)[4]!.argv).toEqual(["pr", "ready", pr, "--undo"]);
+    expect(prCalls(fx)[5]!.argv.slice(0, 4)).toEqual(["pr", "edit", pr, "--body-file"]);
+    expect(fx.queue.events(fx.run.run_id).at(-1)!.detail).toMatchObject({ pr, closeout: { result: "draft PR", worktree: "kept" } });
+    expect(await pausedLegs(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
+    expect(hv(fx).map((e) => e.detail!.reason ?? e.detail!.green)).toEqual([true, "paused: dirty tree"]);
+    expect(prCalls(fx)).toHaveLength(6); // the dirty skip flips nothing: the pause's draft stays
   });
 
-  test("green on a paused run: the pause's leg green opens the PR ready (DW-148); at the end `gh pr ready <pr>` then `gh pr edit <pr> --body-file` carrying the green `## Host verify`", async () => {
+  test("green on a paused run: the pause's leg green (`pausedLegs`, Story 38.5) marks the draft ready; at the end the same code head reuses it, `gh pr ready <pr>` then `gh pr edit <pr> --body-file` carrying the green `## Host verify`", async () => {
     const fx = await launchedSbx(bunCmd("console.log('all green')"));
     fx.answers.launch = { ok: true, run: { status: "running", paused_stage: "review", paused_reason: "escalation" } };
     expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
     expect(fx.get().state).toBe("paused");
-    // Story 37.3 (DW-148): the clean paused tree's leg green: the PR opened ready, the worktree kept for the resume.
-    expect(hv(fx).map((e) => e.detail!.green)).toEqual([true]);
-    expect(fx.gh.calls().find((c) => c.argv[1] === "create")!.argv).not.toContain("--draft");
-    expect(fx.queue.events(fx.run.run_id).at(-1)!.detail).toMatchObject({ closeout: { result: "PR", host_verify: "green", worktree: "kept" } });
+    // Story 38.5 (CAP-13): the pause closes out as a draft with no leg; the pass's green leg marks it ready, the worktree kept.
+    expect(fx.gh.calls().find((c) => c.argv[1] === "create")!.argv).toContain("--draft");
+    expect(fx.queue.events(fx.run.run_id).at(-1)!.detail).toMatchObject({ closeout: { result: "draft PR", worktree: "kept" } });
+    expect(await pausedLegs(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
+    const pr = "https://github.com/acme/widget/pull/42";
+    expect(hv(fx).map((e) => [e.detail!.green, e.detail!.paused_leg])).toEqual([[true, { pr, flip: "ready" }]]);
+    expect(prCalls(fx)[3]!.body).toMatch(/## Host verify\n\nLegs: 1 — close-out green \S+\n\nGreen: `/);
     expect(fx.verbs).toEqual([]);
     fx.answers.launch = { ok: true, run: { status: "finished" } };
     expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
-    expect(hv(fx).map((e) => e.detail!.green)).toEqual([true, true]);
-    const pr = "https://github.com/acme/widget/pull/42";
-    expect(prCalls(fx).map((c) => c.argv[1])).toEqual(["list", "create", "ready", "edit"]);
-    expect(prCalls(fx)[2]!.argv).toEqual(["pr", "ready", pr]);
-    const edit = prCalls(fx)[3]!;
+    expect(hv(fx).map((e) => e.detail!.green)).toEqual([true]); // one commit set, one leg
+    expect(prCalls(fx).map((c) => c.argv[1])).toEqual(["list", "create", "ready", "edit", "ready", "edit"]);
+    expect(prCalls(fx)[4]!.argv).toEqual(["pr", "ready", pr]);
+    const edit = prCalls(fx)[5]!;
     expect(edit.argv.slice(0, 4)).toEqual(["pr", "edit", pr, "--body-file"]);
-    expect(edit.body).toMatch(/## Host verify\n\nLegs: 2 — close-out green \S+; close-out green \S+\n\nGreen: `/);
+    expect(edit.body).toMatch(/## Host verify\n\nLegs: 1 — close-out green \S+\n\nGreen: `/);
     expect(fx.get().state).toBe("complete");
     const ended = fx.queue.events(fx.run.run_id).find((e) => e.kind === "ended")!;
     expect(ended.detail).toMatchObject({ pr, closeout: { result: "PR", host_verify: "green", worktree: "removed" } });
@@ -1242,13 +1311,73 @@ describe("Story 27.4: the host verify leg runs before any PR opens", () => {
     expect(closed[0]!.detail).toMatchObject({ pr: fx.pr, closeout: { result: "draft PR", host_verify: "red" } });
   });
 
-  test("review P3: the late close-out of a terminal run with no recorded `host-verify`: as before — `gh pr ready` only, the body never edited", async () => {
+  test("Story 38.5 (DW-166): the late close-out of a cancelled run with no recorded `host-verify` never marks its PR ready: `--undo` and the body edited; `closed_out` carries `draft PR` and the PR; no `job-run` line of its own", async () => {
     const fx = await cancelledSkipped();
+    const finishes = fx.verbs.length;
     expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
-    expect(prCalls(fx).map((c) => c.argv.slice(1, 3))).toEqual([["list", "--head"], ["ready", fx.pr]]);
-    expect(prCalls(fx)[1]!.argv).toEqual(["pr", "ready", fx.pr]);
+    expect(prCalls(fx).map((c) => c.argv.slice(1, 4))).toEqual([["list", "--head", `supervisor/run-${fx.run.run_id}`], ["ready", fx.pr, "--undo"], ["edit", fx.pr, "--body-file"]]);
     expect(hv(fx)).toHaveLength(0);
     expect(fx.get().state).toBe("cancelled");
+    const closed = fx.queue.events(fx.run.run_id).filter((e) => e.kind === "closed_out");
+    expect(closed).toHaveLength(1);
+    expect(closed[0]!.detail).toMatchObject({ pr: fx.pr, closeout: { result: "draft PR" } });
+    expect(fx.verbs).toHaveLength(finishes); // the cancel's own `finish` is the run's one job-run line
+  });
+  /** Story 38.5 (DW-166): a launch run (engine E1 named by its status block, no `launched`) ended `complete` with its close-out
+   * skipped (`hold_lock`), the `host-verify` records given seeded first: the late close-out reads them by the position rule. */
+  async function completeSkipped(...records: Record<string, unknown>[]) {
+    const fx = await fixture({ baseRef: "main" });
+    const wt = await prepareWorktree(fx.queue, fx.run, "proj", fx.repo.checkout, fx.deps);
+    fx.queue.markVerbStarted(fx.run.run_id, "wake", [], { target: "skill", definition: fx.defn });
+    commitIn(wt, "a.txt", "engine: work");
+    for (const r of records) fx.queue.note(fx.run.run_id, "host-verify", r);
+    await mirror(fx.queue, fx.run.run_id, { jobId: "j", defn: fx.defn }, { ok: true, job_id: "j", run_id: "j-1", target: "skill", state: "complete",
+      status_block: { status: "complete", intent: "tk-studio-launch", artifacts: [".bmad-loop/runs/E1"] }, hold_lock: "sbx worker may still run in the VM: 12" }, async () => ({}), fx.deps);
+    expect(fx.get()).toMatchObject({ state: "complete", engine_run_id: "E1" });
+    expect(fx.queue.events(fx.run.run_id).find((e) => e.kind === "ended")!.detail).toMatchObject({ closeout: { result: "skipped" } });
+    fx.answers.engineLive = false;
+    return fx;
+  }
+  const lateCreate = (fx: { gh: ReturnType<typeof fakeGh> }) => fx.gh.calls().find((c) => c.argv[0] === "pr" && c.argv[1] === "create")!;
+
+  test("Story 38.5 (DW-166): the late close-out of a `complete` run whose latest record is a `paused: dirty tree` skip never opens the PR ready (a draft); the stage row reads `draft PR`", async () => {
+    const fx = await completeSkipped({ skipped: true, reason: "paused: dirty tree", code_head: "abc1234" });
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
+    expect(lateCreate(fx).argv).toContain("--draft");
+    const closed = fx.queue.events(fx.run.run_id).filter((e) => e.kind === "closed_out");
+    expect(closed).toHaveLength(1);
+    expect(closed[0]!.detail).toMatchObject({ pr: "https://github.com/acme/widget/pull/42", closeout: { result: "draft PR" } });
+    // the derived records: the stage pass's `close-out` row and the PR the plan-status review pass reads (`closed_out.detail.pr`)
+    expect(supervisorRows(fx.queue.events(fx.run.run_id)).filter((r) => r.stage === "close-out").map((r) => r.outcome)).toEqual(["skipped", "draft PR"]); // the end's skipped record, then the late close-out's
+    expect(fx.queue.events(fx.run.run_id).findLast((e) => e.kind === "closed_out")!.detail!.pr).toBe("https://github.com/acme/widget/pull/42");
+  });
+
+  test("Story 38.5 (DW-166): a paused-sweep skip never vouches; a recorded green leg or a by-design skip does — the late close-out of a `complete` run opens the PR ready", async () => {
+    const sweepSkip = await completeSkipped({ skipped: true, reason: "paused sweep: WIP committed, leg skipped" });
+    expect(await sweepEngines(sweepSkip.queue, sweepSkip.deps)).toEqual([sweepSkip.run.run_id]);
+    expect(lateCreate(sweepSkip).argv).toContain("--draft");
+    for (const leg of [
+      { command: "c", argv: ["c"], cwd: "w", exit: 0, duration_ms: 1, green: true, stdout_tail: [], stderr_tail: [] },
+      { skipped: true, reason: "no verify.host" },
+      { skipped: true, reason: "host-tier run: the worker ran on the host" },
+    ]) {
+      const fx = await completeSkipped(leg);
+      expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
+      expect(lateCreate(fx).argv).not.toContain("--draft");
+      expect(fx.queue.events(fx.run.run_id).find((e) => e.kind === "closed_out")!.detail).toMatchObject({ pr: "https://github.com/acme/widget/pull/42", closeout: { result: "PR" } });
+    }
+  });
+
+  test("Story 38.5 (DW-166): the late close-out of a `complete` run that launched no engine (a skill run) opens its PR ready", async () => {
+    const fx = await fixture({ baseRef: "main", skill: "tk-studio-activate" });
+    const defn = { id: "j", target: { skill: "tk-studio-activate" } };
+    const wt = await prepareWorktree(fx.queue, fx.run, "proj", fx.repo.checkout, fx.deps);
+    commitIn(wt, "a.txt", "worker: fix");
+    await mirror(fx.queue, fx.run.run_id, { jobId: "j", defn }, { ok: true, job_id: "j", run_id: "j-1", target: "skill", state: "complete", hold_lock: "sbx worker may still run in the VM: 12" }, async () => ({}), fx.deps);
+    expect(fx.get().state).toBe("complete");
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
+    expect(fx.queue.events(fx.run.run_id).at(-1)).toMatchObject({ kind: "closed_out", detail: { pr: "https://github.com/acme/widget/pull/42", closeout: { result: "PR" } } });
+    expect(fx.gh.calls().find((c) => c.argv[1] === "create")!.argv).not.toContain("--draft");
   });
 });
 
@@ -1309,7 +1438,9 @@ describe("never closed out while something may still work the worktree (P3), and
     expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
     const closed = fx.queue.events(fx.run.run_id).filter((e) => e.kind === "closed_out");
     expect(closed).toHaveLength(1);
-    expect(closed[0]!.detail).toMatchObject({ pr: "https://github.com/acme/widget/pull/42", closeout: { result: "PR", worktree: "removed" } });
+    // Story 38.5 (DW-166): a cancel's late close-out has no leg to vouch for it: a draft.
+    expect(closed[0]!.detail).toMatchObject({ pr: "https://github.com/acme/widget/pull/42", closeout: { result: "draft PR", worktree: "removed" } });
+    expect(fx.gh.calls().find((c) => c.argv[1] === "create")!.argv).toContain("--draft");
     expect(fx.get()).toMatchObject({ state: "cancelled", updated }); // the terminal row never updated
     expect(existsSync(fx.wt)).toBe(false);
     expect(await sweepEngines(fx.queue, fx.deps)).toEqual([]); // once
@@ -1367,7 +1498,7 @@ describe("never closed out while something may still work the worktree (P3), and
     expect(fx.gh.calls().some((c) => c.argv[0] === "pr")).toBe(false);
   });
 
-  test("cancel of a paused run (P1): its draft PR is marked ready, never created again", async () => {
+  test("cancel of a paused run (P1): its draft PR stays a draft (Story 38.5, DW-166: `--undo`, the body edited), never created again", async () => {
     const fx = await launched();
     commitIn(fx.wt, "a.txt", "engine: one");
     fx.answers.launch = { ok: true, run: { status: "running", paused_stage: "review" } };
@@ -1375,8 +1506,9 @@ describe("never closed out while something may still work the worktree (P3), and
     expect(fx.get().state).toBe("paused");
     await cancelRun(fx.queue, fx.run.run_id, { verbRunner: VERBS, launchStop: async () => { fx.answers.engineLive = false; return { ok: true, detail: "stopping" }; }, worktree: fx.deps });
     expect(endedOf(fx)).toMatchObject({ from_state: "paused", to_state: "cancelled" });
-    expect(endedOf(fx).detail).toMatchObject({ pr: "https://github.com/acme/widget/pull/42", closeout: { result: "PR", worktree: "removed" } });
-    expect(fx.gh.calls().filter((c) => c.argv[0] === "pr").map((c) => c.argv.slice(0, 2))).toEqual([["pr", "list"], ["pr", "create"], ["pr", "ready"]]);
+    expect(endedOf(fx).detail).toMatchObject({ pr: "https://github.com/acme/widget/pull/42", closeout: { result: "draft PR", worktree: "removed" } });
+    expect(fx.gh.calls().filter((c) => c.argv[0] === "pr").map((c) => c.argv.slice(0, 2))).toEqual([["pr", "list"], ["pr", "create"], ["pr", "ready"], ["pr", "edit"]]);
+    expect(fx.gh.calls().find((c) => c.argv[1] === "ready")!.argv).toContain("--undo");
     expect(existsSync(fx.wt)).toBe(false);
   });
 
@@ -1917,7 +2049,7 @@ describe("review pass 3: P1–P9", () => {
     expect(leases()).toEqual([selfOwner().nonce, null, selfOwner().nonce]);
     const closed = fx.queue.events(fx.run.run_id).filter((e) => e.kind === "closed_out");
     expect(closed).toHaveLength(1);
-    expect(closed[0]!.detail).toMatchObject({ pr: URL, closeout: { result: "PR", worktree: "removed" } });
+    expect(closed[0]!.detail).toMatchObject({ pr: URL, closeout: { result: "draft PR", worktree: "removed" } }); // Story 38.5 (DW-166): a cancel's, a draft
     expect(creates(fx)).toHaveLength(1);
     expect(fx.queue.lock(fx.repo.checkout)).toBeNull();
     expect(fx.get()).toMatchObject({ state: "cancelled", updated });
@@ -1982,10 +2114,41 @@ describe("review pass 3: P1–P9", () => {
       { ok: false, job_id: "j", run_id: "j-1", target: "skill", state: "blocked", reason: "dirty tree", total_cost_usd: 0.25,
         status_block: { status: "blocked", intent: "tk-studio-launch", artifacts: [".bmad-loop/runs/E1"], reason: "dirty tree" } },
       async () => ({}), fx.deps);
-    expect(fx.queue.events(fx.run.run_id).at(-1)!.detail).toMatchObject({ pr: URL, closeout: { result: "PR", worktree: "removed" } });
+    // Story 38.5 (DW-166): a `blocked` end that launched an engine has no leg vouching for it: a draft.
+    expect(fx.queue.events(fx.run.run_id).at(-1)!.detail).toMatchObject({ pr: URL, closeout: { result: "draft PR", worktree: "removed" } });
+    expect(creates(fx)[0]!.argv).toContain("--draft");
     const body = creates(fx)[0]!.body!;
     expect(body).toContain("$4.5000");
     expect(body).not.toContain("$0.2500");
+  });
+
+  test("Story 38.5 (DW-166): the run's end (`closeOutNow`) opens a PR ready only on a `complete` end of a run that launched no engine; a `complete` launch run's PR is a draft; its own `finish` the one job-run line", async () => {
+    // A skill run (no engine, no leg by design) ending `complete`: ready.
+    const skill = await fixture({ baseRef: "main", skill: "tk-studio-activate" });
+    const sdefn = { id: "j", target: { skill: "tk-studio-activate" } };
+    const swt = await prepareWorktree(skill.queue, skill.run, "proj", skill.repo.checkout, skill.deps);
+    skill.queue.markVerbStarted(skill.run.run_id, "wake", [], { target: "skill", definition: sdefn });
+    commitIn(swt, "a.txt", "worker: fix");
+    await mirror(skill.queue, skill.run.run_id, { jobId: "j", defn: sdefn },
+      { ok: true, job_id: "j", run_id: "j-1", target: "skill", state: "complete", status_block: { status: "complete", intent: "tk-studio-activate", artifacts: [] } },
+      async () => ({}), skill.deps);
+    expect(skill.get().state).toBe("complete");
+    expect(skill.queue.events(skill.run.run_id).at(-1)!.detail).toMatchObject({ pr: URL, closeout: { result: "PR", worktree: "removed" } });
+    expect(creates(skill)[0]!.argv).not.toContain("--draft");
+    // A launch run whose engine the status block names, ending `complete` with no deferred finish: no leg vouches, a draft.
+    const fx = await fixture({ baseRef: "main" });
+    const wt = await prepareWorktree(fx.queue, fx.run, "proj", fx.repo.checkout, fx.deps);
+    fx.queue.markVerbStarted(fx.run.run_id, "wake", [], { target: "skill", definition: fx.defn });
+    fx.answers.engineLive = false;
+    commitIn(wt, "a.txt", "engine: work");
+    await mirror(fx.queue, fx.run.run_id, { jobId: "j", defn: fx.defn },
+      { ok: true, job_id: "j", run_id: "j-1", target: "skill", state: "complete", total_cost_usd: 0.25,
+        status_block: { status: "complete", intent: "tk-studio-launch", artifacts: [".bmad-loop/runs/E1"] } },
+      async () => ({}), fx.deps);
+    expect(fx.get().state).toBe("complete");
+    expect(fx.queue.events(fx.run.run_id).at(-1)!.detail).toMatchObject({ pr: URL, closeout: { result: "draft PR", worktree: "removed" } });
+    expect(creates(fx)[0]!.argv).toContain("--draft");
+    expect(fx.verbs).toEqual([]); // no second job-run line: the run's own `finish` (the worker's) is its one
   });
 
   test("P4: no metered run.json → the launch worker's cost", async () => {
@@ -2065,7 +2228,7 @@ describe("review pass 3: P1–P9", () => {
     });
     expect(fx.queue.awaitingEngine().map((r) => r.run_id)).toEqual([fx.run.run_id]);
     expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
-    expect(fx.queue.events(fx.run.run_id).findLast((e) => e.kind === "closed_out")).toMatchObject({ detail: { pr: URL, closeout: { result: "PR", worktree: "removed" } } });
+    expect(fx.queue.events(fx.run.run_id).findLast((e) => e.kind === "closed_out")).toMatchObject({ detail: { pr: URL, closeout: { result: "draft PR", worktree: "removed" } } }); // Story 38.5 (DW-166)
     expect(existsSync(wt)).toBe(false);
   });
 });
@@ -2683,7 +2846,69 @@ describe("Story 34.8: a slice run's proof folder and host-side commit, before th
       else expect("assets" in ev.detail!).toBe(false);
     }
   }, 30_000);
-  test("Story 37.3 (DW-148): a clean paused slice run's leg is the code leg only: no assets verb, the tree still clean, green → the PR ready", async () => {
+  test("Story 38.5: a slice run that paused and ends on the same code head never reuses the pause's code-only leg — the end runs `hostVerify` with `slice` and records its `assets` step; a run-epic still reuses the pause's leg", async () => {
+    const config = `vcs: git\nverify:\n  host: ${JSON.stringify(`"${process.execPath}" -e "console.log('ok')"`)}\n`;
+    for (const defn of [{ id: "run-epic-41", type: "run-vertical-slice", target: { skill: "tk-studio-launch" } }, { id: "run-epic-41", type: "run-epic", target: { skill: "tk-studio-launch" } }]) {
+      const fx = await fixture({ baseRef: "main", files: { ".tk-studio/config.yaml": config } });
+      const wt = await prepareWorktree(fx.queue, fx.run, "proj", fx.repo.checkout, fx.deps);
+      fx.queue.markVerbStarted(fx.run.run_id, "wake", [], { target: "skill", definition: defn });
+      await mirror(fx.queue, fx.run.run_id, { jobId: "j", defn }, {
+        ok: true, job_id: "j", run_id: "j-20261016T101010Z", target: "skill", state: "complete",
+        status_block: { status: "complete", intent: "tk-studio-launch", artifacts: [".bmad-loop/runs/E1"] }, total_cost_usd: 0.25, finish_deferred: true,
+      }, async () => ({}), fx.deps);
+      (fx.queue as any).db.query("UPDATE runs SET tier = 'sbx' WHERE run_id = ?").run(fx.run.run_id);
+      commitIn(wt, "a.txt", "engine: story one");
+      fx.answers.launch = { ok: true, run: { status: "running", paused_stage: "review", paused_reason: "escalation" } };
+      expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
+      expect(await pausedLegs(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
+      const legs = () => fx.queue.events(fx.run.run_id).filter((e) => e.kind === "host-verify");
+      expect(legs().map((e) => "assets" in e.detail!)).toEqual([false]); // the pause's leg: the code leg only
+      const head = testGit(wt, "rev-parse", "HEAD");
+      fx.answers.launch = { ok: true, run: { status: "finished" } };
+      expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
+      if (defn.type === "run-vertical-slice") {
+        expect(legs()).toHaveLength(2);
+        expect(legs()[1]!.detail).toMatchObject({ green: true, code_head: head, assets: { verdict: "skipped", reason: "no manifest" } });
+      } else expect(legs()).toHaveLength(1); // one commit set, one leg
+      expect(fx.get().state).toBe("complete");
+    }
+  }, 30_000);
+
+  test("Story 38.5: pause 1 green at head H (the PR ready); resumed, pause 2 on a dirty tree at the same H → `gh pr ready --undo` (no reuse on a dirty tree), one `paused: dirty tree` skip after pause 2", async () => {
+    const config = `vcs: git\nverify:\n  host: ${JSON.stringify(`"${process.execPath}" -e "console.log('ok')"`)}\n`;
+    const fx = await fixture({ baseRef: "main", files: { ".tk-studio/config.yaml": config } });
+    const wt = await prepareWorktree(fx.queue, fx.run, "proj", fx.repo.checkout, fx.deps);
+    fx.queue.markVerbStarted(fx.run.run_id, "wake", [], { target: "skill", definition: fx.defn });
+    await mirror(fx.queue, fx.run.run_id, { jobId: "j", defn: fx.defn }, {
+      ok: true, job_id: "j", run_id: "j-20261016T101010Z", target: "skill", state: "complete",
+      status_block: { status: "complete", intent: "tk-studio-launch", artifacts: [".bmad-loop/runs/E1"] }, total_cost_usd: 0.25, finish_deferred: true,
+    }, async () => ({}), fx.deps);
+    (fx.queue as any).db.query("UPDATE runs SET tier = 'sbx' WHERE run_id = ?").run(fx.run.run_id);
+    commitIn(wt, "a.txt", "engine: story one");
+    const pr = "https://github.com/acme/widget/pull/42";
+    const prs = () => fx.gh.calls().filter((c) => c.argv[0] === "pr");
+    fx.answers.launch = { ok: true, run: { status: "running", paused_stage: "review", paused_reason: "escalation" } };
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
+    expect(await pausedLegs(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
+    expect(prs().map((c) => c.argv[1])).toEqual(["list", "create", "ready", "edit"]); // the pass's green flip
+    const launched = fx.queue.events(fx.run.run_id).findLast((e) => e.kind === "launched")!.detail!;
+    fx.queue.resumeFromPause(fx.run.run_id, "engine-resume", {});
+    fx.queue.note(fx.run.run_id, "launched", launched);
+    fx.queue.db.run("UPDATE runs SET owner_pid = NULL, owner_nonce = NULL WHERE run_id = ?", [fx.run.run_id]);
+    writeFileSync(join(wt, "half.txt"), "half-written"); // no new commit: the same code head
+    expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
+    expect(prs().map((c) => c.argv[1])).toEqual(["list", "create", "ready", "edit", "ready", "edit"]);
+    expect(prs()[4]!.argv).toEqual(["pr", "ready", pr, "--undo"]);
+    expect(fx.queue.events(fx.run.run_id).at(-1)!.detail).toMatchObject({ pr, closeout: { result: "draft PR", worktree: "kept" } });
+    expect(await pausedLegs(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
+    const evs = fx.queue.events(fx.run.run_id);
+    const after = evs.slice(evs.findLastIndex((e) => e.kind === "paused") + 1).filter((e) => e.kind === "host-verify");
+    expect(after.map((e) => e.detail)).toEqual([{ skipped: true, reason: "paused: dirty tree", code_head: testGit(wt, "rev-parse", "HEAD") }]);
+    expect(await pausedLegs(fx.queue, fx.deps)).toEqual([]); // once
+    expect(prs()).toHaveLength(6);
+  });
+
+  test("Story 37.3 (DW-148), Story 38.5 (`pausedLegs`): a clean paused slice run's leg is the code leg only: no assets verb, the tree still clean, green → the PR ready", async () => {
     const config = `vcs: git\nverify:\n  host: ${JSON.stringify(`"${process.execPath}" -e "console.log('ok')"`)}\n`;
     const defn = { id: "run-epic-41", type: "run-vertical-slice", target: { skill: "tk-studio-launch" } };
     const fx = await fixture({ baseRef: "main", files: { ".tk-studio/config.yaml": config, "assets/manifest.yaml": "schema: 1\n" } });
@@ -2704,16 +2929,18 @@ describe("Story 34.8: a slice run's proof folder and host-side commit, before th
     fx.answers.launch = { ok: true, run: { status: "running", paused_stage: "review", paused_reason: "escalation" } };
     expect(await sweepEngines(fx.queue, { ...fx.deps, run })).toEqual([fx.run.run_id]);
     expect(fx.get().state).toBe("paused");
+    const c = fx.queue.events(fx.run.run_id).at(-1)!.detail as any;
+    expect(c.closeout).toMatchObject({ result: "draft PR", worktree: "kept" });
+    expect(c.closeout.host_commit).toBeUndefined(); // the slice proof stays with the final close-out
+    expect(await pausedLegs(fx.queue, { ...fx.deps, run })).toEqual([fx.run.run_id]);
     const ev = fx.queue.events(fx.run.run_id).filter((e) => e.kind === "host-verify");
     expect(ev.map((e) => e.detail!.green)).toEqual([true]);
     expect("assets" in ev[0]!.detail!).toBe(false);
     expect(spawned.length).toBeGreaterThan(0);
     expect(spawned.some((a) => a.some((x) => String(x).endsWith("assets.py")))).toBe(false);
     expect(await treeClean(fx.get(), fx.deps)).toBe(true);
-    const c = fx.queue.events(fx.run.run_id).at(-1)!.detail as any;
-    expect(c.closeout).toMatchObject({ result: "PR", host_verify: "green", worktree: "kept" });
-    expect(c.closeout.host_commit).toBeUndefined(); // the slice proof stays with the final close-out
-    expect(fx.gh.calls().find((x) => x.argv[1] === "create")!.argv).not.toContain("--draft");
+    expect(ev[0]!.detail!.paused_leg).toEqual({ pr: "https://github.com/acme/widget/pull/42", flip: "ready" });
+    expect(fx.gh.calls().filter((x) => x.argv[0] === "pr").map((x) => x.argv[1])).toEqual(["list", "create", "ready", "edit"]);
   }, 30_000);
 });
 
@@ -2966,7 +3193,7 @@ describe("Story 38.2: a run that does no work says so", () => {
     expect(noStoryEnd(fx.wt, "E1", "stopped")).toMatchObject({ story_key: KEY, word: "halted", attempts: 2, reason: REASON });
     expect(await sweepEngines(fx.queue, fx.deps)).toEqual([fx.run.run_id]);
     expect(fx.get()).toMatchObject({ state: "partial", reason: REASON });
-    expect(fx.ev("host-verify").map((e) => e.detail)).toEqual([{ skipped: true, reason: NO_CHANGES_SKIP }]);
+    expect(fx.ev("host-verify").map((e) => e.detail)).toEqual([{ skipped: true, reason: NO_CHANGES_SKIP, code_head: expect.any(String) }]); // Story 38.5: the code head recorded
     expect(NO_CHANGES_SKIP).toBe("no changes");
     expect(fx.ev("host-verify-leg")).toEqual([]); // the skip notes no lease
     const ended = fx.ev("ended")[0]!;
@@ -3007,7 +3234,7 @@ describe("Story 38.2: a run that does no work says so", () => {
     const fx = await launchedHalted({ journal: false });
     await sweepEngines(fx.queue, fx.deps);
     expect(fx.get()).toMatchObject({ state: "complete", reason: null });
-    expect(fx.ev("host-verify").map((e) => e.detail)).toEqual([{ skipped: true, reason: NO_CHANGES_SKIP }]);
+    expect(fx.ev("host-verify").map((e) => e.detail)).toEqual([{ skipped: true, reason: NO_CHANGES_SKIP, code_head: expect.any(String) }]); // Story 38.5: the code head recorded
     expect(fx.carried).toEqual([]);
   });
 
@@ -3040,7 +3267,7 @@ describe("Story 38.2: a run that does no work says so", () => {
       engine: { run_id: "E1", status: "stopped", paused_story_key: KEY, paused_stage: "no-story", paused_reason: REASON },
       no_story: { story_key: KEY, word: "halted", attempts: 2 }, no_changes: true, closeout: { result: "no changes", worktree: "kept" },
     });
-    expect(fx.ev("host-verify").map((e) => e.detail)).toEqual([{ skipped: true, reason: NO_CHANGES_SKIP }]);
+    expect(fx.ev("host-verify").map((e) => e.detail)).toEqual([{ skipped: true, reason: NO_CHANGES_SKIP, code_head: expect.any(String) }]); // Story 38.5: the code head recorded
     expect(fx.ev(STAGE_CARRY)).toHaveLength(1);
     expect(fx.verbs).toEqual([]); // paused: never finished
     expect(existsSync(fx.wt)).toBe(true);
@@ -3113,14 +3340,14 @@ describe("Story 38.2: a run that does no work says so", () => {
     expect(ended.detail!.no_changes).toBeUndefined();
     expect(ended.detail).toMatchObject({ closeout: { result: "failed", error: expect.stringContaining("git log exit 128") } });
     expect(fx.get()).toMatchObject({ state: "partial", reason: REASON });
-    expect(fx.ev("host-verify").map((e) => e.detail)).toEqual([{ skipped: true, reason: NO_CHANGES_SKIP }]);
+    expect(fx.ev("host-verify").map((e) => e.detail)).toEqual([{ skipped: true, reason: NO_CHANGES_SKIP, code_head: expect.any(String) }]); // Story 38.5: the code head recorded
   });
 
   test("CAP-4: the no-story override replaces only a `complete` end: a `blocked` end keeps its state and reason", async () => {
     const fx = await launchedHalted({ state: "blocked", reason: "the worker blocked: guard tripped" });
     await sweepEngines(fx.queue, fx.deps);
     expect(fx.get()).toMatchObject({ state: "blocked", reason: "the worker blocked: guard tripped" });
-    expect(fx.ev("host-verify").map((e) => e.detail)).toEqual([{ skipped: true, reason: NO_CHANGES_SKIP }]);
+    expect(fx.ev("host-verify").map((e) => e.detail)).toEqual([{ skipped: true, reason: NO_CHANGES_SKIP, code_head: expect.any(String) }]); // Story 38.5: the code head recorded
   });
 
   test("CAP-5: the halt pause whose close-out does not report `no_changes`: never `complete`, `partial` with the no-story reason", async () => {

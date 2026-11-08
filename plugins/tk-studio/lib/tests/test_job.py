@@ -238,6 +238,19 @@ class JobTestCase(unittest.TestCase):
         self.assertEqual(joblib.validate_definition(
             self._defn(stop={"max_runs": 3, "after_stories": 1})), [])
 
+    def test_story_38_5_max_own_blocks_is_a_bound_never_a_stop_condition(self):
+        for figure in (0, -1, True, "3", 2.5):
+            with self.subTest(figure=figure):
+                problems = joblib.validate_definition(
+                    self._defn(stop={"max_runs": 3, "max_own_blocks": figure}))
+                self.assertTrue(any("max_own_blocks must be an integer > 0" in p
+                                    for p in problems), problems)
+        alone = joblib.validate_definition(self._defn(stop={"max_own_blocks": 3}))
+        self.assertTrue(any("at least one" in p and "max_own_blocks" not in p
+                            for p in alone), alone)
+        self.assertEqual(joblib.validate_definition(
+            self._defn(stop={"max_runs": 3, "max_own_blocks": 2})), [])
+
     def test_story_36_6_run_epic_declares_its_rhythm(self):
         types = joblib.load_types()
         self.assertEqual(types["run-epic"]["definition"]["stop"],
