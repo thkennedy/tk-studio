@@ -213,6 +213,66 @@ class BlockTests(TrackTestCase):
         import syncback
         self.assertEqual(syncback.MENTION_RE.findall(text), [OWNER])
 
+    def test_story_38_5_kind_engine_blocks_with_no_mention_and_no_owner_action(self):
+        """DW-176: an engine-clock pause's block asks nothing of the owner: the
+        comment carries no mention, a dependent's neither; the transition
+        and the dependents are unchanged."""
+        self.depends("ST-002", "ST-001")
+        result = self.block(reason="engine clock: dev session timeout",
+                            resolves="the supervisor resumes the run",
+                            kind="engine")
+        self.assert_track_block(result, "complete")
+        self.assertEqual(result["kind"], "engine")
+        self.assertEqual(self.fake.status[f"{KEY}-1"], BLOCKED)
+        self.assertEqual(self.fake.status[f"{KEY}-2"], BLOCKED)
+        story = ("Blocked (engine): engine clock: dev session timeout — no "
+                 "owner action\nResolves when: the supervisor resumes the run")
+        self.assertEqual(self.fake.posted, {
+            f"{KEY}-1": [story],
+            f"{KEY}-2": [f"{story}\nBlocked by: {KEY}-1"]})
+        self.assertNotIn("accountid", json.dumps(self.fake.posted))
+        # a re-block on the same pause skips the comment as ever
+        again = self.block(reason="engine clock: dev session timeout",
+                           resolves="the supervisor resumes the run",
+                           kind="engine")
+        self.assertEqual(len(self.fake.posted[f"{KEY}-1"]), 1)
+        self.assertEqual(again["issues"][0]["commented"], False)
+
+    def test_story_38_5_another_kind_with_story_is_refused_by_name(self):
+        for kind, source in (("cap", "run"), ("engine", "engagement")):
+            with self.subTest(kind=kind, source=source):
+                result = self.block(kind=kind, source=source)
+                self.assert_track_block(result, "blocked")
+                self.assertIn("only --kind engine with --source run",
+                              result["reason"])
+        self.assertEqual(self.fake.calls, [])
+
+        def run(*argv):
+            out = io.StringIO()
+            with unittest.mock.patch.object(jirabackend, "client_for",
+                                            _client_with(self.fake)), \
+                    contextlib.redirect_stdout(out):
+                code = track.main(["block", "--directory", str(self.root),
+                                   *argv])
+            return code, json.loads(out.getvalue())
+        code, result = run("--story", "ST-001", "--reason", "r",
+                           "--resolves", "s", "--kind", "ask")
+        self.assertEqual(code, 2)
+        self.assertIn("--kind is --engagement's", result["reason"])
+        self.assertEqual(self.fake.calls, [])
+        code, result = run("--story", "ST-001", "--reason", "r",
+                           "--resolves", "s", "--kind", "engine",
+                           "--source", "run")
+        self.assertEqual(code, 0)
+        self.assertEqual(result["kind"], "engine")
+        self.assertTrue(self.fake.posted[f"{KEY}-1"][-1].startswith(
+            "Blocked (engine): r — no owner action"))
+        # --source sweep keeps refusing --kind (Story 38.4)
+        code, result = run("--source", "sweep", "--kind", "engine")
+        self.assertEqual(code, 2)
+        self.assertIn("--source sweep is exclusive with --kind",
+                      result["reason"])
+
     def test_a_loop_story_key_maps_by_the_entity_source(self):
         result = self.block("1-2-beta-story")
         self.assert_track_block(result, "complete")
@@ -1915,6 +1975,28 @@ class UnblockTests(TrackTestCase):
             self.seed_comment(f"{KEY}-2", AGENT,
                               f"[~accountid:o] Blocked: x\nResolves when: y\nBlocked by: {blocker}",
                               60 - i)
+
+    def test_story_38_5_a_dependent_with_its_own_engine_block_stays(self):
+        engine = ("Blocked (engine): the cap clock — no owner action\n"
+                  "Resolves when: the window reopens")
+        self.seed_dependent(f"{KEY}-1")
+        self.seed_comment(f"{KEY}-2", AGENT, engine, 30)
+        self.fake.status[f"{KEY}-1"] = BLOCKED
+        with unittest.mock.patch.object(
+                jirabackend, "issue_comments",
+                return_value=[{"author": {"accountId": AGENT},
+                               "body": f"[~accountid:{OWNER}] Blocked: x\nBlocked by: {KEY}-1"},
+                              {"author": {"accountId": AGENT}, "body": engine}]):
+            self.assertEqual(track._open_blocks(None, f"{KEY}-2", OWNER),
+                             ({f"{KEY}-1"}, True))
+        result = self.unblock()
+        self.assertEqual(self.fake.status[f"{KEY}-1"], jirabackend.RESOLVED_STATUS)
+        self.assertEqual(self.fake.status[f"{KEY}-2"], BLOCKED)
+        self.assertIn(f"transition: {KEY}-2 is blocked by something other than {KEY}-1",
+                      result["skipped"])
+        dependent = [i for i in result["issues"] if i["role"] == "dependent"][0]
+        self.assertFalse(dependent["transitioned"])
+        self.assertFalse(dependent["commented"])
 
     def test_story_36_3_a_key_that_only_contains_the_story_key_is_no_match(self):
         self.seed_dependent(f"{KEY}-12")

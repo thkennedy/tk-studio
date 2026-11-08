@@ -188,6 +188,17 @@ class SettledShapeRuleTest(unittest.TestCase):
                       "(a `<key>-s2` entry's names `plans/<N>-<M>-s2.md`)", section3)
 
     @unittest.skipUnless(TASK_PLANNING.is_file(), "studio-pipeline plugin not in this checkout")
+    def test_story_38_5_a_split_storys_spec_resolves_by_its_exact_name_first(self):
+        # Story 38.5 (DW-177): one resolution rule in three places; this doc names it in section 3
+        section3 = _flat(TASK_PLANNING.read_text(encoding="utf-8").split("## 3.", 1)[1].split("\n## 4.", 1)[0])
+        self.assertIn("A split story's spec resolves by its exact `<key>-spec.md` first and by the prefix glob "
+                      "`<key>-*.md` only when one file matches, the `-s<n>` and `-r<n>` names excluded from the "
+                      "first half's glob (`plansync._stage_target`, `closeout.findSpec`); this doc's "
+                      "`stories/<key>-*.md` reads the same way.", section3)
+        self.assertLess(section3.index("**Over the dev clock (Story 37.3).**"),
+                        section3.index("A split story's spec resolves by its exact"))
+
+    @unittest.skipUnless(TASK_PLANNING.is_file(), "studio-pipeline plugin not in this checkout")
     def test_task_planning_plans_every_story_and_refuses_open_questions(self):
         # Story 35.2: the bootstrap plans every manifest entry in list order (section 3
         # each, the named story first); an un-noted open question of the story's CAPs is

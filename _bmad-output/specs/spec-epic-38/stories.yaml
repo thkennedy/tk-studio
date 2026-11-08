@@ -196,7 +196,11 @@
     executor spec as `stories/38-6-the-gates-coverage-widened-spec.md` in the spec
     folder; the engine resolves it by the glob `38-6-the-gates-coverage-widened-*.md`,
     and a file named `38-6-the-gates-coverage-widened.md` is read as pending (loop
-    deficiency 1, story 21-6).
+    deficiency 1, story 21-6). Refresh (38-5 gate, 2026-11-08): plans/38-6.md's
+    "Refreshed at the 38-5 gate" block has the anchors at HEAD after 38.1-38.5; the
+    drives, sandbox.ts and the config are unchanged, verify_host.py and the
+    contract moved. Oversize (plan Risks, not split): halt (the `halt` consult) if
+    the Files list grows past the plan's 20 files.
 
 - id: "38-7-the-records-reconciled-and-the-policys-bands"
   title: "The Records Reconciled and the Policy's Bands"

@@ -3705,6 +3705,68 @@ class DriverContractTestCase(unittest.TestCase):
                        if line.startswith("| Story / rulings"))
         self.assertRegex(stories, r"Story 38\.1, Story 38\.2, Story 38\.3, Story 38\.4(, Story 38\.\d+)* \(Epic 38\)")
 
+    def test_0_1_34_story_38_5_the_pause_path_finished(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.34**", header)
+        self.assertNotIn("**0.1.35**", header)
+        self.assertEqual(header.count("0.1.34 (Story 38.5, additive)"), 1)
+        self.assertLess(header.index("0.1.34 (Story 38.4, additive)"),
+                        header.index("0.1.34 (Story 38.5, additive)"))
+        clause = " ".join(header[header.index("0.1.34 (Story 38.5, additive)"):].split())
+        for phrase in ("the pause path finished", "the pause's notice and block before its leg",
+                       "the leg in its own pass (`pausedLegs`)", "one leg per code head (`host-verify.code_head`)",
+                       "no stub policy (`worktree policy: none in the checkout`)", "the TOML-aware rollback edit",
+                       "`stop.max_own_blocks` (default 3)", "`track.py block --kind engine`",
+                       "the late close-outs' draft and records", "the split spec's exact name first", "— additive) |"):
+            self.assertIn(phrase, clause)
+        flat = " ".join(self.text.split())
+        self.assertEqual(flat.count("**0.1.34 (Story 38.5, additive).**"), 1)
+        self.assertLess(flat.index("**0.1.34 (Story 38.4, additive).**"), flat.index("**0.1.34 (Story 38.5, additive).**"))
+        self.assertLess(flat.index("**0.1.34 (Story 38.5, additive).**"), flat.index("**0.1.34 (DW-51, additive).**"))
+        note = flat[flat.index("**0.1.34 (Story 38.5, additive).**"):]
+        note = note[:note.index("## 8. Conformance")]
+        note = note[:note.index("**0.1.34 (DW-51, additive).**")]
+        subs = ("**The order and the leg's own pass:**", "**One leg per code head:**", "**The policy:**",
+                "**The TOML-aware edit:**", "**`stop.max_own_blocks`:**", "**The engine-clock pause:**",
+                "**The late close-outs (DW-64's remainder):**", "**The split spec:**", "**Superseded by statement:**",
+                "**The serve process:**")
+        for sub in subs:
+            self.assertIn(sub, note)
+        self.assertEqual([note.index(sub) for sub in subs], sorted(note.index(sub) for sub in subs))
+        for phrase in ("the engines loop (`sweepEngines`) runs no host leg for a non-sweep pause",
+                       "the last pass of every recover, drain and run (after `sweepEnds`, before the queue closes)",
+                       "takes at most one paused non-sweep run per pass",
+                       "a resume meanwhile answers `RunNotPaused`, \"held by a live process\"",
+                       "`host-verify {skipped: true, reason: \"paused: dirty tree\", code_head}`",
+                       "`paused_leg: {pr?, flip: \"ready\" | \"draft\" | \"error: <…>\" | \"none\"}`",
+                       "`git -C <worktree> log -1 --format=%H -- . <the engine state> <the BMAD artifact exclude>`",
+                       "`recordedVerify(events, codeHead?)`", "so one commit set gets one leg",
+                       "`WorktreeFailed(\"policy\", \"none in the checkout\")`", "never given a stub",
+                       "`launch.py sweep`'s gap check is unchanged and now agrees",
+                       "a dotted root key `scm.rollback_on_failure`", "a one-line inline table `scm = { … }`",
+                       "re-serialised with `Bun.TOML.stringify`", "`bun-types@1.4.2`",
+                       "`no in-place form and no TOML serialiser`",
+                       "`stop: max_own_blocks (<n>) reached — the last <n> runs ended on the supervisor's own block (<kind>)`",
+                       "checked after `max_runs` and before `until`", "no `cli.ts` change",
+                       "`Blocked (engine): <reason> — no owner action`", "`--source sweep` keeps refusing `--kind` (38.4)",
+                       "--resolves \"the supervisor resumes the run (POST /runs/<id>/resume)\" --source run --kind engine",
+                       "its `track-block` gains `kind: \"engine\"`",
+                       "`closeout.result: \"draft PR\"` with `pr` on its event",
+                       "the cancel passes `cancelled`: always a draft",
+                       "`^(s|r)\\d+(-.*)?\\.md$`", "`plansync._stage_target`, `closeout.findSpec`",
+                       "its stub policy and its position-only `recordedVerify` are superseded",
+                       "`worktree.ts`, `closeout.ts` and `cli.ts` run in serve",
+                       "Every other field, kind and route is unchanged."):
+            self.assertIn(phrase, note)
+        # the job-schema row and the block shapes extended in place
+        self.assertIn("`stop.max_own_blocks`, a bound and no stop condition, added at 0.1.34, Story 38.5", flat)
+        self.assertIn("`kind?` `engine` with `source: run` — `--kind engine`, an engine-clock pause — comments "
+                      "`Blocked (engine): <reason> — no owner action` with no mention", flat)
+        stories = next(line for line in self.text.splitlines()
+                       if line.startswith("| Story / rulings"))
+        self.assertRegex(stories, r"Story 38\.1, Story 38\.2, Story 38\.3, Story 38\.4, Story 38\.5(, Story 38\.\d+)* \(Epic 38\)")
+
     def test_0_1_34_dw_52_dw_53_closeout_retry_and_go_after_an_unstopped_end(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))

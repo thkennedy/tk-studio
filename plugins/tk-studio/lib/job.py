@@ -211,8 +211,10 @@ def _validate_stop(stop: object, problems: list[str]) -> None:
     unknown = set(stop) - set(STOP_KEYS)
     if unknown:
         problems.append(f"stop has unknown field(s): {', '.join(sorted(unknown))}")
-    # Story 36.6: a rhythm alone (`after_stories`) is no stop condition
-    conditions = [k for k in STOP_KEYS if k != "after_stories"]
+    # Story 36.6: a rhythm alone (`after_stories`) is no stop condition;
+    # Story 38.5: nor is the own-block bound (`max_own_blocks`)
+    conditions = [k for k in STOP_KEYS
+                  if k not in ("after_stories", "max_own_blocks")]
     if not set(stop) & set(conditions):
         problems.append("stop must set at least one of "
                         f"{'|'.join(conditions)} — a job never runs away (AD-10)")
@@ -224,6 +226,11 @@ def _validate_stop(stop: object, problems: list[str]) -> None:
                                    and not isinstance(stop["max_runs"], bool)
                                    and stop["max_runs"] > 0):
         problems.append("stop.max_runs must be an integer > 0")
+    if "max_own_blocks" in stop and not (
+            isinstance(stop["max_own_blocks"], int)
+            and not isinstance(stop["max_own_blocks"], bool)
+            and stop["max_own_blocks"] > 0):
+        problems.append("stop.max_own_blocks must be an integer > 0")
     if "until" in stop and not _is_iso(stop["until"]):
         problems.append("stop.until must be an ISO-8601 timestamp")
     if "on_status" in stop:

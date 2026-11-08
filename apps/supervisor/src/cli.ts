@@ -118,7 +118,7 @@ import { engineMcpEnv, engineMcpRefusalText, recoverEngineMcps, startEngineMcp, 
 import { canonicalPr, prUrl, recordClaimRefusal, snapshotOnce, sweepEnds, underBunTest, type HygieneDeps } from "./hygiene";
 import { rebuildAgents, type RebuildDeps, type RebuildResult } from "./registry";
 import {
-  closeOut, closeOutDetail, launchedCloseOutInput, meteredCost, pendingCloseOut, prepareWorktree, priorPr, sweepEngines, WorktreeFailed, type WorktreeDeps,
+  closeOut, closeOutDetail, launchedCloseOutInput, launchedNoEngine, meteredCost, pendingCloseOut, prepareWorktree, priorPr, sweepEngines, WorktreeFailed, type WorktreeDeps,
 } from "./worktree";
 import {
   checkoutKey, defaultProbes, engineRoot, type EngineWhere, servedRoot, isTerminal, LAUNCH_SKILL, VALIDATE_RESOLUTION_JOB, ENGAGEMENT_CHAT_JOB, ORPHANED_REASON, probeLaunchEngine, processStartTime, Queue, RunTerminal, selfOwner, STUDIO_END_RETRY_LIMIT, workerMayRun,
@@ -128,7 +128,7 @@ import {
 import { rerunHostLeg, VerifyRefused, type HostLegStarted } from "./hostleg";
 import { redSuites } from "./hostverify";
 import { emitTriage, engineJobRun, isSweep, recordTriage, sweepCloseOutSummary, sweepRecord, type SweepSummary } from "./sweep";
-import { armStop, closeOutPaused, enginePidKnown, launchedSinceMove, resumePaused, rhythmOf, runDirOf, runsStories, stopArmed, type PausedDeps, type ResumeAnswer, type ResumeDeps as EngineResumeDeps } from "./closeout";
+import { armStop, closeOutPaused, enginePidKnown, pausedLegs, launchedSinceMove, resumePaused, rhythmOf, runDirOf, runsStories, stopArmed, type PausedDeps, type ResumeAnswer, type ResumeDeps as EngineResumeDeps } from "./closeout";
 import { readJournal } from "./office";
 import { runEngineStop } from "./runners";
 import { launchedPass, mergePass, reviewPass, startedStories, storyStarted, type PlanStatusDeps } from "./planstatus";
@@ -732,6 +732,7 @@ export async function recoverQueue(opts: RunOptions = {}, verbRunner: VerbRunner
     writeStarterLocks(queue, opts.worktree?.env ?? process.env);
     await rebuildQuietly(queue, opts.agents); // Story 29.2: the agent registry, every recover (every tick)
     await sweepEnds(queue, opts.hygiene);
+    await pausedLegs(queue, pausedDeps(opts)); // Story 38.5 (CAP-13): the pause's leg, after its notice and block
     if (owned) queue.close();
   }
 }
@@ -1015,6 +1016,7 @@ export async function drainQueue(opts: RunOptions = {}, verbRunner: VerbRunner =
     await afterCloseOuts(queue, opts); // Story 27.5
     await rebuildQuietly(queue, opts.agents); // Story 29.2: the agent registry after the drain's claims and ends
     await sweepEnds(queue, opts.hygiene);
+    await pausedLegs(queue, pausedDeps(opts)); // Story 38.5 (CAP-13): the pause's leg, after its notice and block
     if (owned) queue.close();
   }
 }
@@ -1256,7 +1258,7 @@ async function cancelQueueRun(
       sweep = await sweepCloseOutSummary(queue, current, deps.worktree); // Story 38.3: and the bundles' Stage Log rows
     }
     const input = { ...launchedCloseOutInput(queue.events(runId), current, { workerOnly: !!sweep }), engineRunId: current.engine_run_id ?? engine?.id ?? null, ...(sweep ? { sweep } : {}) };
-    Object.assign(detail, await closeOutNow(queue, runId, input, deps.worktree, skip));
+    Object.assign(detail, await closeOutNow(queue, runId, input, deps.worktree, skip, "cancelled")); // Story 38.5 (DW-166): a draft
     if (sweep) {
       // The run stays `cancelled` (no `sweepEndState`). Its close-out is not `skipped`, so no late close-out follows:
       // the engine's line goes out here, whether the worktree was removed or kept.
@@ -1659,6 +1661,7 @@ export async function runJob(jobId: string, directory: string, permissionMode?: 
     await afterCloseOuts(queue, opts); // Story 27.5: the orphan close-out, then the plan's review and merge passes
     await rebuildQuietly(queue, opts.agents); // Story 29.2: every end this process drove rebuilds the agent registry
     await sweepEnds(queue, opts.hygiene); // Story 22.3: every end this process drove (resumes included)
+    await pausedLegs(queue, pausedDeps(opts)); // Story 38.5 (CAP-13): the pause's leg, after its notice and block
     if (owned) queue.close();
   }
 }
@@ -1676,7 +1679,7 @@ export async function endAfterDriveFailure(
     try { skip = await queue.closeOutBlocker(cur, self, { asDriver: true }); }
     catch (e) { skip = `what may still work the worktree could not be probed: ${message(e)}`; }
   }
-  const closed = await closeOutNow(queue, runId, {}, deps, skip);
+  const closed = await closeOutNow(queue, runId, {}, deps, skip, "blocked");
   // Closed out with nothing live around it: the lock is released, never handed to an engine at a removed worktree.
   const closedOut = !skip && (closed.closeout as { result?: string } | undefined)?.result !== undefined;
   try {
@@ -1832,7 +1835,7 @@ export async function mirror(
     // AC3: the engine's metered cost (its run.json, read before the close-out removes the worktree), else the worker's.
     const metered = engine && now?.worktree && existsSync(now.worktree) ? meteredCost(servedRoot(now)!, engine) : undefined;
     const cost = metered ?? s.total_cost_usd;
-    const closed = await closeOutNow(queue, queueRunId, { statusBlock: s.status_block, engineRunId: engine ?? null, ...(cost !== undefined ? { costUsd: cost } : {}) }, worktree, skip);
+    const closed = await closeOutNow(queue, queueRunId, { statusBlock: s.status_block, engineRunId: engine ?? null, ...(cost !== undefined ? { costUsd: cost } : {}) }, worktree, skip, terminal ? (s.state as TerminalState) : "blocked");
     const ended = { ...detail, ...closed, ...(probed?.holder ? { engine: probed.engine } : {}), ...(deferredFinish ? { finish: deferredFinish } : {}) };
     // Closed out with the probe confirming no engine: the lock is released (the engine id kept), never
     // handed to an engine, nor re-probed, at the worktree the close-out removed.
@@ -1864,10 +1867,13 @@ async function finishStudioRun(
 }
 
 /** Story 27.1: the close-out of a run ending now with its worktree cut (never throws): the
- * `ended` detail (`pr` or `no_changes`, and the `closeout` record); `{}` for a run with no worktree. */
+ * `ended` detail (`pr` or `no_changes`, and the `closeout` record); `{}` for a run with no worktree.
+ * Story 38.5 (DW-166, DW-64's remainder): no leg runs here, so the PR is opened or marked ready only on a `complete` `end`
+ * of a run that launched no engine (`launchedNoEngine`: a skill run, no leg by design); any other end (a cancel, a
+ * `blocked` or `partial` end, an engine that may have changed the tree) is closed out `killed`: the PR a draft. */
 async function closeOutNow(
   queue: Queue, runId: string, input: { statusBlock?: unknown; engineRunId?: string | null; costUsd?: number; sweep?: SweepSummary }, deps: WorktreeDeps = {},
-  skip?: string,
+  skip: string | undefined, end: TerminalState,
 ): Promise<Record<string, unknown>> {
   const run = queue.get(runId);
   if (!run?.worktree || isTerminal(run.state)) return {};
@@ -1882,7 +1888,8 @@ async function closeOutNow(
   }
   // A draft PR the run's pause opened is marked ready, never opened again.
   const existingPr = priorPr(events);
-  try { return closeOutDetail(await closeOut(run, { paused: false, ...input, ...(existingPr ? { existingPr } : {}) }, deps)); }
+  const ready = end === "complete" && !input.engineRunId && launchedNoEngine(run, events);
+  try { return closeOutDetail(await closeOut(run, { paused: false, ...input, ...(existingPr ? { existingPr } : {}), ...(ready ? {} : { killed: true }) }, deps)); }
   catch (e) { return { closeout: { result: "failed", error: message(e), worktree: "kept" } }; }
 }
 

@@ -263,6 +263,19 @@ def evaluate_stop(defn: dict, runs: list[dict]) -> str | None:
     outcomes = [r for r in counted if not r.get("own_block")]
     if "max_runs" in stop and len(outcomes) >= stop["max_runs"]:
         return f"stop: max_runs ({stop['max_runs']}) reached"
+    # Story 38.5 (B8): a recurring job whose last N counted runs all ended on
+    # the supervisor's own block stops scheduling (default 3); a one-shot never.
+    if defn.get("trigger") != "one-shot":
+        bound = stop.get("max_own_blocks", 3)
+        streak = 0
+        for r in reversed(counted):
+            if not r.get("own_block"):
+                break
+            streak += 1
+        if streak and streak >= bound:
+            return (f"stop: max_own_blocks ({bound}) reached — the last "
+                    f"{bound} runs ended on the supervisor's own block "
+                    f"({counted[-1].get('own_block')})")
     if "until" in stop and _now() >= _parse_iso(stop["until"]):
         return f"stop: until ({stop['until']}) passed"
     if "on_status" in stop and outcomes:

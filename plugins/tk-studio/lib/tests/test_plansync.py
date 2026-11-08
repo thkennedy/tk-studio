@@ -1211,6 +1211,52 @@ class StageFromRunTests(PlanSyncTestCase):
         self.assertNotIn("retryable", out)
 
 
+class StageTargetSplitTests(PlanSyncTestCase):
+    """Story 38.5 (DW-177): a split story's spec resolves by its exact
+    `<key>-spec.md` first, else by the prefix glob only when one file
+    matches, the `-s<n>` and `-r<n>` names excluded."""
+
+    KEY = "38-5-the-pause"
+
+    def _spec(self, name: str, folder: str = "spec-epic-38") -> Path:
+        stories = self.root / "_bmad-output" / "specs" / folder / "stories"
+        stories.mkdir(parents=True, exist_ok=True)
+        path = stories / name
+        path.write_text("---\nstatus: done\n---\n", encoding="utf-8")
+        return path
+
+    def target(self, story: str):
+        return plansync._stage_target(self.root, story, None)
+
+    def test_the_exact_name_wins_over_a_second_half(self):
+        first = self._spec(f"{self.KEY}-spec.md")
+        self._spec(f"{self.KEY}-s2-spec.md")
+        self.assertEqual(self.target(self.KEY), (first, self.KEY))
+        # the second half resolves to its own spec
+        second = self.root / "_bmad-output" / "specs" / "spec-epic-38" / "stories" / f"{self.KEY}-s2-spec.md"
+        self.assertEqual(self.target(f"{self.KEY}-s2"), (second, f"{self.KEY}-s2"))
+
+    def test_the_glob_excludes_s_and_r_names_and_answers_the_one_left(self):
+        draft = self._spec(f"{self.KEY}-draft.md")
+        self._spec(f"{self.KEY}-s2-spec.md")
+        self._spec(f"{self.KEY}-r1.md")
+        self.assertEqual(self.target(self.KEY), (draft, self.KEY))
+
+    def test_only_later_halves_present_is_no_spec_yet(self):
+        self._spec(f"{self.KEY}-s2-spec.md")
+        self.assertEqual(self.target(self.KEY), (None, self.KEY))
+
+    def test_several_left_after_the_exclusion_or_two_exact_names_refuse(self):
+        self._spec(f"{self.KEY}-a.md")
+        self._spec(f"{self.KEY}-b.md")
+        with self.assertRaisesRegex(plansync.PlanSyncError, "several specs match"):
+            self.target(self.KEY)
+        self._spec(f"{self.KEY}-spec.md")
+        self._spec(f"{self.KEY}-spec.md", folder="spec-epic-39")
+        with self.assertRaisesRegex(plansync.PlanSyncError, "several specs match"):
+            self.target(self.KEY)
+
+
 class DeferredMintTests(PlanSyncTestCase):
     """Story 37.1: `plansync.py deferred mint`, the ledger's one id source."""
 

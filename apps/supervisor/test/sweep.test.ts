@@ -20,7 +20,7 @@ import {
 } from "../src/sweep";
 import { answerDecisions, parseTriage, postDecisions, SWEEP_DECISIONS_ANSWERED, SWEEP_DECISIONS_POSTED, sweepSummary } from "../src/sweep";
 import { launchedCloseOutInput, prBody, prepareWorktree, releaseHeldEngines, sweepEngines, wipMessage, type WorktreeDeps } from "../src/worktree";
-import { fakeGh, gitRepo, testGit } from "./fakes";
+import { fakeGh, FIXTURE_POLICY, gitRepo, testGit } from "./fakes";
 import { tempDir } from "./tmp";
 
 const me = { pid: process.pid, host: hostname(), nonce: "sweep-test" };
@@ -45,6 +45,8 @@ const TRIAGE = {
 async function sweepFixture(opts: { prefix?: string; sandbox?: string } = {}) {
   const repo = gitRepo(opts.prefix ? { [`${opts.prefix}.keep`]: "" } : {});
   const root = opts.prefix ? join(repo.checkout, opts.prefix) : repo.checkout;
+  // Story 38.5 (CAP-14): a prefixed project's checkout holds its own untracked policy (a run worktree with none is refused).
+  if (opts.prefix) { mkdirSync(join(root, ".bmad-loop"), { recursive: true }); writeFileSync(join(root, ".bmad-loop", "policy.toml"), FIXTURE_POLICY); }
   const gh = fakeGh();
   const work = tempDir("tk-sup-sweep-work-");
   const home = tempDir("tk-sup-sweep-home-");
