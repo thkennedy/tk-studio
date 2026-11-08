@@ -3489,6 +3489,66 @@ class DriverContractTestCase(unittest.TestCase):
                        if line.startswith("| Story / rulings"))
         self.assertRegex(stories, r"Story 37\.6 \(Epic 37\), Story 38\.1(, Story 38\.\d+)* \(Epic 38\)")
 
+    def test_0_1_34_story_38_2_a_run_that_does_no_work_says_so(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.34**", header)
+        self.assertNotIn("**0.1.35**", header)
+        self.assertEqual(header.count("0.1.34 (Story 38.2, additive)"), 1)
+        self.assertLess(header.index("0.1.34 (Story 38.1, additive)"),
+                        header.index("0.1.34 (Story 38.2, additive)"))
+        clause = " ".join(header[header.index("0.1.34 (Story 38.2, additive)"):].split())
+        for phrase in ("a run that does no work says so", "the `partial` rule (`no story landed: …`)",
+                       "the `no changes` leg skip", "keyed on the render signature whatever the status word",
+                       "(`via`, `status_word`)", "the ended engine's one relaunch (`paused_stage: \"no-story\"`)",
+                       "`plan-status {phase: \"draft\"}`", "`stage-carry`", "the `halted` Stage Log outcome",
+                       "`render-skill-reread-fresh-destination` base patch", "— additive) |"):
+            self.assertIn(phrase, clause)
+        flat = " ".join(self.text.split())
+        self.assertEqual(flat.count("**0.1.34 (Story 38.2, additive).**"), 1)
+        self.assertLess(flat.index("**0.1.34 (Story 38.1, additive).**"), flat.index("**0.1.34 (Story 38.2, additive).**"))
+        note = flat[flat.index("**0.1.34 (Story 38.2, additive).**"):]
+        note = note[:note.index("## 8. Conformance")]
+        # the paragraph opens with the partial rule, one sentence
+        self.assertTrue(note.startswith(
+            "**0.1.34 (Story 38.2, additive).** A run that does no work says so (hole 114, DW-180, the 37 retrospective's C3/AI-2). "
+            "**The partial rule:** a run whose engine ends with no commits ahead of its base and its story's spec not `done` ends "
+            "`partial` with the reason `no story landed: story <key> ended <word> after <n> dev attempt(s): <HALT text>; engine ended "
+            "'<status>'`; no host leg runs on a tree equal to its base (`host-verify {skipped: true, reason: \"no changes\"}`)."))
+        for phrase in ("`commitsAhead`", "a failed probe runs the leg as before", "a skipped leg notes no lease",
+                       "the latest `story-start` of the engine journal's current segment", "`<run dir>/deferred/<key>/`",
+                       "else the last session's `result_json.status`, else `unknown`", "else the last `dev-decision` reason",
+                       "A run with no `story-start` keeps its end, the leg still skipped",
+                       "`supervisor: run <id> ended partial` / `reason: no story landed: …`", "the worker's `accounted` figure",
+                       "**The render signature:**", "`?????????`", "whatever status word the session wrote (`halted` included)",
+                       "the `blocked` word are no longer required", "`via: \"resume\" | \"relaunch\"` and `status_word`",
+                       "**The ended path:**", "paused_stage: \"no-story\"", "an ended engine is never resumed",
+                       "`{reason: \"stale-render-view\", halted_story, archive}` that names no `story_key`",
+                       "records `attempt: 2`", "the engine is never edited (AD-4)",
+                       "**`plan-status {phase: \"draft\"}`:**", "`draft:<key>`",
+                       "The draft is guarded three ways: only when the run's last close-out reported `no_changes`, only when no "
+                       "later run marked the story `in-progress`, `review` or `done`, and never for a story any run marked "
+                       "`review` or `done`.",
+                       "the HALT text unclipped (`no_story.halt_text`)", "whose spec was found and is untracked",
+                       "is refused `RunNotPaused` naming the ended engine — a resume never re-drives an ended engine; the "
+                       "operator cancels the run.",
+                       "`run <id> ended without a PR: <the run's reason, clipped to 200>`", "`PLAN_RETRY_LIMIT`",
+                       "**`stage-carry` and the `halted` outcome:**", "`done`, `in-review` or `ready-for-dev`",
+                       "`plansync.py stage --from-pass --run-dir <served>/.bmad-loop/runs/<eid> --story <key> --worktree <root>`",
+                       "`stage-carry {story_key, ok, rows?, buffered?, error?}`",
+                       "**The render patch:**", "`tk-studio base patch render-skill-reread-fresh-destination`",
+                       "`<generation>.stale-<pid>`", "`failed to verify <path> after a direct write: <error>`",
+                       "no `patches.json` entry until an upstream issue URL exists",
+                       "**The serve process:** `worktree.ts`, `closeout.ts` and `planstatus.ts` run in serve",
+                       "Every other field, kind and route is unchanged.",
+                       "**The resumed segment:** a resumed engine's segment with no `story-start`",
+                       "reads the story from the whole journal's latest `story-start`, its attempts the `dev-decision`s for "
+                       "the key from that entry onward (the pre-resume attempts count)."):
+            self.assertIn(phrase, note)
+        stories = next(line for line in self.text.splitlines()
+                       if line.startswith("| Story / rulings"))
+        self.assertRegex(stories, r"Story 38\.1, Story 38\.2(, Story 38\.\d+)* \(Epic 38\)")
+
     def test_story_35_7_the_skill_sweep_waits_540_s_inside_the_bash_cap(self):
         # the skill's one sweep call must print its block inside the Bash tool's 600 s cap
         skill = (PLUGIN_ROOT / "skills" / "tk-studio-launch" / "SKILL.md").read_text(encoding="utf-8")

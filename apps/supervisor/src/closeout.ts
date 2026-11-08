@@ -24,6 +24,17 @@
  *                  nothing and the next pass retries. A second such pause of the story: one `auto-resume
  *                  {…, attempt: 2, resumed: false, first_at}` and one line per pause, nothing removed or resumed,
  *                  then the 31.5 block below as before;
+ *                  Story 38.2 (CAP-5, hole 114, superseding the stage, prefix and `blocked` checks above): the halt is
+ *                  recognised by the render failure's signature (`renderSignature`) over the paused reason plus the spec's
+ *                  `## Auto Run Result` section — exactly one snapshot folder named, and a renderer message, `render_skill.py`
+ *                  or an unreadable entry (`RENDER_UNREADABLE_RE`: `?????????`, `No such file or directory`, `Permission
+ *                  denied`, …) — at any paused stage, whatever status word the session wrote (`halted` included), the spec
+ *                  found (`findSpec`, else the copy the engine stashed on the defer, `<run dir>/deferred/<key>/`) and not
+ *                  `done`, untracked, the folder under `<served root>/_bmad/render/`. A run the engine-end sweep paused itself
+ *                  on a no-story end (`paused_stage: "no-story"`, its engine ended) is relaunched rather than resumed
+ *                  (`relaunchEpic`, the 27.3 relaunch extracted from the close-out below: the archive, `deps.relaunch`, the
+ *                  `close-out` move `{reason: "stale-render-view", halted_story, archive}` naming no `story_key`, the
+ *                  drive). The `auto-resume` record gains `via: "resume" | "relaunch"` and `status_word`;
  *                - landed (spec `status: done`, paused at the commit gate or on an escalation) with a closable
  *                  verdict (any non-empty `reconcile_verdict` other than `escalate`): closed out — the harvest
  *                  commit, the meter harvest, the archive, the relaunch (below); Story 35.2: with a graceful stop
@@ -92,7 +103,10 @@
  *              id>` (on sbx through `sbx exec`, the VM paths) spawned as the supervisor's own child (the engine's
  *              hold for the resume's life); the run `paused` → `running` with `engine-resume`; the engine pid
  *              re-read from `engine.pid` (`Queue.recordEnginePid`). When the child exits, the run is handed back
- *              to the engine-end sweep with a fresh `launched` event (the same engine id). Story 35.2: with a
+ *              to the engine-end sweep with a fresh `launched` event (the same engine id). Story 38.2: a pause over
+ *              an ended engine (its `paused` event's `engine.status` in `ENGINE_ENDED`, or `paused_stage: "no-story"`)
+ *              is refused `RunNotPaused` before any spawn: a resume never re-drives an ended engine; the operator
+ *              cancels the run. Story 35.2: with a
  *              graceful stop in force before the resume (the resume clears the file), the stop is re-armed once
  *              on the resumed engine after the pid re-read (`deps.launchStop`, default `stopEngine`) and
  *              recorded `graceful-stop {engine_run_id, rearmed: true, ok, detail}`; when `engine.pid` was never
@@ -112,8 +126,8 @@
  *
  * Every command is argv only — never a shell.
  */
-import { existsSync, lstatSync, readdirSync, readFileSync, renameSync, rmSync } from "node:fs";
-import { basename, isAbsolute, join, relative, resolve } from "node:path";
+import { existsSync, readFileSync, renameSync, rmSync } from "node:fs";
+import { join, relative, resolve } from "node:path";
 import { load as loadYaml } from "js-yaml";
 import { notifier, sbxBin } from "./env";
 import { canonicalPr, isWithin, notify, NOTICE_MAX_BYTES, sendText, TRUNCATED_MARKER, type EndNotice } from "./hygiene";
@@ -121,7 +135,7 @@ import { hostVerify, inconclusiveReason, isInconclusive, isRed, isSlice, legGuar
 import { engineRoot, isSweep, isTerminal, RunTerminal, selfOwner, servedRoot, STUDIO_END_RETRY_LIMIT, type EngineWhere, type Owner, type Queue, type QueueEvent, type QueueRun, type TerminalState } from "./queue";
 import { HOLD_TIMEOUT_S, parseEnginePid, sameStart, type HoldChild } from "./sandbox";
 import { lastJsonObject, runProcess, toVmPath, type RunResult } from "./server";
-import { applyTransition, closeOut, closeOutDetail, engineState, finishStudio, killedEngine, launchedCloseOutInput, meteredCost, priorPr, recordedVerify, release, runner, studioScript, uvRunner, type PendingTransition, type WorktreeDeps } from "./worktree";
+import { applyTransition, autoRunResult, blockingCondition, closeOut, closeOutDetail, ENGINE_ENDED, engineState, findSpec, finishStudio, frontmatter, killedEngine, launchedCloseOutInput, meteredCost, priorPr, recordedVerify, release, renderSignature, renderSnapshot, runner, snapshotReady, specUntracked, stashedSpec, studioScript, uvRunner, type PendingTransition, type WorktreeDeps } from "./worktree";
 import { engineStopArgv, stopEngine } from "./runners";
 
 type Env = Record<string, string | undefined>;
@@ -144,40 +158,9 @@ export function pausedStory(events: readonly QueueEvent[]): { story_key?: string
   return { ...(key ? { story_key: key } : {}), ...(stage ? { stage } : {}), ...(reason ? { reason } : {}) };
 }
 
-/** A markdown file's leading `---` frontmatter, parsed as YAML (`js-yaml`: comments, quotes, null/`~`, block
- * scalars as YAML reads them). `{}`: no frontmatter, unterminated, unparseable, or not a mapping. */
-export function frontmatter(text: string): Record<string, unknown> {
-  const lines = text.replace(/^\ufeff/, "").split(/\r?\n/);
-  if (lines[0]?.trim() !== "---") return {};
-  const end = lines.findIndex((l, i) => i > 0 && l.trim() === "---");
-  if (end < 0) return {};
-  try {
-    const doc = loadYaml(lines.slice(1, end).join("\n"));
-    return doc && typeof doc === "object" && !Array.isArray(doc) ? (doc as Record<string, unknown>) : {};
-  } catch { return {}; }
-}
-
 /** A frontmatter value as a trimmed non-empty string; anything else (null, `~`, empty, a number, a list) is missing. */
 const fmString = (v: unknown): string | undefined => (typeof v === "string" && v.trim() ? v.trim() : undefined);
 const isEscalate = (v: string | undefined): boolean => v?.toLowerCase() === "escalate";
-
-/** A story's spec in the worktree (`reconcile.md` §1): `_bmad-output/implementation-artifacts/spec-<key>.md`,
- * else the single match of `_bmad-output/specs/<any>/stories/<key>-*.md`. Undefined: none, or several. */
-export function findSpec(worktree: string, key: string): string | undefined {
-  if (!key || /[\\/]/.test(key) || key.includes("..")) return undefined;
-  const direct = join(worktree, "_bmad-output", "implementation-artifacts", `spec-${key}.md`);
-  if (existsSync(direct)) return direct;
-  const specs = join(worktree, "_bmad-output", "specs");
-  const hits: string[] = [];
-  let folders: string[] = [];
-  try { folders = readdirSync(specs); } catch { return undefined; }
-  for (const f of folders) {
-    let names: string[] = [];
-    try { names = readdirSync(join(specs, f, "stories")); } catch { continue; }
-    for (const n of names) if (n.startsWith(`${key}-`) && n.endsWith(".md")) hits.push(join(specs, f, "stories", n));
-  }
-  return hits.length === 1 ? hits[0] : undefined;
-}
 
 /** What the pass does with a paused run (see the header). */
 export type Landing =
@@ -285,6 +268,8 @@ type Step = { ok: true; value: unknown } | { ok: false; error: string };
 
 // Story 36.3: lifted to `worktree.ts` (`wipCommit` stages the same way; `closeout.ts` already imports it, no new edge).
 export { engineState };
+// Story 38.2: lifted to `worktree.ts` (the engine-end sweep reads the story's spec and the render signature too).
+export { autoRunResult, blockingCondition, failedFirstRender, findSpec, frontmatter, RENDER_HALT_MESSAGES, RENDER_UNREADABLE_RE, renderSignature, snapshotComplete, snapshotFolders, stashedSpec } from "./worktree";
 
 async function commitStep(run: QueueRun, key: string, deps: WorktreeDeps): Promise<Step> {
   const wt = run.worktree!, exec = runner(deps);
@@ -629,18 +614,26 @@ async function closeOutLanded(queue: Queue, run: QueueRun, l: Extract<Landing, {
     } catch (e) { return boundaryThrew(queue, run, key, e, deps, "boundary-end", undefined, stop); }
   }
   const storiesDone = journalStoriesDone(runDirOf(run)); // Story 36.6: read before the archive moves the journal
+  return (await relaunchEpic(queue, run, key, (archive) => ({
+    story_key: key, verdict: l.verdict, commit: commit.value, meter: meter.value, archive,
+    ...(storiesDone.length ? { stories_done: storiesDone } : {}),
+  }), deps)).moved;
+}
+
+/** Story 38.2 (CAP-5, extracted from `closeOutLanded`'s tail): the 27.3 relaunch of a paused run's epic — the archive, the
+ * rebuild (`deps.relaunch`), the `paused` → `running` move with a `close-out` event (`detail`, given the archive's value),
+ * then the drive. Each failure is one `close-out-failed` (step, error) and the run stays (or goes back to) `paused`.
+ * Answers whether the run left `paused`, and the failure when it did not. Never throws. */
+async function relaunchEpic(queue: Queue, run: QueueRun, key: string, detail: (archive: unknown) => Record<string, unknown>, deps: PausedDeps): Promise<{ moved: boolean; error?: string }> {
+  const failedAt = (step: string, error: string) => { noteFailed(queue, run, key, step, error); return { moved: false, error: `${step} failed: ${error}` }; };
   const archive = await archiveStep(run, deps);
-  if (!archive.ok) { noteFailed(queue, run, key, "archive", archive.error); return false; }
-  if (!deps.relaunch) { noteFailed(queue, run, key, "relaunch", "no relaunch driver"); return false; }
+  if (!archive.ok) return failedAt("archive", archive.error);
+  if (!deps.relaunch) return failedAt("relaunch", "no relaunch driver");
   let drive: () => Promise<unknown>;
   try { drive = await deps.relaunch(queue, run); }
-  catch (e) { noteFailed(queue, run, key, "relaunch", clip(message(e))); return false; }
-  try {
-    queue.resumeFromPause(run.run_id, "close-out", {
-      story_key: key, verdict: l.verdict, commit: commit.value, meter: meter.value, archive: archive.value,
-      ...(storiesDone.length ? { stories_done: storiesDone } : {}),
-    }, deps.self ?? selfOwner());
-  } catch (e) { noteFailed(queue, run, key, "relaunch", clip(message(e))); return false; }
+  catch (e) { return failedAt("relaunch", clip(message(e))); }
+  try { queue.resumeFromPause(run.run_id, "close-out", detail(archive.value), deps.self ?? selfOwner()); }
+  catch (e) { return failedAt("relaunch", clip(message(e))); }
   let why: string | undefined;
   try { await drive(); }
   catch (e) { why = clip(message(e)); }
@@ -648,14 +641,15 @@ async function closeOutLanded(queue: Queue, run: QueueRun, l: Extract<Landing, {
     // A drive that resolved having ended the run (`mirror`'s `endDriven`) or handed it to an engine is done.
     const cur = queue.get(run.run_id) ?? run;
     const handed = launchedSinceMove(queue.events(run.run_id));
-    if (why === undefined && (cur.state !== "running" || handed)) return cur.state !== "paused";
+    if (why === undefined && (cur.state !== "running" || handed)) return { moved: cur.state !== "paused" };
     // The new engine already has the run (its `launched` after the `close-out`): it stays `running` for the
     // engine-end sweep; only a drive that failed (or returned) before that handoff goes back to `paused`.
     why ??= NOT_HANDED;
     noteFailed(queue, cur, key, "relaunch", why);
     if (!handed) backToPaused(queue, run.run_id, { relaunch_failed: why });
-    return queue.get(run.run_id)?.state !== "paused";
-  } catch { return false; /* the next pass reads the queue again */ }
+    const moved = queue.get(run.run_id)?.state !== "paused";
+    return moved ? { moved } : { moved, error: `relaunch failed: ${why}` };
+  } catch { return { moved: false, error: "relaunch failed: the queue could not be read" }; /* the next pass reads the queue again */ }
 }
 
 /** AC2: one `awaiting-ruling` (story key, engine run id) recorded since the run's latest `paused` event — so a
@@ -694,13 +688,6 @@ export interface BlockInput { story_key: string; spec: string; reason: string }
 
 /** The `--reason` of a dev session's `blocked` end when its spec names none. */
 export const DEV_BLOCKED_REASON = "dev session ended blocked";
-
-/** The spec's last `Blocking condition:` line, clipped; undefined when absent, empty or `none`. */
-export function blockingCondition(text: string): string | undefined {
-  const hits = [...text.matchAll(/^[ \t>*-]*Blocking condition:[ \t]*(.*)$/gim)];
-  const value = clip(hits.at(-1)?.[1] ?? "");
-  return value && value.toLowerCase().replace(/[.\s]+$/, "") !== "none" ? value : undefined;
-}
 
 /** Story 31.5: the block owed by a paused run whose story did not land and whose spec's frontmatter `status` is
  * exactly `blocked` (a dev session's `blocked` end); undefined otherwise (reads only). */
@@ -788,99 +775,37 @@ export const AUTO_RESUME = "auto-resume";
 export const STALE_RENDER_VIEW = "stale-render-view";
 /** The prefix bmad-loop gives a dev session's CRITICAL escalation (`escalation.decide_dev`). */
 export const DEV_ESCALATION = "CRITICAL escalation from dev session";
-/** `render_skill.py` `_verify_existing`'s messages a stale view of an existing generation produces. */
-export const RENDER_HALT_MESSAGES = [
-  "corrupt existing generation", "generation contains unexpected or missing files", "failed to verify", "generation output hash mismatch",
-] as const;
 const NO_NOTIFIER = { ok: false, skipped: "no notifier configured (TK_SUPERVISOR_NOTIFY is unset)" };
-
-/** `_bmad/render/<skill>/<slug>/<generation>`, any separator (a path running on to a file is cut to the folder), `_bmad`
- * at the start, after a separator or after any other character outside `[A-Za-z0-9_.-]`. */
-const SNAPSHOT_RE = /(?<![A-Za-z0-9_.-])_bmad[\\/]+render[\\/]+([A-Za-z0-9._-]+)[\\/]+([A-Za-z0-9._-]+)[\\/]+([A-Za-z0-9._-]+)/g;
-
-/** The distinct snapshot folders a reason names (`<skill>/<slug>/<generation>`); undefined when one names a `.` or
- * `..` segment. */
-export function snapshotFolders(reason: string): string[] | undefined {
-  const out = new Set<string>();
-  for (const m of reason.matchAll(SNAPSHOT_RE)) {
-    // A path ending a sentence (`…/<generation>.`) is the folder: the generation's trailing dots are dropped.
-    const segs = [m[1]!, m[2]!, m[3]!.replace(/\.+$/, "")];
-    if (segs.some((s) => s === "" || s === "." || s === "..")) return undefined;
-    out.add(segs.join("/"));
-  }
-  // Story 36.3: a failed first render's reason names `.staging-*` and its generation: one snapshot, the generation.
-  const all = [...out], named = all.filter((f) => !isStaging(f));
-  return all.filter((f) => !isStaging(f) || !named.some((n) => parentOf(n) === parentOf(f)));
-}
-
-const isStaging = (folder: string): boolean => folder.slice(folder.lastIndexOf("/") + 1).startsWith(".staging-");
-const parentOf = (folder: string): string => folder.slice(0, folder.lastIndexOf("/"));
-
-/** Story 36.3: the `.staging-*` folders a reason names beside `generation` (`<skill>/<slug>/<generation>`). */
-function stagingFolders(reason: string, generation: string): string[] {
-  const out = new Set<string>();
-  for (const m of reason.matchAll(SNAPSHOT_RE)) {
-    const folder = `${m[1]!}/${m[2]!}/${m[3]!.replace(/\.+$/, "")}`;
-    if (isStaging(folder) && parentOf(folder) === parentOf(generation)) out.add(folder);
-  }
-  return [...out];
-}
 
 /** A recognised stale-render halt: the story, its snapshot (relative to the served root, `/` separators) and the
  * two paths the auto-resume removes. Story 36.3: `staging`, the staging folders the reason named beside the generation. */
 export interface StaleRender { story_key: string; snapshot: string; dir: string; spec: string; staging?: string[] }
 
 /** Story 33.6: is the paused run's latest pause a stale render view (see the header)? Reads only (one argv-only
- * `git ls-files`). The folder check (`snapshotComplete`) is separate. */
-export async function staleRenderView(run: Pick<QueueRun, "worktree" | "prefix">, events: readonly QueueEvent[], deps: WorktreeDeps = {}): Promise<StaleRender | undefined> {
-  const { story_key: key, stage, reason } = pausedStory(events);
-  if (!key || stage !== "escalation" || !reason?.includes(DEV_ESCALATION)) return undefined;
-  if (!RENDER_HALT_MESSAGES.some((m) => reason.includes(m)) && !reason.includes("render_skill.py")) return undefined;
-  const folders = snapshotFolders(reason);
-  if (!folders || folders.length !== 1 || !run.worktree) return undefined;
+ * `git ls-files`). The folder check (`snapshotReady`) is separate. Story 38.2 (CAP-5): keyed on the render failure's
+ * signature (`renderSignature`) over the paused reason and the spec's `## Auto Run Result`, whatever the stage, the
+ * escalation's prefix or the status word the session wrote (`halted` included): the spec found (`findSpec`, else the copy
+ * the engine stashed on the defer, `stashedSpec`) and not `done`, untracked, and the one folder under `_bmad/render/`. */
+export async function staleRenderView(run: Pick<QueueRun, "worktree" | "prefix"> & { engine_run_id?: string | null }, events: readonly QueueEvent[], deps: WorktreeDeps = {}): Promise<StaleRender | undefined> {
+  const { story_key: key, reason } = pausedStory(events);
+  if (!key || !run.worktree) return undefined;
   const served = servedRoot(run)!;
-  const base = resolve(served, "_bmad", "render"), dir = resolve(base, ...folders[0]!.split("/"));
-  if (!isWithin(base, dir) || dir === base) return undefined;
-  const { spec, fm } = storySpec(run, events);
-  if (!spec || fm?.status !== "blocked") return undefined;
-  const rel = relative(served, spec).split("\\").join("/");
-  try {
-    const r = await runner(deps)("git", ["-C", served, "ls-files", "--error-unmatch", "--", rel], { cwd: served, timeoutS: 30 });
-    if (r.exit !== 1) return undefined; // 0 tracked; 128, a timeout or anything else: unknown — never removed
-  } catch { return undefined; }
-  const staging = stagingFolders(reason, folders[0]!).map((f) => resolve(base, ...f.split("/"))).filter((p) => isWithin(base, p));
-  return { story_key: key, snapshot: relative(served, dir).split("\\").join("/"), dir, spec, ...(staging.length ? { staging } : {}) };
-}
-
-/** Story 36.3 (DW-110, hole 95): a failed first render: the reason names a staging folder and the generation beside it
- * is empty or absent, so nothing of the snapshot's can be read as complete; it counts as the one snapshot. A reason
- * naming a staging folder alone names no generation (`dir` is that folder): never one. */
-export function failedFirstRender(s: StaleRender): boolean {
-  if (!s.staging?.length || isStaging(basename(s.dir))) return false;
-  try { return !existsSync(s.dir) || (lstatSync(s.dir).isDirectory() && readdirSync(s.dir).length === 0); } catch { return false; }
-}
-
-/** The auto-resume's folder check: a complete snapshot, or a failed first render. */
-const snapshotReady = (s: StaleRender): boolean => snapshotComplete(s.dir) || failedFirstRender(s);
-
-/** Story 33.6: the host sees the snapshot complete — `manifest.json` parses to an object whose `outputs` is a
- * non-empty object, and each of its keys is a relative path inside `dir` naming a non-empty regular file. No hash
- * is compared. */
-export function snapshotComplete(dir: string): boolean {
-  try {
-    const manifest = JSON.parse(readFileSync(join(dir, "manifest.json"), "utf-8"));
-    const outputs = manifest?.outputs;
-    if (!outputs || typeof outputs !== "object" || Array.isArray(outputs)) return false;
-    const names = Object.keys(outputs);
-    if (names.length === 0) return false;
-    for (const name of names) {
-      const path = resolve(dir, name);
-      if (!name || isAbsolute(name) || !isWithin(dir, path) || path === resolve(dir)) return false;
-      const st = lstatSync(path);
-      if (!st.isFile() || st.size <= 0) return false;
-    }
-    return true;
-  } catch { return false; }
+  const spec = findSpec(served, key) ?? stashedSpec(served, run.engine_run_id, key);
+  if (!spec) return undefined;
+  let text: string;
+  try { text = readFileSync(spec, "utf-8"); } catch { return undefined; }
+  if (fmString(frontmatter(text).status) === "done") return undefined;
+  // A `no-story` pause carries the HALT text unclipped (`no_story.halt_text`): signed in place of the clipped reason, as the
+  // sweep signed it (a 300-character clip inside the generation path would name a second folder).
+  const noStory = events.findLast((e) => e.kind === "paused")?.detail?.no_story as Record<string, unknown> | undefined;
+  const whole = typeof noStory?.halt_text === "string" && noStory.halt_text.trim() ? noStory.halt_text : undefined;
+  const signed = `${whole ?? reason ?? ""}\n${autoRunResult(text)}`;
+  if (!renderSignature(signed)) return undefined;
+  const snap = renderSnapshot(served, signed);
+  if (!snap) return undefined;
+  // 0 tracked; 128, a timeout or anything else: unknown — never removed (the sweep's halt pause asks the same).
+  if (!(await specUntracked(served, spec, deps))) return undefined;
+  return { story_key: key, ...snap, spec };
 }
 
 /** One notifier line: flattened, clipped to `NOTICE_MAX_BYTES` (as `claimRefusedLine`). */
@@ -928,6 +853,11 @@ async function sendLine(deps: Pick<PausedDeps, "hygiene" | "env">, text: string)
  * draft removed; a failure of either leaves both as they were (the folder renamed back), records nothing, and the
  * next pass tries again. */
 async function autoResume(queue: Queue, run: QueueRun, s: StaleRender, deps: PausedDeps, self: Owner): Promise<void> {
+  // Story 38.2: the status word the session wrote (read before the spec goes), and the engine's state at the pause.
+  let statusWord = "unknown";
+  try { statusWord = fmString(frontmatter(readFileSync(s.spec, "utf-8")).status) ?? "unknown"; } catch { /* unreadable */ }
+  const engine = (queue.events(run.run_id).findLast((e) => e.kind === "paused")?.detail?.engine ?? {}) as Record<string, unknown>;
+  const ended = (ENGINE_ENDED as readonly string[]).includes(String(engine.status ?? ""));
   const aside = `${s.dir}.stale-${process.pid}-${Date.now()}`;
   // Story 36.3: a failed first render's generation may be absent: nothing to rename aside.
   const present = existsSync(s.dir);
@@ -939,17 +869,24 @@ async function autoResume(queue: Queue, run: QueueRun, s: StaleRender, deps: Pau
   for (const path of present ? [aside, ...(s.staging ?? [])] : (s.staging ?? [])) {
     try { rmSync(path, { recursive: true, force: true }); } catch { /* a leftover is harmless */ }
   }
-  const resume = deps.resume ?? ((q: Queue, id: string) => resumePaused(q, id, {}, { ...deps, self }));
   let error: string | undefined;
-  try { await resume(queue, run.run_id); }
-  catch (e) { error = e instanceof ResumeRefused ? clip(e.message) : `ResumeFailed: ${clip(message(e))}`; }
+  if (ended) {
+    // Story 38.2 (CAP-5): an ended engine can only be relaunched (`resolve --resume` refuses it): the 27.3 relaunch, its
+    // `close-out` event naming no `story_key` (`finishedStories` never counts the halted story), its engine's cost recorded first.
+    noteEngineCost(queue, run);
+    error = (await relaunchEpic(queue, run, s.story_key, (archive) => ({ reason: STALE_RENDER_VIEW, halted_story: s.story_key, archive }), { ...deps, self })).error;
+  } else {
+    const resume = deps.resume ?? ((q: Queue, id: string) => resumePaused(q, id, {}, { ...deps, self }));
+    try { await resume(queue, run.run_id); }
+    catch (e) { error = e instanceof ResumeRefused ? clip(e.message) : `ResumeFailed: ${clip(message(e))}`; }
+  }
   const notify = await sendLine(deps, error === undefined
     ? autoResumedLine(run.run_id, s.story_key, s.snapshot)
     : autoResumeRefusedLine(run.run_id, s.story_key, s.snapshot, error));
   try {
     queue.note(run.run_id, AUTO_RESUME, {
       reason: STALE_RENDER_VIEW, snapshot: s.snapshot, story_key: s.story_key, engine_run_id: run.engine_run_id, attempt: 1,
-      resumed: error === undefined, ...(error !== undefined ? { error } : {}), notify,
+      resumed: error === undefined, via: ended ? "relaunch" : "resume", status_word: statusWord, ...(error !== undefined ? { error } : {}), notify,
     });
   } catch { /* not recorded */ }
 }
@@ -1334,6 +1271,12 @@ export async function resumePaused(queue: Queue, runId: string, opts: { restoreP
     throw new ResumeRefused("RunNotPaused", `queue run '${runId}' has no worktree or engine to resume`);
   }
   const events = queue.events(runId);
+  // Story 38.2: a pause over an engine that ended (the sweep's `no-story` pause) is never resumed through `resolve --resume`.
+  const pausedEngine = (events.findLast((e) => e.kind === "paused")?.detail?.engine ?? {}) as Record<string, unknown>;
+  const endedStatus = String(pausedEngine.status ?? "");
+  if ((ENGINE_ENDED as readonly string[]).includes(endedStatus) || pausedEngine.paused_stage === "no-story") {
+    throw new ResumeRefused("RunNotPaused", `queue run '${runId}': engine ${String(pausedEngine.run_id ?? run.engine_run_id)} ended '${endedStatus || "unknown"}' — a resume never re-drives an ended engine; cancel the run`);
+  }
   const landed = storyLanded(run, events);
   if (landed) throw new ResumeRefused("StoryLanded", `story ${landed} landed (its spec is done): the paused-run pass closes it out, a resume never re-drives it`);
   const wt = servedRoot(run)!, id = run.engine_run_id, sb = sbxRun(run); // Story 28.5: the served root

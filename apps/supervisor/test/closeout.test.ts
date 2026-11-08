@@ -8,7 +8,7 @@ import { hostname } from "node:os";
 import { join, resolve } from "node:path";
 import { createApi } from "../src/api";
 import { closeOutOrphans, launchStopGraceful, relauncher, type Started } from "../src/cli";
-import { armingRefusedStop, closableVerdict, closeOutPaused, ESCALATION_BLOCKED_REASON, findSpec, frontmatter, gracefulStopInForce, harvestMessage, jiraBound, landing, launchedSinceMove, NOT_HANDED, REARM_SKIPPED, rearmFailedLine, resumePaused, ResumeRefused, trackArgs, unblocksOwed, type PausedDeps } from "../src/closeout";
+import { AUTO_RESUME, autoResumeRefusedLine, armingRefusedStop, closableVerdict, closeOutPaused, ESCALATION_BLOCKED_REASON, renderSignature, RENDER_UNREADABLE_RE, secondHaltLine, staleRenderView, findSpec, frontmatter, gracefulStopInForce, harvestMessage, jiraBound, landing, launchedSinceMove, NOT_HANDED, REARM_SKIPPED, rearmFailedLine, resumePaused, ResumeRefused, trackArgs, unblocksOwed, type PausedDeps } from "../src/closeout";
 import { renderPage, type PageData } from "../src/page";
 import { Queue, STUDIO_END_RETRY_LIMIT, type Owner, type Probes } from "../src/queue";
 import { runProcess, toVmPath, type RunResult } from "../src/server";
@@ -2307,3 +2307,150 @@ process.exit(exit);
     expect(second.sent).toEqual([]);
   });
 });
+
+// Story 38.2 (CAP-5, hole 114): the hole-65 auto-resume keys on the render failure's signature, whatever status word the dev
+// session wrote: the first 37.6 run's two attempts wrote `halted` (five of the generation's ten files `-?????????` from inside
+// the sandbox), so nothing paused. A paused engine is resumed; an engine that ended (the engine-end sweep paused it itself,
+// `no-story`) is relaunched once through the 27.3 relaunch; a second halt of the story stays paused for the operator.
+describe("Story 38.2: the auto-resume keys on the render signature, whatever the status word", () => {
+  const GEN = "_bmad/render/bmad-build-auto/wt-ac68fc677deb/f1a1d5587ffb3976eb54";
+  const FILES = ["manifest.json", "compile-epic-context.md", "spec-template.md", "step-01-clarify-and-route.md", "step-04-review.md",
+    "workflow.md", "step-02-plan.md", "step-03-implement.md", "references/a.md", "references/b.md"];
+  /** The 37.6 HALT: five of the ten files listed `-?????????` from inside the sandbox. */
+  const HALT = `ls -la /home/agent/work/wt/${GEN}/ shows ${FILES.slice(0, 5).map((f) => `-????????? ? ? ? ? ? ${f}`).join(", ")} (five of ten unreadable)`;
+  const SPEC = `---\ntitle: 'The landed story'\nstatus: 'halted'\n---\n\n# body\n\n## Auto Run Result\n\nStatus: halted\nBlocking condition: ${HALT}\n`;
+  const NO_STORY = `no story landed: story ${KEY} ended halted after 2 dev attempt(s): ${HALT}; engine ended 'stopped'`;
+
+  function writeSnapshot(wt: string): string {
+    const dir = join(wt, ...GEN.split("/"));
+    const outputs = Object.fromEntries(FILES.filter((f) => f !== "manifest.json").map((f) => [f, "0".repeat(64)]));
+    for (const f of Object.keys(outputs)) { mkdirSync(join(dir, f, ".."), { recursive: true }); writeFileSync(join(dir, f), `# ${f}\n`); }
+    writeFileSync(join(dir, "manifest.json"), JSON.stringify({ outputs }));
+    return dir;
+  }
+  /** The spec the engine stashed on the defer, under engine `eid`'s run dir. */
+  function stash(wt: string, eid: string): string {
+    const dir = join(wt, ".bmad-loop", "runs", eid, "deferred", KEY);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, `${KEY}-spec.md`), SPEC);
+    return join(dir, `${KEY}-spec.md`);
+  }
+  /** A run whose story halted on the render: paused by its engine (`dev`), or ended and paused by the sweep (`no-story`). */
+  async function halted(o: { ended?: boolean; tracked?: boolean; tier?: "sbx" | "host" } = {}) {
+    const fx = await pausedRun({ spec: false, paused: false, ...(o.tier ? { tier: o.tier } : {}) });
+    const snap = writeSnapshot(fx.wt);
+    let specFile: string;
+    if (o.ended) specFile = stash(fx.wt, E1);
+    else {
+      specFile = join(fx.wt, "_bmad-output", "specs", "spec-epic-9", "stories", `${KEY}-spec.md`);
+      mkdirSync(join(specFile, ".."), { recursive: true });
+      writeFileSync(specFile, SPEC);
+      if (o.tracked) { testGit(fx.wt, "add", "-A", "_bmad-output"); testGit(fx.wt, "commit", "-q", "-m", "the spec, tracked"); }
+    }
+    fx.queue.markPaused(fx.run.run_id, {
+      engine: o.ended
+        ? { run_id: E1, status: "stopped", paused_story_key: KEY, paused_stage: "no-story", paused_reason: NO_STORY }
+        : { run_id: E1, status: "running", paused_stage: "dev", paused_reason: "dev session halted", paused_story_key: KEY },
+      ...(o.ended ? { no_story: { story_key: KEY, word: "halted", attempts: 2 }, no_changes: true } : {}),
+    });
+    return { ...fx, snap, specFile };
+  }
+
+  test("the signature: one snapshot folder and a renderer message, `render_skill.py` or an unreadable entry (`-?????????`)", () => {
+    expect(renderSignature(HALT)).toBe(true);
+    expect(RENDER_UNREADABLE_RE.test("-????????? ? ? ? ? ? manifest.json")).toBe(true);
+    expect(renderSignature(`failed to verify /w/${GEN}/workflow.md`)).toBe(true);
+    expect(renderSignature(`render_skill.py exited 1 (/w/${GEN})`)).toBe(true);
+    expect(renderSignature("-????????? ? ? ? ? ? manifest.json")).toBe(false); // no folder named
+    expect(renderSignature(`the skill at /w/${GEN} looked odd`)).toBe(false); // no message
+    expect(renderSignature(`${HALT} and /w/${GEN.replace("f1a1", "9999")}`)).toBe(false); // two folders
+  });
+
+  test("a paused engine whose session wrote `halted`: recognised from the spec's Auto Run Result, removed, resumed once (`via: \"resume\"`, `status_word: \"halted\"`)", async () => {
+    const fx = await halted();
+    const p = passDeps(fx);
+    const resumed: string[] = [];
+    const deps: PausedDeps = { ...p.deps, resume: async (q, id) => { resumed.push(id); q.resumeFromPause(id, "engine-resume", { engine_run_id: E1 }, me); } };
+    expect(await staleRenderView(fx.get(), fx.queue.events(fx.run.run_id), deps)).toMatchObject({ story_key: KEY, snapshot: GEN, dir: fx.snap, spec: fx.specFile });
+    expect(await closeOutPaused(fx.queue, deps)).toEqual({ closed: [], awaiting: [] });
+    expect(resumed).toEqual([fx.run.run_id]);
+    expect(existsSync(fx.snap) || existsSync(fx.specFile)).toBe(false);
+    expect(ev(fx.queue, fx.run.run_id, AUTO_RESUME).map((e) => e.detail)).toEqual([expect.objectContaining({
+      reason: "stale-render-view", snapshot: GEN, story_key: KEY, engine_run_id: E1, attempt: 1, resumed: true, via: "resume", status_word: "halted" })]);
+    expect(p.invoked).toHaveLength(0);
+    expect(fx.get().state).toBe("running");
+  });
+
+  test("a tracked spec is refused: nothing removed, nothing resumed", async () => {
+    const fx = await halted({ tracked: true });
+    const p = passDeps(fx);
+    expect(await staleRenderView(fx.get(), fx.queue.events(fx.run.run_id), p.deps)).toBeUndefined();
+    await closeOutPaused(fx.queue, p.deps);
+    expect(ev(fx.queue, fx.run.run_id, AUTO_RESUME)).toEqual([]);
+    expect(existsSync(fx.snap) && existsSync(fx.specFile)).toBe(true);
+    expect(fx.get().state).toBe("paused");
+  });
+
+  test("an ended engine (the 37.6 shape, the stashed spec): relaunched once through the 27.3 relaunch, its `close-out` naming no `story_key`; a second halt stays paused with the line", async () => {
+    const fx = await halted({ ended: true });
+    const p = passDeps(fx);
+    expect(await closeOutPaused(fx.queue, p.deps)).toEqual({ closed: [], awaiting: [] });
+    expect(p.invoked).toHaveLength(1);
+    expect(existsSync(fx.snap) || existsSync(fx.specFile)).toBe(false);
+    const co = ev(fx.queue, fx.run.run_id, "close-out");
+    expect(co).toHaveLength(1);
+    expect(co[0]).toMatchObject({ from_state: "paused", to_state: "running" });
+    expect(co[0]!.detail).toMatchObject({ reason: "stale-render-view", halted_story: KEY, archive: "archived" });
+    expect(co[0]!.detail!.story_key).toBeUndefined();
+    expect(sbx.calls().map((c) => c.argv)).toContainEqual(["exec", SB, "/home/agent/.local/bin/bmad-loop", "archive", "--project", toVmPath(fx.wt), E1]);
+    expect(fx.get()).toMatchObject({ state: "running", engine_run_id: E2 });
+    const first = ev(fx.queue, fx.run.run_id, AUTO_RESUME);
+    expect(first.map((e) => e.detail)).toEqual([expect.objectContaining({ attempt: 1, story_key: KEY, engine_run_id: E1, resumed: true, via: "relaunch", status_word: "halted" })]);
+    expect(p.sent.at(-1)).toContain("auto-resumed");
+
+    // The relaunched engine halts the same way and the sweep pauses it again: attempt 2, the operator told, nothing relaunched.
+    const again = stash(fx.wt, E2);
+    writeSnapshot(fx.wt);
+    fx.queue.markPaused(fx.run.run_id, { engine: { run_id: E2, status: "stopped", paused_story_key: KEY, paused_stage: "no-story", paused_reason: NO_STORY } });
+    await closeOutPaused(fx.queue, p.deps);
+    await closeOutPaused(fx.queue, p.deps);
+    expect(p.invoked).toHaveLength(1);
+    expect(ev(fx.queue, fx.run.run_id, AUTO_RESUME).map((e) => [e.detail!.attempt, e.detail!.resumed])).toEqual([[1, true], [2, false]]);
+    expect(p.sent.at(-1)).toBe(secondHaltLine(fx.run.run_id, KEY, GEN, first[0]!.at));
+    expect(existsSync(again)).toBe(true);
+    expect(fx.get()).toMatchObject({ state: "paused", owner_pid: null });
+  });
+
+  test("an ended engine whose relaunch fails: one `auto-resume` (`via: \"relaunch\"`, `resumed: false`, its `error`), the owner told by the refused line, the run still paused", async () => {
+    const fx = await halted({ ended: true });
+    const p = passDeps(fx);
+    const deps: PausedDeps = { ...p.deps, relaunch: async () => { throw new Error("rebuild failed: no wake recorded"); } };
+    expect(await closeOutPaused(fx.queue, deps)).toEqual({ closed: [], awaiting: [] });
+    const rec = ev(fx.queue, fx.run.run_id, AUTO_RESUME);
+    expect(rec).toHaveLength(1);
+    expect(rec[0]!.detail).toMatchObject({ attempt: 1, story_key: KEY, engine_run_id: E1, via: "relaunch", resumed: false, status_word: "halted",
+      error: "relaunch failed: rebuild failed: no wake recorded" });
+    expect(rec[0]!.detail!.notify).toBeDefined();
+    expect(p.sent.at(-1)).toBe(autoResumeRefusedLine(fx.run.run_id, KEY, GEN, "relaunch failed: rebuild failed: no wake recorded"));
+    expect(ev(fx.queue, fx.run.run_id, "close-out-failed").map((e) => e.detail)).toContainEqual(expect.objectContaining({ step: "relaunch" }));
+    expect(ev(fx.queue, fx.run.run_id, "close-out")).toEqual([]);
+    expect(fx.get()).toMatchObject({ state: "paused", engine_run_id: E1 });
+  });
+
+  test("the operator's resume of an ended-engine pause (`no-story`, after a failed relaunch): refused `RunNotPaused` naming the ended engine; no spawn, no `engine-resume`, still paused", async () => {
+    const fx = await halted({ ended: true });
+    const p = passDeps(fx);
+    await closeOutPaused(fx.queue, { ...p.deps, relaunch: async () => { throw new Error("rebuild failed"); } });
+    expect(ev(fx.queue, fx.run.run_id, AUTO_RESUME).map((e) => e.detail!.resumed)).toEqual([false]);
+    const spawned: string[][] = [];
+    const spawn = (bin: string, args: string[]) => { spawned.push([bin, ...args]); throw new Error("never spawned"); };
+    const e = await resumePaused(fx.queue, fx.run.run_id, {}, { ...p.deps, spawn, pidPolls: 1, pollMs: 1 }).catch((x) => x);
+    expect(e).toBeInstanceOf(ResumeRefused);
+    expect((e as ResumeRefused).code).toBe("RunNotPaused");
+    expect((e as ResumeRefused).message).toBe(`RunNotPaused: queue run '${fx.run.run_id}': engine ${E1} ended 'stopped' — a resume never re-drives an ended engine; cancel the run`);
+    expect(spawned).toEqual([]);
+    expect(ev(fx.queue, fx.run.run_id, "engine-resume")).toEqual([]);
+    expect(fx.get()).toMatchObject({ state: "paused", engine_run_id: E1 });
+  });
+});
+
