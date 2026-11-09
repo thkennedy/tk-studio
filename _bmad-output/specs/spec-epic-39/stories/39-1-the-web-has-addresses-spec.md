@@ -284,4 +284,7 @@ Gate: Part A adjust-stories; Part B story accepted, planned 39-2-the-sandbox-log
 | review | 1 | 2026-11-09T18:35:31Z | 2026-11-09T18:53:50Z | 8568b8b5-79e1-49f9-8c70-53e2d762c8b7 | claude-opus-5-5 | medium | 9141839 | 72702 | 5.8325 | completed |
 | review | 2 | 2026-11-09T18:53:51Z | 2026-11-09T19:10:12Z | 071f3ff6-6c6c-4eb2-8c6c-2408f2b75ef1 | claude-opus-5-5 | medium | 11143903 | 78143 | 6.3782 | completed |
 | gate | 1 | 2026-11-09T19:10:13Z | 2026-11-09T19:12:37Z | c775edac-24c9-41bd-a7d1-d5c9b3eb2884 | claude-opus-5-5 | medium | 1883225 | 15006 | 1.5183 | completed |
+| host-leg | 1 | 2026-11-09T19:13:21Z | 2026-11-09T20:26:32Z | — | — | — | — | — | — | green |
+| close-out | 1 | 2026-11-09T20:26:32Z | 2026-11-09T20:26:40Z | — | — | — | — | — | — | PR |
+| merge | — | 2026-11-09T20:27:19Z | 2026-11-09T20:27:19Z | — | — | — | — | — | — | merged |
 
