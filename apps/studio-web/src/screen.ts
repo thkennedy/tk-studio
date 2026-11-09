@@ -25,13 +25,14 @@ export type Route =
 /** The landing: `/app`, `/app/` and every path outside `/app` are replaced by it. */
 export const HOME_PATH = "/app/office";
 
-/** The screens not built yet, each naming the story that builds it. */
+/** The screens not built yet, each naming the story that builds it. Story 39.2: `/app/settings` is the Settings screen
+ * (the Sandbox login card); `settings` names its part still to build, Story 39.8's model and effort. */
 export const PLACEHOLDER = {
   story: "Not built yet: Story 39.4",
   run: "Not built yet: Story 39.5",
   chat: "Not built yet: Story 39.3",
   checkin: "Not built yet: Story 39.7",
-  settings: "Not built yet: Story 39.2",
+  settings: "Not built yet: Story 39.8",
 } as const;
 
 export const notFoundText = (path: string): string => `No page at ${path}`;

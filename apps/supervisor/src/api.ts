@@ -91,6 +91,28 @@
  *                            without `X-CSRF-Token`), 404 UnknownEngagement, 409 IllegalInput {state, verb, detail?} |
  *                            EngagementClosed {state, verb} | AmbiguousEngagement {engagement, projects[]}, 500
  *                            EngagementRecordInvalid
+ *   GET  /sandbox/login      Story 39.2 (0.1.35 additive, `sandbox.ts readSandboxLogin`): [?sandbox=<name>][&project=<id>] — the
+ *                            sandbox's Claude login read: `sbx ls`, the Max-login preflight's probe and one `cat` of the
+ *                            credential file; 200 {ok, sandbox, logged_in, auth_method, subscription_type, access_expires_at,
+ *                            refresh_expires_at, days_left, state: ok|expiring|expired|unknown, checked_at[, reason]} — no other
+ *                            key, never a token; a sandbox not listed running answers `unknown`, `sandbox stopped`, and starts
+ *                            nothing; 400 SandboxRequired {candidates} (no name and not exactly one configured sandbox) |
+ *                            SchemaError, 404 UnknownSandbox {sandbox} (not in TK_SUPERVISOR_CONFIG). Writes nothing
+ *   POST /sandbox/login/start {sandbox?} (Story 39.2): the renewal's start — the `sandbox-login` lease (ten minutes), then
+ *                            `claude auth login --claudeai` in the sandbox's tmux session `tk-login-<id>`; 200 {ok, login_id,
+ *                            url, started_at, expires_at} (the sign-in URL is answered here and in a first refusal's CodeRefused
+ *                            url only); 400 MalformedJson |
+ *                            SchemaError | SandboxRequired, 403 CsrfRefused, 404 UnknownSandbox, 409 LoginWhileLive {sandbox,
+ *                            run_id, state} | LoginInProgress {sandbox, login_id, started_at, expires_at} | SandboxStopped
+ *                            {sandbox}, 500 LoginStartFailed {sandbox, last_line}
+ *   POST /sandbox/login/code {login_id, code} (Story 39.2): the code (`code#state`) handed to the login through tmux's
+ *                            buffer (stdin, never an argument); 200 the re-run read; 400 MalformedJson | SchemaError (no try
+ *                            spent), 403 CsrfRefused, 404 UnknownLogin, 409 LoginExpired (past the ten minutes, or the ten
+ *                            minutes ending while the outcome or a respawn's URL is awaited: the session killed, closed
+ *                            `expired`) | SandboxStopped {sandbox, login_id} (the sandbox stopped under the lease: nothing
+ *                            exec'd, closed `failed`) | LoginClosed {result} | LoginInProgress | CodeRefused {last_line, tries_left[, url]}, 500 LoginFailed {last_line}. The
+ *                            lease's close is the `sandbox-login {login_id, result, by: owner, started_at, ended_at}` service
+ *                            event (no URL, no code)
  *   GET  /                   Story 30.6: the home — the built web's `index.html` (as `GET /app`, `no-store`); with no
  *                            built web the read-only status page (Story 22.2, `page.ts`: server-rendered HTML, no
  *                            script, credential-shaped values redacted) with its "not built" note, never a 503
@@ -104,7 +126,8 @@
  * password, rate-limited with a lockout), all answered before any auth, and gets a signed session cookie.
  * The bearer header still authorises everything. Without it, a valid cookie authorises the GET routes, and
  * `POST /runs/{id}/cancel`, (Story 31.6) `POST /inbox/{key}/reply` and (Story 32.1) `POST /engagements` and
- * `POST /engagements/{id}/input` with the page's CSRF token (else 403 CsrfRefused); never `POST /jobs`.
+ * `POST /engagements/{id}/input` with the page's CSRF token (else 403 CsrfRefused); never `POST /jobs`. Story 39.2:
+ * `GET /sandbox/login` (its answer carries `X-CSRF-Token`), and `POST /sandbox/login/start` and `/code` with CSRF.
  * `GET /` with no auth is the 401 HTML sign-in page (account creation while no account exists); so is a
  * `GET /app[/…]` (Story 30.2) and an HTML `GET /status` (Story 30.6; a non-HTML one stays 401 JSON), their forms
  * carrying the requested path and query as `next`, where a successful
@@ -148,6 +171,10 @@ import { contentType, resolveWebPath, WEB_BUILD_COMMAND, webRoot, type WebOption
 import { registryShow } from "./server";
 import { ApiBindRefused, checkBind } from "./bind";
 import { isTerminal, Queue, RunTerminal, type QueueEvent, type QueueRun } from "./queue";
+import { loadSupervisorConfig, type SupervisorConfig } from "./config";
+import {
+  configuredSandboxes, LOGIN_CODE_RE, LOGIN_ID_RE, loginMemory, readSandboxLogin, SANDBOX_NAME_RE, sendSandboxLoginCode, startSandboxLogin, type LoginDeps,
+} from "./sandbox";
 
 type Env = Record<string, string | undefined>;
 
@@ -225,7 +252,13 @@ export interface ApiDeps {
    * `afterEngagementInput`: the questions pass, the scope pass, then the approve and engagement-run passes, for that
    * served root and engagement). */
   afterEngagementInput?: (root: string, id: string) => Promise<unknown> | unknown;
+  /** Story 39.2: the sandbox login's seams — the `sbx` deps, the pane waits, and the supervisor config the sandbox
+   * defaults from (default `loadSupervisorConfig()`, TK_SUPERVISOR_CONFIG). */
+  sandboxLogin?: SandboxLoginDeps;
 }
+
+/** Story 39.2: the sandbox login routes' seams. */
+export interface SandboxLoginDeps extends LoginDeps { config?: () => SupervisorConfig }
 
 /** Story 27.3: the resume body — a restore patch relative to the run's worktree, optional. */
 export interface ResumeBody { restore_patch?: string }
@@ -1079,6 +1112,60 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
     });
   }
 
+  // ---------------------------------------------------------------- Story 39.2: the sandbox login
+
+  const login = deps.sandboxLogin ?? {};
+  const loginDeps: LoginDeps = { ...login, sbx: login.sbx ?? { env: deps.env ?? process.env }, now: login.now ?? clock };
+  const loginMem = loginMemory();
+
+  /** Settled shape 1: the named sandbox (checked against the config's), else the one configured (narrowed by
+   * `project`); a refusal otherwise. */
+  function whichSandbox(name: unknown, project: string | undefined): { sandbox: string } | Response {
+    const cfg = (login.config ?? (() => loadSupervisorConfig()))();
+    if (name !== undefined && name !== null && name !== "") {
+      if (typeof name !== "string" || !SANDBOX_NAME_RE.test(name)) return fail(400, "SchemaError", { detail: "the sandbox is a name of 1 to 63 letters, digits, '.', '_' or '-'" });
+      if (!configuredSandboxes(cfg).includes(name)) return fail(404, "UnknownSandbox", { sandbox: name });
+      return { sandbox: name };
+    }
+    const candidates = configuredSandboxes(cfg, project || undefined);
+    if (candidates.length !== 1) return fail(400, "SandboxRequired", { candidates, detail: "name the sandbox: ?sandbox=<name> (or {sandbox})" });
+    return { sandbox: candidates[0]! };
+  }
+
+  async function sandboxLoginRead(url: URL): Promise<Response> {
+    const which = whichSandbox(url.searchParams.get("sandbox") ?? undefined, url.searchParams.get("project")?.trim());
+    if (which instanceof Response) return which;
+    return json(200, await readSandboxLogin(queue, which.sandbox, loginDeps.sbx, clock()));
+  }
+
+  async function loginBody(req: Request, keys: readonly string[]): Promise<Record<string, unknown> | Response> {
+    let raw: unknown;
+    try { const text = await req.text(); raw = text.trim() ? JSON.parse(text) : {}; }
+    catch (e) { return fail(400, "MalformedJson", { detail: `the body is not JSON: ${e instanceof Error ? e.message : String(e)}` }); }
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return fail(400, "SchemaError", { detail: "the body must be a JSON object" });
+    for (const k of Object.keys(raw)) if (!keys.includes(k)) return fail(400, "SchemaError", { detail: `unknown field '${k}' (allowed: ${keys.join(", ")})` });
+    return raw as Record<string, unknown>;
+  }
+
+  async function sandboxLoginStart(req: Request): Promise<Response> {
+    const body = await loginBody(req, ["sandbox"]);
+    if (body instanceof Response) return body;
+    const which = whichSandbox(body.sandbox, undefined);
+    if (which instanceof Response) return which;
+    const a = await startSandboxLogin(queue, which.sandbox, loginDeps);
+    return json(a.status, a.body);
+  }
+
+  async function sandboxLoginCode(req: Request): Promise<Response> {
+    const body = await loginBody(req, ["login_id", "code"]);
+    if (body instanceof Response) return body;
+    if (typeof body.login_id !== "string" || !LOGIN_ID_RE.test(body.login_id)) return fail(400, "SchemaError", { detail: "login_id is the start's 12 hex characters" });
+    const code = typeof body.code === "string" ? body.code.trim() : "";
+    if (!LOGIN_CODE_RE.test(code)) return fail(400, "SchemaError", { detail: "the code is the whole text claude.ai shows after you approve (it contains a #)" });
+    const a = await sendSandboxLoginCode(queue, body.login_id, code, loginMem, loginDeps);
+    return json(a.status, a.body);
+  }
+
   /** The auth routes, answered before any auth; null for any other path. */
   async function authRoute(req: Request, url: URL, path: string, method: string): Promise<Response | null> {
     const allow = (m: string) => json(405, { ok: false, error: "MethodNotAllowed", allow: m }, { allow: m });
@@ -1097,16 +1184,18 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
   }
 
   /** What a valid cookie session may do: the GET routes, and cancel, the reply, (Story 32.1) the engagement's create
-   * and typed inputs and (Story 32.2) the chat's message with CSRF. Anything else 401. */
+   * and typed inputs, (Story 32.2) the chat's message and (Story 39.2) the sandbox login's start and code with CSRF.
+   * Anything else 401. */
   async function cookieRoute(req: Request, url: URL, path: string, method: string, cookie: string): Promise<Response> {
     const csrf = csrfToken(secret!, cookie);
     const readRoute = path === "/" || path === "/jobs" || path === "/status" || path === "/events" || path === "/agents"
       || path === "/board" || path === "/inbox" || path === "/office" || path === "/office/events" || /^\/runs\/[^/]+$/.test(path)
       || path === "/engagements" || /^\/engagements\/[^/]+$/.test(path) || /^\/chat\/[^/]+$/.test(path)
-      || path === "/app" || path.startsWith("/app/");
+      || path === "/sandbox/login" || path === "/app" || path.startsWith("/app/");
     if (method === "GET" && readRoute) return await route(req, url, path, method, csrf, "cookie");
     if (method === "POST" && (/^\/runs\/[^/]+\/cancel$/.test(path) || /^\/inbox\/[^/]+\/reply$/.test(path)
-      || path === "/engagements" || /^\/engagements\/[^/]+\/input$/.test(path) || /^\/chat\/[^/]+$/.test(path))) {
+      || path === "/engagements" || /^\/engagements\/[^/]+\/input$/.test(path) || /^\/chat\/[^/]+$/.test(path)
+      || path === "/sandbox/login/start" || path === "/sandbox/login/code")) {
       const given = await csrfGiven(req);
       if (!given || !safeEqual(given, csrf)) return fail(403, "CsrfRefused");
       return await route(req, url, path, method, undefined, "cookie");
@@ -1227,6 +1316,15 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
         if (id === null || !ENGAGEMENT_ID_RE.test(id)) return fail(400, "BadEngagement", { engagement: id ?? chatMatch[1] });
         return method === "POST" ? await postChatRoute(req, url, id) : await readChatRoute(req, url, id);
       }
+      // Story 39.2: the sandbox login's clock and renewal (contract 0.1.35 additive).
+      if (path === "/sandbox/login") {
+        if (method !== "GET") return allow("GET");
+        const answer = await sandboxLoginRead(url);
+        if (csrf) answer.headers.set("x-csrf-token", csrf);
+        return answer;
+      }
+      if (path === "/sandbox/login/start") return method === "POST" ? await sandboxLoginStart(req) : allow("POST");
+      if (path === "/sandbox/login/code") return method === "POST" ? await sandboxLoginCode(req) : allow("POST");
       // Story 29.3: the graced office view (a read: nothing is written to the queue).
       if (path === "/office") {
         if (method !== "GET") return allow("GET");

@@ -42,18 +42,34 @@
  *             lock goes stale within STARTER_LOCK_STALE_S of the supervisor going down; the per-tick and
  *             per-claim writes keep the previous `since`. That liveness is what `jobrun.py submit`/`wake`
  *             judge before they refuse a hand start (`StarterLocked`).
+ *   login     Story 39.2: the sandbox's Claude login has a clock and a renewal. The read (`readSandboxLogin`): `sbx ls`
+ *             (a sandbox not listed running is never exec'd into: `unknown`, `sandbox stopped`, the last
+ *             `sandbox-login-check`'s values), the Max-login preflight's own probe judged by `judgeAuthStatus`, and one
+ *             `sbx exec <sb> cat /home/agent/.claude/.credentials.json` of which only `claudeAiOauth.expiresAt` and
+ *             `refreshTokenExpiresAt` survive (parsed in memory; the stdout is never clipped anywhere). The renewal
+ *             (`startSandboxLogin`, `sendSandboxLoginCode`): a per-sandbox `sandbox-login` lease (a service event, ten
+ *             minutes), then `claude auth login --claudeai` in the detached tmux session `tk-login-<id>`, its pane read
+ *             until the sign-in URL shows; the code goes in by `sbx exec -i <sb> tmux load-buffer -b tk-login-<id> -`
+ *             (stdin, never an argument), `paste-buffer -d` and `send-keys Enter`, and the outcome is the pane's
+ *             `#{pane_dead} #{pane_dead_status}`. The login's state is the lease plus the session name, never memory.
+ *             While the lease is live the claim gate claims no run on the sandbox, the pin never restarts it and the
+ *             release keeps it; the drain closes a stale lease `expired` (`expireSandboxLogins`). The sign-in URL is
+ *             answered by the start route and by a first refusal's `CodeRefused {…, url}` (the respawned sign-in) only,
+ *             never written to an event, a refusal's last_line, a pane line or a log.
  *
  * Every `sbx` call is argv only — never `bash`, `sh` or a `-c` string, never a pattern kill.
  */
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { ENGINE_MCP_START, ENGINE_MCP_STOP } from "./enginemcp-kinds";
 import { sbxBin, studioHome } from "./env";
+import type { SupervisorConfig } from "./config";
 import {
-  checkoutKey, heldEngine, isTerminal, parseStatGroup, probeRecordedWorker, processStartTime, servedRoot, workerMayRun, type Queue, type QueueRun, type WorkerKill,
+  checkoutKey, heldEngine, isTerminal, parseStatGroup, probeRecordedWorker, processStartTime, servedRoot, workerMayRun, type Queue, type QueueRun, type SandboxLoginLease, type WorkerKill,
 } from "./queue";
-import { maxLoginPreflight, readProjectConfig, runProcess, toVmPath, type RunResult, type Spawner } from "./server";
+import { buildWorkerEnv, judgeAuthStatus, maxLoginPreflight, readProjectConfig, runProcess, toVmPath, type RunResult, type Spawner } from "./server";
 
 type Env = Record<string, string | undefined>;
 
@@ -63,8 +79,9 @@ export interface HoldChild { pid?: number; done: Promise<unknown> }
 export interface SandboxDeps {
   /** SBX_BIN and the store (TK_STUDIO_HOME) are read from here (default `process.env`). */
   env?: Env;
-  /** A bounded argv-only `sbx` call (default `runProcess`). */
-  run?: (bin: string, args: string[], opts: { timeoutS: number }) => Promise<RunResult>;
+  /** A bounded argv-only `sbx` call (default `runProcess`). Story 39.2: `input`, when given, is written to the call's
+   * stdin (the login code's only path into the sandbox: `sbx exec -i <sb> tmux load-buffer -b <S> -`). */
+  run?: (bin: string, args: string[], opts: { timeoutS: number; input?: string }) => Promise<RunResult>;
   /** Spawns the long-lived hold (default `defaultHold`, detached and unref'd). */
   hold?: (bin: string, args: string[]) => HoldChild;
   /** Story 36.7 (DW-85): the run's engine MCP stop at release, injected where the deps are built (`enginemcp.ts`'s
@@ -85,8 +102,9 @@ export interface SandboxDeps {
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const clip = (s: string, n = 300) => s.replace(/\/\/[^/@\s]+@/g, "//[redacted]@").trim().slice(0, n);
 const bin = (deps: SandboxDeps) => sbxBin(deps.env ?? process.env);
-const call = (deps: SandboxDeps, args: string[], timeoutS = 60) =>
-  (deps.run ?? ((b, a, o) => runProcess(b, a, { timeoutS: o.timeoutS })))(bin(deps), args, { timeoutS });
+const call = (deps: SandboxDeps, args: string[], timeoutS = 60, input?: string) =>
+  (deps.run ?? ((b, a, o) => runProcess(b, a, { timeoutS: o.timeoutS, ...(o.input !== undefined ? { input: o.input } : {}) })))(
+    bin(deps), args, { timeoutS, ...(input !== undefined ? { input } : {}) });
 const readHost = (deps: SandboxDeps, path: string): string | null => {
   if (deps.readFile) return deps.readFile(path);
   try { return readFileSync(path, "utf-8"); } catch { return null; }
@@ -200,6 +218,9 @@ export async function releasePin(queue: Queue, runId: string, deps: SandboxDeps 
     const sb = run.sandbox;
     if (!queue.pinOutstanding(sb)) return "none";
     const holders = await sandboxHolders(queue, sb, runId);
+    // Story 39.2: a live `sandbox-login` lease keeps the sandbox up (`sbx stop` would kill the tmux login).
+    const lease = queue.openSandboxLogin(sb);
+    if (lease) holders.push(`sandbox-login:${lease.login_id}`);
     if (holders.length) {
       // Named once per pin episode (a later release after the same pin finds it kept already). DW-69: only events
       // after the run's latest `pinned` count (none: all of them), so a re-run's fresh pin names its own `pin-kept`.
@@ -302,7 +323,8 @@ export async function pinWithRestart(queue: Queue, runId: string, sb: string, de
       const probeBefore = await maxLoginPreflight(spawner, { tier: "sbx", sandbox: sb });
       const restarted = ctx.restarted ?? new Set<string>();
       if (!probeBefore && ctx.report) ctx.report.probe_clean = true;
-      if (probeBefore && !restarted.has(sb) && openPinRestart(queue, sb) === null
+      // Story 39.2: a live `sandbox-login` lease on `sb` forbids the restart (it would kill the tmux login): a plain pin.
+      if (probeBefore && !restarted.has(sb) && openPinRestart(queue, sb) === null && queue.openSandboxLogin(sb) === null
         && !(await sandboxHolders(queue, sb, runId, RESTART_BLOCKING_STATES)).length) {
         restarted.add(sb);
         const stopFailed = await restartStep(releaseArgv(sb), deps);
@@ -719,6 +741,369 @@ export function writeStarterLocks(
     if (seen.has(j.checkout)) continue;
     seen.add(j.checkout);
     out.push(writeStarterLock({ project_id: j.project_id, root: j.root }, env, now, opts));
+  }
+  return out;
+}
+
+// ------------------------------------------------------------ Story 39.2: the sandbox login's clock and renewal
+
+/** The sandbox's credential file (a string constant: a VM path, never a host `join`). */
+export const SANDBOX_CREDENTIALS = "/home/agent/.claude/.credentials.json";
+/** Claude Code's own warning window: three days or fewer is `expiring`. */
+export const LOGIN_WARN_MS = 3 * 86_400_000;
+/** The `sandbox-login` lease's life (ten minutes). */
+export const LOGIN_LEASE_S = 600;
+/** A login id: 6 random bytes in hex. */
+export const LOGIN_ID_RE = /^[0-9a-f]{12}$/;
+/** A sandbox name the routes accept. */
+export const SANDBOX_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$/;
+/** The sign-in URL in a pane: the AC's `claude.ai/oauth/authorize` and the installed binary's `claude.com/cai` base. */
+export const SIGN_IN_URL_RE = /https:\/\/(?:claude\.ai|claude\.com\/cai)\/oauth\/authorize\?[^\s"'<>]+/g;
+/** The CLI's `code#state` line, trimmed. */
+export const LOGIN_CODE_RE = /^[A-Za-z0-9._~-]{1,256}#[A-Za-z0-9._~-]{1,256}$/;
+/** The service event the Task pass records per sandbox (`hygiene.ts sandboxLoginPass`); the stopped read's last values. */
+export const SANDBOX_LOGIN_CHECK = "sandbox-login-check";
+
+export type LoginState = "ok" | "expiring" | "expired" | "unknown";
+
+/** GET /sandbox/login's answer: exactly these keys (`reason` only on `unknown`). No token, email, org or URL. */
+export interface SandboxLoginReading {
+  ok: true; sandbox: string; logged_in: boolean | null; auth_method: string | null; subscription_type: string | null;
+  access_expires_at: string | null; refresh_expires_at: string | null; days_left: number | null; state: LoginState;
+  checked_at: string; reason?: string;
+}
+
+/** The distinct `jobs.*.sandbox` of the supervisor config, in config order; `project` narrows them to the
+ * `jobs."<project>/…"` entries (the project's placement). */
+export function configuredSandboxes(cfg: SupervisorConfig, project?: string): string[] {
+  const out: string[] = [];
+  for (const [key, opts] of Object.entries(cfg.jobs)) {
+    if (project !== undefined && key.slice(0, key.lastIndexOf("/")) !== project) continue;
+    if (opts.sandbox && !out.includes(opts.sandbox)) out.push(opts.sandbox);
+  }
+  return out;
+}
+
+export const credentialsArgv = (sb: string): string[] => ["exec", sb, "cat", SANDBOX_CREDENTIALS];
+/** The Max-login preflight's own probe argv (`server.ts maxLoginPreflight`), verbatim. */
+export const authStatusArgv = (sb: string): string[] => ["exec", sb, "env", "-u", "ANTHROPIC_API_KEY", "claude", "auth", "status", "--json"];
+
+const loginSession = (id: string) => `tk-login-${id}`;
+const loginTarget = (id: string) => `=tk-login-${id}:`;
+const LOGIN_ARGV = ["env", "-u", "ANTHROPIC_API_KEY", "claude", "auth", "login", "--claudeai"];
+export const loginStartArgv = (sb: string, id: string): string[] =>
+  ["exec", sb, "tmux", "new-session", "-d", "-s", loginSession(id), "-x", "1000", "-y", "50", ...LOGIN_ARGV, ";", "set-option", "-t", loginTarget(id), "remain-on-exit", "on"];
+export const loginCaptureArgv = (sb: string, id: string): string[] => ["exec", sb, "tmux", "capture-pane", "-p", "-J", "-S", "-", "-t", loginTarget(id)];
+export const loginKillArgv = (sb: string, id: string): string[] => ["exec", sb, "tmux", "kill-session", "-t", `=${loginSession(id)}`];
+/** The code's only way in: stdin of `sbx exec -i` (the argv never carries it). */
+export const loginLoadBufferArgv = (sb: string, id: string): string[] => ["exec", "-i", sb, "tmux", "load-buffer", "-b", loginSession(id), "-"];
+export const loginPasteArgv = (sb: string, id: string): string[] => ["exec", sb, "tmux", "paste-buffer", "-d", "-b", loginSession(id), "-t", loginTarget(id)];
+export const loginEnterArgv = (sb: string, id: string): string[] => ["exec", sb, "tmux", "send-keys", "-t", loginTarget(id), "Enter"];
+export const loginPaneArgv = (sb: string, id: string): string[] => ["exec", sb, "tmux", "display-message", "-p", "-t", loginTarget(id), "#{pane_dead} #{pane_dead_status}"];
+export const loginClearArgv = (sb: string, id: string): string[] => ["exec", sb, "tmux", "clear-history", "-t", loginTarget(id)];
+export const loginRespawnArgv = (sb: string, id: string): string[] => ["exec", sb, "tmux", "respawn-pane", "-k", "-t", loginTarget(id), ...LOGIN_ARGV];
+
+/** The last sign-in URL in a pane that carries both the PKCE challenge and the state, else null. */
+export function signInUrl(pane: string): string | null {
+  const hits = [...(pane ?? "").matchAll(SIGN_IN_URL_RE)].map((m) => m[0]).filter((u) => u.includes("code_challenge=") && u.includes("state="));
+  return hits.at(-1) ?? null;
+}
+
+const urlState = (url: string | null): string | null => {
+  if (!url) return null;
+  try { return new URL(url).searchParams.get("state"); } catch { return null; }
+};
+
+/** The pane's last non-blank line for a refusal: ANSI stripped, every `https://…` replaced by `[sign-in URL]`, every line
+ * carrying the code (or either half of it) or starting `Paste code here` skipped, clipped to 300 characters. */
+export function paneLastLine(pane: string, code?: string): string {
+  const halves = code ? [code, ...code.split("#")].filter((x) => x.length > 0) : [];
+  const lines = (pane ?? "").replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").replace(/\x1b[\]PX^_][^\x07\x1b]*(?:\x07|\x1b\\)?/g, "")
+    .split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !/^Paste code here/.test(l) && !halves.some((h) => l.includes(h)));
+  const last = lines.at(-1);
+  return last ? last.replace(/https:\/\/\S+/g, "[sign-in URL]").slice(0, 300) : "the pane printed nothing";
+}
+
+/** The read's pure judgement (Settled shape 2's precedence table, the first that applies wins). */
+export function judgeLogin(
+  sb: string, probe: { exit: number | null; stdout: string } | { error: string },
+  creds: { exit: number | null; stdout: string } | { error: string }, nowMs: number,
+): SandboxLoginReading {
+  let loggedIn: boolean | null = null, method: string | null = null, sub: string | null = null, probeFailed: string | null = null;
+  // The preflight's rule (ruling 3), reused as is: null is a claude.ai subscription login.
+  let preflightGap: string | null = null;
+  if ("error" in probe) probeFailed = probe.error;
+  else if (probe.exit !== 0) probeFailed = `exit ${probe.exit}`;
+  else {
+    let s: unknown;
+    try { s = JSON.parse(probe.stdout.trim()); } catch { s = undefined; }
+    if (!s || typeof s !== "object" || Array.isArray(s)) probeFailed = "unparseable";
+    else {
+      // Only three keys are read; the probe's object (it carries the email and the org) is never spread.
+      const o = s as Record<string, unknown>;
+      loggedIn = o.loggedIn === true;
+      method = typeof o.authMethod === "string" ? o.authMethod : null;
+      sub = typeof o.subscriptionType === "string" ? o.subscriptionType : null;
+      preflightGap = judgeAuthStatus(probe.exit, probe.stdout);
+    }
+  }
+  let access: number | null = null, refresh: number | null = null, credsFailed: string | null = null;
+  if ("error" in creds) credsFailed = "unreadable";
+  else if (creds.exit !== 0) credsFailed = `exit ${creds.exit}`;
+  else {
+    let c: any;
+    try { c = JSON.parse(creds.stdout); } catch { c = undefined; }
+    const oauth = c && typeof c === "object" ? c.claudeAiOauth : undefined;
+    if (!oauth || typeof oauth !== "object") credsFailed = c === undefined ? "unparseable" : "no refreshTokenExpiresAt";
+    else {
+      if (typeof oauth.expiresAt === "number" && Number.isFinite(oauth.expiresAt)) access = oauth.expiresAt;
+      if (typeof oauth.refreshTokenExpiresAt === "number" && Number.isFinite(oauth.refreshTokenExpiresAt)) refresh = oauth.refreshTokenExpiresAt;
+      else credsFailed = "no refreshTokenExpiresAt";
+    }
+  }
+  const iso = (ms: number | null) => (ms === null ? null : new Date(ms).toISOString());
+  const base = {
+    ok: true as const, sandbox: sb, logged_in: probeFailed ? null : loggedIn, auth_method: probeFailed ? null : method,
+    subscription_type: probeFailed ? null : sub, access_expires_at: iso(access), refresh_expires_at: iso(refresh),
+    days_left: refresh === null ? null : Math.max(0, Math.floor((refresh - nowMs) / 86_400_000)), checked_at: new Date(nowMs).toISOString(),
+  };
+  if (probeFailed) return { ...base, state: "unknown", reason: `the login probe failed: ${probeFailed}` };
+  if (preflightGap !== null && loggedIn !== true) return { ...base, state: "expired" };
+  if (preflightGap !== null) return { ...base, state: "unknown", reason: `logged in with '${method}', not the claude.ai subscription (the preflight refuses it)` };
+  if (credsFailed || refresh === null) return { ...base, state: "unknown", reason: `the credentials file was not read: ${credsFailed ?? "no refreshTokenExpiresAt"}` };
+  if (refresh <= nowMs) return { ...base, state: "expired" };
+  if (refresh - nowMs <= LOGIN_WARN_MS) return { ...base, state: "expiring" };
+  return { ...base, state: "ok" };
+}
+
+/** The latest `sandbox-login-check` recorded for `sb`, else null. */
+export function lastLoginCheck(queue: Queue, sb: string): { seq: number; at: string; detail: Record<string, unknown> } | null {
+  const e = queue.serviceEvents(SANDBOX_LOGIN_CHECK).findLast((x) => x.detail?.sandbox === sb);
+  return e ? { seq: e.seq, at: e.at, detail: e.detail! } : null;
+}
+
+/** GET /sandbox/login's read of `sb` (Settled shape 2): `sbx ls`; a sandbox not listed running is never exec'd into
+ * (`unknown`, `sandbox stopped`, the last check's values or nulls; nothing started); else the preflight's probe and one
+ * `cat` of the credential file, judged by `judgeLogin`. Writes nothing. Never throws. */
+export async function readSandboxLogin(queue: Queue, sb: string, deps: SandboxDeps = {}, nowMs: number = Date.now()): Promise<SandboxLoginReading> {
+  if (!(await sandboxRunning(sb, deps))) {
+    const last = lastLoginCheck(queue, sb);
+    const d = last?.detail ?? {};
+    const str = (k: string) => (typeof d[k] === "string" ? d[k] as string : null);
+    return {
+      ok: true, sandbox: sb, logged_in: typeof d.logged_in === "boolean" ? d.logged_in : null, auth_method: str("auth_method"),
+      subscription_type: str("subscription_type"), access_expires_at: str("access_expires_at"), refresh_expires_at: str("refresh_expires_at"),
+      days_left: typeof d.days_left === "number" ? d.days_left : null, state: "unknown", checked_at: last?.at ?? new Date(nowMs).toISOString(),
+      reason: "sandbox stopped",
+    };
+  }
+  const spawned = async (argv: string[]) => {
+    try {
+      const r = deps.run ? await deps.run(bin(deps), argv, { timeoutS: 30 }) : await runProcess(bin(deps), argv, { timeoutS: 30, env: buildWorkerEnv() });
+      return { exit: r.exit, stdout: r.stdout };
+    // A timeout's message carries the stdout's tail (the probe's email): cut before it.
+    } catch (e) { return { error: clip(message(e).replace(/;\s*stdout tail:[\s\S]*$/, ""), 120).replace(/https:\/\/\S+/g, "[url]") }; }
+  };
+  const probe = await spawned(authStatusArgv(sb));
+  const creds = await spawned(credentialsArgv(sb));
+  return judgeLogin(sb, probe, creds, nowMs);
+}
+
+/** A route's answer: its HTTP status and body (`{ok, …}`; a refusal `{ok: false, error, …}`). */
+export interface LoginAnswer { status: number; body: Record<string, unknown> }
+const refuse = (status: number, error: string, extra: Record<string, unknown> = {}): LoginAnswer => ({ status, body: { ok: false, error, ...extra } });
+
+export interface LoginDeps {
+  sbx?: SandboxDeps;
+  /** The pane poll interval (ms, default 1000), the URL wait (default 30 000) and the code's outcome wait (default 60 000). */
+  pollMs?: number; urlWaitMs?: number; codeWaitMs?: number;
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+/** The API's per-process memory of the exchange: tries per login (a restart resets them, harmlessly) and the codes in
+ * flight. The login's state itself is the lease and the session name. */
+export interface LoginMemory { tries: Map<string, number>; inFlight: Set<string> }
+export const loginMemory = (): LoginMemory => ({ tries: new Map(), inFlight: new Set() });
+
+const nowOf = (d: LoginDeps) => (d.now ?? Date.now)();
+const sleepOf = (d: LoginDeps) => d.sleep ?? ((ms: number) => Bun.sleep(ms));
+
+/** The pane's text (capture), or null when it could not be read. Never throws. */
+async function capture(sb: string, id: string, deps: SandboxDeps): Promise<string | null> {
+  try { const r = await call(deps, loginCaptureArgv(sb, id), 30); return r.exit === 0 ? r.stdout : null; } catch { return null; }
+}
+/** `#{pane_dead} #{pane_dead_status}`: dead with its status, alive, or null (unreadable). Never throws. */
+async function paneState(sb: string, id: string, deps: SandboxDeps): Promise<{ dead: boolean; status: number | null } | null> {
+  try {
+    const r = await call(deps, loginPaneArgv(sb, id), 30);
+    if (r.exit !== 0) return null;
+    const [dead, status] = r.stdout.trim().split(/\s+/);
+    return { dead: dead === "1", status: status !== undefined && status !== "" && Number.isFinite(Number(status)) ? Number(status) : null };
+  } catch { return null; }
+}
+async function killLogin(sb: string, id: string, deps: SandboxDeps): Promise<void> {
+  try { await call(deps, loginKillArgv(sb, id), 30); } catch { /* best effort */ }
+}
+
+/** Wait for a sign-in URL (one whose `state` differs from `notState`, when given) within `waitMs`: the URL, or the
+ * failure's last pane line. A dead pane ends the wait. */
+async function awaitUrl(sb: string, id: string, d: LoginDeps, waitMs: number, notState: string | null = null): Promise<{ url: string } | { last_line: string }> {
+  const deps = d.sbx ?? {};
+  const pollMs = d.pollMs ?? 1000;
+  let pane = "";
+  for (const until = nowOf(d) + waitMs; ;) {
+    pane = (await capture(sb, id, deps)) ?? pane;
+    const url = signInUrl(pane);
+    if (url && (notState === null || urlState(url) !== notState)) return { url };
+    const st = await paneState(sb, id, deps);
+    if (st?.dead || nowOf(d) >= until) return { last_line: paneLastLine(pane) };
+    await sleepOf(d)(pollMs);
+  }
+}
+
+/** POST /sandbox/login/start (Settled shapes 3, 4, 5): refused by name while a run holds `sb` (`LoginWhileLive`; checked
+ * again atomically inside `takeSandboxLogin`, so a claim racing the start never runs beside the login), a
+ * live lease stands (`LoginInProgress`) or `sb` is not running (`SandboxStopped`, nothing started) — each writing
+ * nothing; else the lease is taken, `claude auth login --claudeai` started in `tk-login-<id>` and its pane read until the
+ * sign-in URL shows (a timeout or a dead pane: the session killed, the lease closed `failed`, `LoginStartFailed`).
+ * The URL is in the 200 answer (and, after a respawn, in the code route's first `CodeRefused {…, url}`) only, never in
+ * an event, a refusal's last_line, a pane line or a log. Never throws. */
+export async function startSandboxLogin(queue: Queue, sb: string, d: LoginDeps = {}): Promise<LoginAnswer> {
+  const deps = d.sbx ?? {};
+  const holder = (await sandboxHolders(queue, sb, "", RESTART_BLOCKING_STATES))[0];
+  const legRun = holder ? undefined : queue.runs().find((r) => r.sandbox === sb && queue.verifyLegLive(r.run_id));
+  const held = holder ? queue.get(holder) : legRun;
+  if (held) return refuse(409, "LoginWhileLive", { sandbox: sb, run_id: held.run_id, state: held.state });
+  const live = queue.openSandboxLogin(sb, nowOf(d));
+  if (live) return refuse(409, "LoginInProgress", { sandbox: sb, login_id: live.login_id, started_at: live.started_at, expires_at: live.deadline });
+  if (!(await sandboxRunning(sb, deps))) return refuse(409, "SandboxStopped", { sandbox: sb });
+  const id = randomBytes(6).toString("hex");
+  const taken = queue.takeSandboxLogin(sb, id, nowOf(d), LOGIN_LEASE_S);
+  // The take re-reads the holders inside its transaction: a drain claim that landed since the check above refuses it.
+  if ("held" in taken) return refuse(409, "LoginWhileLive", { sandbox: sb, run_id: taken.held.run_id, state: taken.held.state });
+  if ("live" in taken) {
+    return refuse(409, "LoginInProgress", { sandbox: sb, login_id: taken.live.login_id, started_at: taken.live.started_at, expires_at: taken.live.deadline });
+  }
+  const failed = async (last_line: string) => {
+    await killLogin(sb, id, deps);
+    queue.closeSandboxLogin(id, "failed", nowOf(d));
+    return refuse(500, "LoginStartFailed", { sandbox: sb, last_line });
+  };
+  try {
+    const r = await call(deps, loginStartArgv(sb, id), 30);
+    if (r.exit !== 0) return await failed(paneLastLine(`${r.stdout}\n${r.stderr}`));
+  } catch (e) { return await failed(paneLastLine(message(e))); }
+  const got = await awaitUrl(sb, id, d, d.urlWaitMs ?? 30_000);
+  if ("last_line" in got) return await failed(got.last_line);
+  return { status: 200, body: { ok: true, login_id: id, url: got.url, started_at: taken.lease.started_at, expires_at: taken.lease.deadline } };
+}
+
+const INVALID_CODE = /Invalid code\./g;
+const invalidCount = (pane: string) => (pane.match(INVALID_CODE) ?? []).length;
+
+/** POST /sandbox/login/code (Settled shapes 3, 4): the code handed to the waiting login through tmux's buffer (stdin
+ * only), the outcome read from the pane. The caller checked `loginId` and `code`'s shapes (a bad shape spends no try).
+ * Every wait (the outcome's, a respawn's URL) ends by the lease's deadline at the latest: a deadline reached with no
+ * success closes the lease `expired` and answers `LoginExpired`, as a code sent late does; a late or in-wait expiry kills
+ * the session only on a sandbox listed running (best effort, as the drain's `expireSandboxLogins`), so a late code on a
+ * stopped sandbox is still `LoginExpired`, with no exec. Otherwise a sandbox not listed running is never exec'd into:
+ * the lease closed `failed`, `SandboxStopped`.
+ * Never throws: the exchange's own failures are named, URL-free answers. */
+export async function sendSandboxLoginCode(queue: Queue, loginId: string, code: string, mem: LoginMemory, d: LoginDeps = {}): Promise<LoginAnswer> {
+  const deps = d.sbx ?? {};
+  const known = queue.sandboxLogin(loginId);
+  if (!known) return refuse(404, "UnknownLogin", { login_id: loginId });
+  if (known.closed) return refuse(409, "LoginClosed", { login_id: loginId, result: known.closed.result });
+  const lease: SandboxLoginLease = known.open;
+  const sb = lease.sandbox;
+  const deadlineMs = Date.parse(lease.deadline);
+  const expire = async (): Promise<LoginAnswer> => {
+    // Never exec into (and so start) a sandbox stopped under the lease: the kill is best effort on a running one only.
+    if (await sandboxRunning(sb, deps)) await killLogin(sb, loginId, deps);
+    queue.closeSandboxLogin(loginId, "expired", nowOf(d));
+    mem.tries.delete(loginId);
+    return refuse(409, "LoginExpired", { login_id: loginId });
+  };
+  if (!(deadlineMs > nowOf(d))) return await expire();
+  if (mem.inFlight.has(loginId)) return refuse(409, "LoginInProgress", { login_id: loginId });
+  // Marked before the `ls` await, so a second code racing this one answers LoginInProgress.
+  mem.inFlight.add(loginId);
+  try {
+    // Never exec into (and so start) a sandbox stopped outside the supervisor while the lease stands.
+    if (!(await sandboxRunning(sb, deps))) {
+      queue.closeSandboxLogin(loginId, "failed", nowOf(d));
+      mem.tries.delete(loginId);
+      return refuse(409, "SandboxStopped", { sandbox: sb, login_id: loginId });
+    }
+    const close = async (result: "renewed" | "refused" | "failed") => {
+      await killLogin(sb, loginId, deps);
+      queue.closeSandboxLogin(loginId, result, nowOf(d));
+      mem.tries.delete(loginId);
+    };
+    const before = (await capture(sb, loginId, deps)) ?? "";
+    const oldState = urlState(signInUrl(before));
+    const invalidBefore = invalidCount(before);
+    try {
+      const steps: [string[], string?][] = [[loginLoadBufferArgv(sb, loginId), code], [loginPasteArgv(sb, loginId)], [loginEnterArgv(sb, loginId)]];
+      for (const [argv, input] of steps) {
+        const r = await call(deps, argv, 30, input);
+        if (r.exit !== 0) { await close("failed"); return refuse(500, "LoginFailed", { login_id: loginId, last_line: paneLastLine(`${r.stdout}\n${r.stderr}`, code) }); }
+      }
+    } catch (e) { await close("failed"); return refuse(500, "LoginFailed", { login_id: loginId, last_line: paneLastLine(message(e), code) }); }
+    const pollMs = d.pollMs ?? 1000;
+    let pane = before;
+    for (const until = Math.min(nowOf(d) + (d.codeWaitMs ?? 60_000), deadlineMs); ;) {
+      const st = await paneState(sb, loginId, deps);
+      pane = (await capture(sb, loginId, deps)) ?? pane;
+      const tries = (mem.tries.get(loginId) ?? 0) + 1;
+      if (st?.dead && st.status === 0) {
+        await close("renewed");
+        const reading = await readSandboxLogin(queue, sb, deps, nowOf(d));
+        return { status: 200, body: reading as unknown as Record<string, unknown> };
+      }
+      if (st?.dead) {
+        const last_line = paneLastLine(pane, code);
+        if (tries >= 2) { await close("refused"); return refuse(409, "CodeRefused", { login_id: loginId, last_line, tries_left: 0 }); }
+        mem.tries.set(loginId, tries);
+        // The old code is bound to the old PKCE verifier: a fresh sign-in, its URL's state differing.
+        try {
+          await call(deps, loginClearArgv(sb, loginId), 30);
+          const r = await call(deps, loginRespawnArgv(sb, loginId), 30);
+          if (r.exit !== 0) { await close("failed"); return refuse(500, "LoginFailed", { login_id: loginId, last_line: paneLastLine(`${r.stdout}\n${r.stderr}`, code) }); }
+        } catch (e) { await close("failed"); return refuse(500, "LoginFailed", { login_id: loginId, last_line: paneLastLine(message(e), code) }); }
+        const got = await awaitUrl(sb, loginId, d, Math.min(d.urlWaitMs ?? 30_000, deadlineMs - nowOf(d)), oldState);
+        if ("last_line" in got && nowOf(d) >= deadlineMs) return await expire();
+        if ("last_line" in got) { await close("failed"); return refuse(500, "LoginFailed", { login_id: loginId, last_line: paneLastLine(got.last_line, code) }); }
+        return refuse(409, "CodeRefused", { login_id: loginId, last_line, tries_left: 1, url: got.url });
+      }
+      if (st && invalidCount(pane) > invalidBefore) {
+        const last_line = paneLastLine(pane, code);
+        if (tries >= 2) { await close("refused"); return refuse(409, "CodeRefused", { login_id: loginId, last_line, tries_left: 0 }); }
+        mem.tries.set(loginId, tries);
+        return refuse(409, "CodeRefused", { login_id: loginId, last_line, tries_left: 1 });
+      }
+      if (nowOf(d) >= deadlineMs) return await expire();
+      if (nowOf(d) >= until) { await close("failed"); return refuse(500, "LoginFailed", { login_id: loginId, last_line: paneLastLine(pane, code) }); }
+      await sleepOf(d)(pollMs);
+    }
+  } finally { mem.inFlight.delete(loginId); }
+}
+
+/** The drain pass's expiry (Settled shape 6), before its claims: every open lease past its deadline has its tmux session
+ * killed (best effort, only on a running sandbox) and is closed `expired` with `closed_by: "drain"`. Answers the ids
+ * closed. Never throws. */
+export async function expireSandboxLogins(queue: Queue, deps: SandboxDeps = {}, nowMs: number = Date.now()): Promise<string[]> {
+  const out: string[] = [];
+  let stale: SandboxLoginLease[];
+  try { stale = queue.staleSandboxLogins(nowMs); } catch { return out; }
+  const running = new Map<string, boolean>();
+  for (const l of stale) {
+    try {
+      if (!running.has(l.sandbox)) running.set(l.sandbox, await sandboxRunning(l.sandbox, deps));
+      if (running.get(l.sandbox)) await killLogin(l.sandbox, l.login_id, deps);
+      if (queue.closeSandboxLogin(l.login_id, "expired", nowMs, "drain")) out.push(l.login_id);
+    } catch { /* the next pass */ }
   }
   return out;
 }
