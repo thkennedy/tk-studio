@@ -116,9 +116,19 @@ class MaintenanceJobTestCase(unittest.TestCase):
         self._instantiate()
         result = jobrun.wake(self.root, "maintenance-conformance")
         self.assertTrue(result["woken"])
-        self.assertEqual(result["state"], "complete")
-
         workspace = joblib.workspace_path("proj", result["run_id"])
+        if result["state"] != "complete":
+            # Hole 122 (Story 38.6's second leg): a `blocked` run under the host leg surfaced as `'blocked' !=
+            # 'complete'` and nothing more — the event's tail named neither the wrapper's reason nor the failed
+            # checks. Fail naming both (the summary's reason, the runner's failures clipped), never the state alone.
+            summary = json.loads((workspace / "summary.json").read_text(encoding="utf-8"))
+            output_path = workspace / "output.json"
+            failures = (json.loads(output_path.read_text(encoding="utf-8")).get("failures")
+                        if output_path.is_file() else None)
+            self.fail(f"run state {result['state']!r} (reason: {summary.get('reason')!r}; exit_code="
+                      f"{summary.get('exit_code')!r}; failures: "
+                      f"{json.dumps(failures)[:2000] if failures is not None else 'no output.json'})")
+
         output = json.loads((workspace / "output.json").read_text(
             encoding="utf-8"))
         self.assertTrue(output["ok"], output.get("failures"))
