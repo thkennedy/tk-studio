@@ -9,6 +9,9 @@
  *             on origin per `git ls-remote --heads origin refs/heads/supervisor/run-<id>`, or that call failing);
  *             `VerifyRunning` (409: a `host-verify-leg` lease held by a live owner, `Queue.takeVerifyLeg`).
  *             `VerifyFailed` (500): the work folder unset, or the cut or materialise failed; the lease is released.
+ *             DW-193: a WIP drop already pushed when materialise (or anything after it in the cut) fails stays pushed,
+ *             and the refusal's detail names it after the clipped error: `; the WIP <wip sha12> already dropped:
+ *             revert <revert sha12> pushed to <branch>`.
  *   the cut   `<run.worktree>.verify` (a leftover from a crashed leg removed first), the branch fetched, then
  *             (DW-117, TKSTUDIO-221 A) by whether a slice commit can be due, decided once here (`isSlice` of the
  *             resolved definition, the only cut-time signal) and handed to the leg. A non-slice run's re-run commits
@@ -20,8 +23,13 @@
  *             fast-forwards it; a local branch not an ancestor of that tip (unpushed commits) is `VerifyFailed` naming
  *             it and `git log --oneline <tip>..<local>` (never moved); another worktree holding the branch (a kept
  *             close-out worktree among them) is `VerifyFailed` naming that worktree's path — from git's refusal, else
- *             `git worktree list --porcelain`'s entry on `refs/heads/<branch>` — never removed here. Then
- *             `materialise`d as `prepareWorktree` does.
+ *             `git worktree list --porcelain`'s entry on `refs/heads/<branch>` — never removed here. DW-193: a
+ *             ready-overridden (`ready: true`) sweep re-run whose cut tip is a `wip: sweep bundle …` commit commits a
+ *             revert of it from the cut (detached or `-B` alike): `git revert --no-edit <tip>` in the `.verify`
+ *             worktree, then `git push origin HEAD:refs/heads/<branch>` (never forced); a failure there (revert,
+ *             rev-parse, push) resets the worktree to the cut tip (`git reset --hard <head>`, a failed reset appended)
+ *             and is recorded, never refused. Only then (the worktree still clean, so a reset never discards the
+ *             install) `materialise`d as `prepareWorktree` does.
  *   the leg   `hostVerify` on a copy of the run naming the fresh worktree, under the leg's own guard (Story 38.1:
  *             `legGuard` — the job's `guards.host_verify_seconds`, else `max_wall_clock_seconds`, else 600; never the
  *             worker's `worker_guard_s`): exactly as the close-out runs it (the command read at the run's `base_ref`
@@ -54,7 +62,13 @@
  *             its body's `**Timed out:**`; the verb's exit 1 covers it). Story 37.5 (B3): a sweep run's green holds a draft as a draft while its record names
  *             a bundle `landed: false`, has no triage, or the cut tip is a `wip:` commit (`rerun.pr_ready: "held: <cause>"`,
  *             e.g. `held: b not landed`), unless the re-run carried `ready: true` (`POST /runs/{id}/verify` body
- *             `{ready: true}`): then it is marked ready and `rerun.ready_override: true`. A PR not open, or unreadable,
+ *             `{ready: true}`): then it is marked ready and `rerun.ready_override: true`. DW-193: with that override a
+ *             sweep's cut tip that is the paused close-out's `wip: sweep bundle …` commit is dropped at the cut (above),
+ *             so the leg and the flip see the landed bundles only (`rerun.wip_drop {wip, subject, revert, pushed}`; the
+ *             slice commit's rollback tip the revert). The body is not filtered: its commits list the WIP and its
+ *             `Revert "wip: …"`, its `## Sweep` still names the paused bundle not landed. A failed drop runs the leg at
+ *             the cut tip and holds the green flip (`wip_drop: "error: …"`, `pr_ready: "held: the WIP commit not
+ *             dropped (<error>)"`, the error without its `error: ` prefix, no `ready_override`). A PR not open, or unreadable,
  *             is never edited; an unreadable one is `pr_body: "error: gh pr view …"` whatever the verdict.
  *             The worktree is then removed (best effort).
  *   the judge Story 36.2 (DW-67): a re-run whose leg carries `playable.judge.cost_usd` emits that cost as its own `job-run`
@@ -64,10 +78,12 @@
  *             Story 37.5 (DW-138): the `host-verify` event is noted first, `n` derived after it (the count including it),
  *             then the line emitted and `rerun` patched onto the event whole; a note that fails emits nothing.
  *   result    one `host-verify` event: the leg's detail plus `rerun {by, head, worktree, pr, pr_ready?, commit?,
- *             pushed?, pr_body?, pr_draft?, job_run?, ready_override?}` (its presence is `rerun: true`). It closes the lease. The run's state,
+ *             pushed?, pr_body?, pr_draft?, job_run?, ready_override?, wip_drop?}` (`head` the cut tip, a dropped WIP's too;
+ *             its presence is `rerun: true`). It closes the lease. The run's state,
  *             its `ended` event and its engine are never touched (CAP-15).
  *
- * The refusals, the lease, the cut and materialise answer synchronously; the leg itself is the handle's `done`.
+ * The refusals, the lease, the cut, a DW-193 WIP drop (its revert and push run before the handle answers, the `202`)
+ * and materialise answer synchronously; the leg itself is the handle's `done`.
  */
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { dirname } from "node:path";
@@ -115,6 +131,10 @@ export interface HostLegRerun {
   job_run?: string;
   /** Story 37.5 (B3): the re-run carried `ready: true` and a sweep's draft was marked ready whatever its record says. */
   ready_override?: true;
+  /** DW-193: on a `ready: true` sweep re-run whose cut tip is a `wip: sweep bundle …` commit, that commit reverted and
+   * the revert pushed to the run branch before the leg (`{wip, subject, revert, pushed}`), or `error: <clipped>` (the
+   * leg run at the cut tip, the green flip held); unset when the tip is no such commit. */
+  wip_drop?: { wip: string; subject: string; revert: string; pushed: string } | string;
 }
 /** The re-run's result; Story 35.1: a red leg's `reason` is `redReason` (a skipped one's is its own). */
 export type HostLegResult = HostVerifyResult & { rerun: HostLegRerun; reason?: string };
@@ -288,6 +308,7 @@ export async function rerunHostLeg(queue: Queue, runId: string, opts: { by: "api
   }
   const path = `${run.worktree}.verify`;
   let slice = false;
+  let drop: { wip: string; subject: string; revert: string; pushed: string } | string | undefined;
   try {
     // DW-117: decided once, before the cut, and handed to the leg (Story 34.8: the close-out's detection).
     slice = isSlice(queue.definition(run));
@@ -316,13 +337,19 @@ export async function rerunHostLeg(queue: Queue, runId: string, opts: { by: "api
       }
       throw new Error(`git worktree add ${failed(add)}`);
     }
+    // DW-193: before `materialise` (the worktree still clean), so a failed drop's reset never discards the install.
+    // Never throws: a failure is recorded on the event, never refused.
+    if (opts.ready === true && isSweep(queue.definition(run))) drop = await dropWipTip(path, branch, head, deps);
     await materialise(run.root, servedRoot({ worktree: path, prefix: run.prefix })!, deps);
   } catch (e) {
     if (existsSync(path)) await removeWorktree(run.root, path, deps);
     try { queue.releaseVerifyLeg(runId, self); } catch { /* a dead owner's lease is taken over */ }
-    throw new VerifyRefused("VerifyFailed", clip(message(e)));
+    // DW-193: a drop already pushed is named, after the clipped error, so the pushed revert is never lost.
+    const dropped = drop !== undefined && typeof drop !== "string"
+      ? `; the WIP ${drop.wip.slice(0, 12)} already dropped: revert ${drop.revert.slice(0, 12)} pushed to ${drop.pushed}` : "";
+    throw new VerifyRefused("VerifyFailed", `${clip(message(e))}${dropped}`);
   }
-  const done = runLeg(queue, run, path, { by: opts.by, head, branch, slice, ...(opts.ready === true ? { ready: true } : {}) }, deps);
+  const done = runLeg(queue, run, path, { by: opts.by, head, branch, slice, ...(opts.ready === true ? { ready: true } : {}), ...(drop !== undefined ? { drop } : {}) }, deps);
   return { run_id: run.run_id, state: run.state, head, done };
 }
 
@@ -338,6 +365,45 @@ async function sweepReadyHold(queue: Queue, run: QueueRun, path: string, head: s
     const subject = tip.stdout.trim();
     return subject.startsWith("wip: ") ? `held: the tip is a WIP commit (${clip(subject, 120)})` : undefined;
   } catch (e) { return `held: ${clip(message(e))}`; }
+}
+
+/** DW-193: a ready-overridden sweep re-run's drop of a cut tip that is the paused close-out's `wip: sweep bundle …`
+ * commit (see the header): `git revert --no-edit <tip>` in the `.verify` worktree, then `git push origin
+ * HEAD:refs/heads/<branch>` (never forced). Answers `rerun.wip_drop`'s value — `{wip, subject, revert, pushed}`, or
+ * `error: <clipped>` with the worktree reset to the cut tip (a failed reset appended) — or undefined when the tip is not
+ * such a commit. Never throws. */
+async function dropWipTip(
+  path: string, branch: string, head: string, deps: WorktreeDeps,
+): Promise<{ wip: string; subject: string; revert: string; pushed: string } | string | undefined> {
+  let subject: string;
+  try {
+    const tip = await git(deps, path, ["log", "-1", "--format=%s", head], 30);
+    if (tip.exit !== 0) return `error: git log ${failed(tip)}`;
+    subject = tip.stdout.trim();
+  } catch (e) { return `error: git log: ${clip(message(e))}`; }
+  if (!subject.startsWith("wip: sweep bundle ")) return undefined;
+  let error: string;
+  try {
+    const rev = await git(deps, path, ["revert", "--no-edit", head], 60);
+    if (rev.exit !== 0) error = `error: git revert ${failed(rev)}`;
+    else {
+      const sha = await git(deps, path, ["rev-parse", "HEAD"], 30);
+      const revert = sha.stdout.trim();
+      if (sha.exit !== 0 || !revert) error = `error: git rev-parse ${failed(sha)}`;
+      else {
+        const push = await git(deps, path, ["push", "origin", `HEAD:refs/heads/${branch}`], 300); // never forced
+        if (push.exit === 0) return { wip: head, subject: clip(subject, 120), revert, pushed: branch };
+        error = `error: git push ${failed(push)}`;
+      }
+    }
+  } catch (e) { error = `error: ${clip(message(e))}`; }
+  // Rolled back to the cut tip, so the leg runs at it (a revert that half-applied, or one never pushed).
+  let kept: string | undefined;
+  try {
+    const reset = await git(deps, path, ["reset", "--hard", head], 60);
+    if (reset.exit !== 0) kept = `git reset --hard ${failed(reset)}`;
+  } catch (e) { kept = `git reset --hard: ${clip(message(e))}`; }
+  return kept ? `${error}; worktree not reset to the cut tip: ${clip(kept, 200)}` : error;
 }
 
 /** Story 36.2 (DW-67): the judge's own `job-run` line (see the header): `rerun.job_run`'s value, or undefined with no
@@ -357,7 +423,10 @@ async function judgeJobRun(queue: Queue, run: QueueRun, verify: HostVerifyResult
 /** The leg in the cut worktree, (a slice) the proof commit and push, the PR body and its flip, the removal, the judge's
  * `job-run` line, and the one `host-verify` event (it closes the lease). */
 async function runLeg(
-  queue: Queue, run: QueueRun, path: string, at: { by: "api" | "cli"; head: string; branch: string; slice: boolean; ready?: boolean }, deps: HostLegDeps,
+  queue: Queue, run: QueueRun, path: string, at: {
+    by: "api" | "cli"; head: string; branch: string; slice: boolean; ready?: boolean;
+    drop?: { wip: string; subject: string; revert: string; pushed: string } | string;
+  }, deps: HostLegDeps,
 ): Promise<HostLegResult> {
   let verify: HostVerifyResult;
   const rerun: HostLegRerun = { by: at.by, head: at.head, worktree: "kept", pr: null };
@@ -366,10 +435,18 @@ async function runLeg(
     const g = legGuard(queue.definition(run));
     // Story 34.8: a slice run's re-run gets the assets step too (DW-117: decided at the cut, `rerunHostLeg`).
     const slice = at.slice;
+    // DW-193: a ready-overridden sweep re-run's drop of the `wip: sweep bundle …` tip, done at the cut (`rerunHostLeg`):
+    // the leg and the flip see the landed bundles only; `head` the revert from then on.
+    let head = at.head;
+    let dropFailed: string | undefined;
+    const drop = at.drop;
+    if (drop !== undefined) rerun.wip_drop = drop;
+    if (typeof drop === "string") dropFailed = drop.replace(/^error: /, "");
+    else if (drop) head = drop.revert;
     // DW-69: the queue rides along so the default judge records its pin and releases it.
     verify = await hostVerify({ ...run, worktree: path }, g.seconds, { ...deps, queue }, { slice, guardKey: g.key });
     // Story 35.1: a slice run's placed art and proof committed and pushed, before the body edit.
-    const committed = slice ? await sliceCommit(run, path, at.branch, at.head, verify, rerun, deps) : { ok: true };
+    const committed = slice ? await sliceCommit(run, path, at.branch, head, verify, rerun, deps) : { ok: true };
     rerun.pr = await runPr(run, queue.events(run.run_id), at.branch, deps);
     // A failed commit or push: the body is never edited and green flips nothing (`pr_ready` unset), but red still
     // turns an open ready PR back to a draft (hole 88: a ready PR never stays ready over a stale Green body).
@@ -399,9 +476,11 @@ async function runLeg(
         // Story 35.1 (consult F1): a failed body edit leaves the PR as it was on green (no flip, `pr_ready` unset);
         // red still turns it back to a draft.
         if (green) {
-          // Story 37.5 (B3): a sweep's draft held while its record names work unfinished, unless `ready: true`.
+          // Story 37.5 (B3): a sweep's draft held while its record names work unfinished, unless `ready: true`;
+          // DW-193: held too when that override's WIP drop failed.
           const sweepRun = state.draft && rerun.pr_body === "edited" && isSweep(queue.definition(run));
-          const held = sweepRun && !at.ready ? await sweepReadyHold(queue, run, path, at.head, deps) : undefined;
+          const held = sweepRun && dropFailed !== undefined ? `held: the WIP commit not dropped (${clip(dropFailed, 200)})`
+            : sweepRun && !at.ready ? await sweepReadyHold(queue, run, path, head, deps) : undefined;
           if (held) rerun.pr_ready = held;
           else if (rerun.pr_body === "edited") {
             rerun.pr_ready = state.draft ? outcome(await markPrReady(deps, run.root, rerun.pr), "marked") : "already";

@@ -3369,6 +3369,12 @@ class DriverContractTestCase(unittest.TestCase):
         for phrase in ("B3, B4 and B5", "DW-136, DW-137, DW-138, DW-139, DW-144",
                        "**The ready flip (B3):**", "`held: <bundle>[, <bundle>…] not landed`", "`held: no triage recorded`",
                        "a `wip:` commit", "`{}` or `{ready?: boolean}`", "`400 SchemaError`", "`rerun.ready_override: true`",
+                       "On a sweep run (DW-193) `ready: true` first reverts a cut tip that is a `wip: sweep bundle …` "
+                       "commit and pushes the revert to the run branch (never forced) before the leg, recording "
+                       "`rerun.wip_drop {wip, subject, revert, pushed}`",
+                       "a failed drop (`rerun.wip_drop: \"error: …\"`) runs the leg at the cut tip and holds the flip, "
+                       "`held: the WIP commit not dropped (<error>)`, with no `ready_override`",
+                       "the PR body is not filtered (its commits list the WIP and its revert)",
                        "**The ledger wait's bound (B4):**", "`SWEEP_LEDGER_WAIT_MS` (60 min)",
                        "checked before the unchanged-fingerprint skip",
                        "`ledger-resolve {…, waiting: false, settled: true, ended: \"wait\", pending}`",

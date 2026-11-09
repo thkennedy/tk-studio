@@ -2581,7 +2581,11 @@ records no triage, or the cut tip is a `wip:` commit (Story 36.3's WIP): `rerun.
 <bundle>[, <bundle>…] not landed`, `held: no triage recorded`, `held: the tip is a WIP commit (<subject>)`) and no `gh pr
 ready` runs. The body of `POST /runs/{id}/verify` is `{}` or `{ready?: boolean}` (another key, or a `ready` not a
 boolean, is `400 SchemaError`); `ready: true` marks the draft ready whatever the record says and records
-`rerun.ready_override: true`. Every bundle landed and no `wip:` tip: marked ready as before; a non-sweep run is never
+`rerun.ready_override: true`. On a sweep run (DW-193) `ready: true` first reverts a cut tip that is a `wip: sweep bundle
+…` commit and pushes the revert to the run branch (never forced) before the leg, recording `rerun.wip_drop {wip,
+subject, revert, pushed}`; a failed drop (`rerun.wip_drop: "error: …"`) runs the leg at the cut tip and holds the flip,
+`held: the WIP commit not dropped (<error>)`, with no `ready_override`; the PR body is not filtered (its commits list the
+WIP and its revert). Every bundle landed and no `wip:` tip: marked ready as before; a non-sweep run is never
 held. **The ledger wait's bound (B4):** the ledger pass's wait on `pending` ends `SWEEP_LEDGER_WAIT_MS` (60 min) after the
 waiting record's `at` on an unchanged fingerprint, checked before the unchanged-fingerprint skip (a changed `pending` set
 is a new record and a new clock): one `ledger-resolve {…, waiting: false, settled: true, ended: "wait", pending}` record

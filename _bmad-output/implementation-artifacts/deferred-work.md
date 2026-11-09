@@ -1648,7 +1648,8 @@ source_spec: `handoff-phase1-loop-2026-10-09.md` 2026-11-08 day-8z update; Story
 location: apps/supervisor/src/sweep.ts (the paused sweep's close-out: the WIP commit, the leg skipped, the PR left draft); apps/supervisor/src/hostleg.ts (`POST /runs/{id}/verify {ready: true}` re-runs the leg at the branch tip as it stands and marks the PR ready on green)
 severity: low
 reason: The operator path for a paused sweep is "do not resume; the landed bundles stay on the draft PR; the next sweep re-queues the bundle from the ledger" — but the WIP commit carries the paused bundle's spec into the PR, so the ready override would merge a spec for work that never landed. On 2026-11-08 the operator removed it by a plain commit (c58958f6) before the re-run. Fix to make: when the operator marks a paused sweep ready (or declines the resume), the re-run drops the `wip:` commit (a revert of it, or the WIP never commits the spec onto the PR branch — it stays in the run workspace for the resume), so the branch tip is the landed bundles only; a test born from a paused sweep with one WIP commit and a ready override.
-status: open
+status: done 2026-11-09
+resolution: resolved by sweep bundle dw-paused-sweep-wip-off-pr
 
 ### DW-194: A story that tightens what a run worktree requires of its checkout reaches only the shared fixture; the end-to-end fixtures that build checkouts with `gitInit` break on the host leg alone, the sandbox gate running no supervisor test (hole 117)
 origin: Story 38.5's close-out 2026-11-08 18:00Z (run q-run-epic-38-20261108T151649Z-12bae3): CAP-14 made `materialise` refuse a run worktree whose checkout has no `.bmad-loop/policy.toml` and gave `gitRepo` the untracked `FIXTURE_POLICY`; `enginemcp.test.ts`'s `project()` builds its checkout with `gitInit` directly, so its two drained-flagged-run tests were refused at the worktree step; fixed on the run branch by ea1b97bc (test-only) and one leg re-run

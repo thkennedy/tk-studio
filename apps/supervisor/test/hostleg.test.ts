@@ -1111,6 +1111,101 @@ describe("Story 37.5 (B3): a sweep's green re-run never marks a half-finished sw
     const r = await (await rerunHostLeg(fx.queue, fx.id, { by: "api" }, fx.deps)).done;
     expect(r.rerun.pr_ready).toBe("marked");
   }, 60_000);
+
+  // DW-193: a ready override drops the paused close-out's `wip: sweep bundle …` tip before the leg.
+  /** Push one `wip: sweep bundle dw-b paused` commit adding `half.txt` onto the run branch on origin; its sha. */
+  const pushWip = (fx: Awaited<ReturnType<typeof sweepRun>>) => {
+    const tmp = join(fx.work, "wip-cut");
+    testGit(fx.repo.checkout, "worktree", "add", "-q", tmp, fx.branch);
+    writeFileSync(join(tmp, "half.txt"), "half-written");
+    testGit(tmp, "add", "half.txt");
+    testGit(tmp, "commit", "-q", "-m", `wip: sweep bundle dw-b paused (run ${fx.id})`);
+    testGit(tmp, "push", "-q", "origin", fx.branch);
+    const sha = testGit(tmp, "rev-parse", "HEAD");
+    testGit(fx.repo.checkout, "worktree", "remove", "--force", tmp);
+    return sha;
+  };
+  const originTip = (fx: Awaited<ReturnType<typeof sweepRun>>) => testGit(fx.repo.origin, "rev-parse", `refs/heads/${fx.branch}`);
+  const isRevertPush = (a: { bin: string; args: string[] }) => a.bin === "git" && a.args[0] === "push" && a.args.some((x) => x.startsWith("HEAD:refs/heads/"));
+
+  test("DW-193: `ready: true` on a paused sweep's WIP tip: the WIP reverted and pushed before the leg, marked ready, `rerun.wip_drop` recorded", async () => {
+    const fx = await sweepRun([bundle("a", true), bundle("b", false)]);
+    const wip = pushWip(fx);
+    const started = await rerunHostLeg(fx.queue, fx.id, { by: "api", ready: true }, fx.deps);
+    expect(started.head).toBe(wip);
+    const r = await started.done;
+    // Origin's run branch tip: a revert of the WIP, its parent the WIP, `half.txt` gone.
+    const tip = originTip(fx);
+    const [parent, subject] = testGit(fx.repo.origin, "log", "-1", "--format=%P%x00%s", tip).split("\0");
+    expect(parent).toBe(wip);
+    expect(subject).toBe(`Revert "wip: sweep bundle dw-b paused (run ${fx.id})"`);
+    expect(testGit(fx.repo.origin, "ls-tree", "--name-only", tip).split(/\r?\n/)).not.toContain("half.txt");
+    expect(fx.argvs.filter(isRevertPush).map((a) => a.args)).toEqual([["push", "origin", `HEAD:refs/heads/${fx.branch}`]]);
+    const drop = { wip, subject: `wip: sweep bundle dw-b paused (run ${fx.id})`, revert: tip, pushed: fx.branch };
+    expect(r).toMatchObject({ green: true, rerun: { head: wip, pr_body: "edited", pr_ready: "marked", ready_override: true, wip_drop: drop } });
+    expect(fx.gh.filter((a) => a[1] === "ready").map((a) => a.slice(0, 3))).toEqual([["pr", "ready", PR]]);
+    expect(fx.hostVerifies().at(-1)!.detail).toMatchObject({ rerun: { wip_drop: drop, ready_override: true } });
+  }, 60_000);
+
+  test("DW-193: the revert's push refused: `wip_drop: error: git push …`, origin still the WIP, the draft held, no `ready_override`", async () => {
+    const fx = await sweepRun([bundle("a", true), bundle("b", false)]);
+    const wip = pushWip(fx);
+    const run = fx.deps.run!;
+    fx.deps.run = async (bin, args, opts) => (isRevertPush({ bin, args }) ? { exit: 1, stdout: "", stderr: "fake: push refused" } : run(bin, args, opts));
+    const r = await (await rerunHostLeg(fx.queue, fx.id, { by: "api", ready: true }, fx.deps)).done;
+    expect(r).toMatchObject({ green: true });
+    expect(r.rerun.wip_drop).toBe("error: git push exit 1: fake: push refused");
+    expect(originTip(fx)).toBe(wip);
+    expect(r.rerun.pr_ready).toBe("held: the WIP commit not dropped (git push exit 1: fake: push refused)");
+    expect("ready_override" in r.rerun).toBe(false);
+    expect(fx.gh.some((a) => a[1] === "ready")).toBe(false);
+    // The worktree reset to the cut tip before the leg (the body's commits end at the WIP, no revert among them).
+    expect(fx.argvs.some((a) => a.args[0] === "reset" && a.args[1] === "--hard" && a.args[2] === wip)).toBe(true);
+    expect(fx.hostVerifies().at(-1)!.detail).toMatchObject({ rerun: { wip_drop: r.rerun.wip_drop } });
+  }, 60_000);
+
+  test("DW-193: materialise failing after the drop pushed: `VerifyFailed` naming the pushed revert, origin's tip that revert", async () => {
+    const fx = await sweepRun([bundle("a", true), bundle("b", false)]);
+    const wip = pushWip(fx);
+    fx.answers.drift = "drift"; // the install then fails: `WorktreeFailed`
+    const e = await refusal(rerunHostLeg(fx.queue, fx.id, { by: "api", ready: true }, fx.deps));
+    expect(e.code).toBe("VerifyFailed");
+    const tip = originTip(fx);
+    expect(tip).not.toBe(wip);
+    expect(testGit(fx.repo.origin, "log", "-1", "--format=%P", tip)).toBe(wip);
+    expect(e.message).toContain("worktree install");
+    expect(e.message).toContain(`; the WIP ${wip.slice(0, 12)} already dropped: revert ${tip.slice(0, 12)} pushed to ${fx.branch}`);
+  }, 60_000);
+
+  test("DW-193: no override on a WIP tip: Story 37.5's hold stands, nothing reverted or pushed, no `wip_drop`", async () => {
+    const fx = await sweepRun([bundle("a", true), bundle("b", true)]);
+    const wip = pushWip(fx);
+    const r = await (await rerunHostLeg(fx.queue, fx.id, { by: "api" }, fx.deps)).done;
+    expect(r.rerun.pr_ready).toBe(`held: the tip is a WIP commit (wip: sweep bundle dw-b paused (run ${fx.id}))`);
+    expect("wip_drop" in r.rerun).toBe(false);
+    expect(fx.argvs.some((a) => a.args[0] === "revert" || isRevertPush(a))).toBe(false);
+    expect(originTip(fx)).toBe(wip);
+  }, 60_000);
+
+  test("DW-193: the override on an ordinary tip: marked, `ready_override: true`, no `wip_drop`, nothing pushed", async () => {
+    const fx = await sweepRun([bundle("a", true), bundle("b", false)]);
+    const r = await (await rerunHostLeg(fx.queue, fx.id, { by: "api", ready: true }, fx.deps)).done;
+    expect(r.rerun).toMatchObject({ pr_ready: "marked", ready_override: true });
+    expect("wip_drop" in r.rerun).toBe(false);
+    expect(fx.argvs.some((a) => a.args[0] === "revert" || a.args[0] === "push")).toBe(false);
+    expect(originTip(fx)).toBe(fx.tip);
+  }, 60_000);
+
+  test("DW-193: a non-sweep run with `ready: true` on a `wip: sweep bundle …` tip: nothing reverted or pushed, no `wip_drop`", async () => {
+    const fx = await fixture();
+    const wip = pushWip(fx);
+    const r = await (await rerunHostLeg(fx.queue, fx.id, { by: "api", ready: true }, fx.deps)).done;
+    expect(r).toMatchObject({ green: true, rerun: { head: wip, pr_ready: "marked" } });
+    expect(r.rerun.wip_drop).toBeUndefined();
+    expect(fx.argvs.some((a) => a.args[0] === "revert" || isRevertPush(a))).toBe(false);
+    expect(originTip(fx)).toBe(wip);
+    expect((fx.hostVerifies().at(-1)!.detail as any).rerun.wip_drop).toBeUndefined();
+  }, 60_000);
 });
 
 describe("Story 38.1: the re-run's own guard, its measure and `inconclusive (guard)`", () => {
