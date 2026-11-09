@@ -40,6 +40,9 @@ SCOPE_SPACE = "write:space:confluence"
 SCOPE_FOLDER = "write:folder:confluence"
 SCOPE_PAGE = "write:page:confluence"
 SCOPE_ATTACHMENT = "write:attachment:confluence"
+# the v1 attachment PUT needs both (DW-189)
+SCOPE_ATTACHMENT_V1 = ("write:attachment:confluence and "
+                       "read:content-details:confluence")
 MAX_PAGES = 100
 
 # binding key -> folder title, in the template's order
@@ -364,7 +367,7 @@ def upload_attachment(client: ConfluenceClient, page_id: str, filename: str,
                                          "minorEdit": "true"})
     status, data = client.request(
         "PUT", f"/content/{page_id}/child/attachment", body,
-        scope=SCOPE_ATTACHMENT, v1=True)
+        scope=SCOPE_ATTACHMENT_V1, v1=True)
     if status not in (200, 201):
         return False, _refusal(status, data)
     return True, ""

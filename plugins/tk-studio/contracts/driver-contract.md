@@ -842,7 +842,7 @@ on the harness-native substrate:
 | `resolve` | `{job_id?}` (0.1.12) | one entry — `{job_id, source: instance\|type, extends?, path, problems[], resolved}` with `resolved` the merged definition — or, with no `job_id`, `{jobs: [entry...], problems[]}` covering every declared job in config order | read-only. Type extension (an instance extending a shipped type) is applied **studio-side by the one resolver** — a driver classifies recurring work from the `trigger`/`cadence` served here and never merges or raw-reads `.tk-studio/jobs/<id>.json` (PROP-008: an instance inheriting trigger/cadence from its type read as trigger-less through the raw file). A declared job's problems ride its entry named in place — never silently dropped; an unknown id is a named refusal |
 | `cancel` | `{job_id, run_id?}` | `{cancelled: bool, reason?}` | stop scheduling; a running run terminates `partial` with reason `cancelled` |
 | `wake` | `{job_id}` | `{woken: bool, run_id?, reason?, starter_lock?}` (0.1.23) | fire a self-paced/loop job's next iteration now (the retired ClaudeOS mission-runner "tick" mapped here, historical) |
-| `finish` | `{run_id, state, reason?, status_block?, total_cost_usd?}` (0.1.18; CLI `jobrun.py finish --directory DIR --run-id RID --state STATE [--reason R] [--status-block JSON] [--total-cost-usd USD]`) | `{run_id, state, reason, capture?}` | the executing wrapper's terminal-transition verb (§2). `state` is one of `complete\|partial\|blocked\|cancelled` (the run schema's terminal states; the CLI refuses any other); `partial`, `blocked` and `cancelled` require a `reason`, refused by name otherwise. `total_cost_usd` (ST-061) is optional — the worker's `--output-format json` cost — a non-negative, finite number recorded in `run.json`; absent when not given, never zero-filled; an invalid value is refused by name before anything is written (AD-3). On a terminal state the run is finalized (`capture`) and one `job-run` event is emitted, carrying `total_cost_usd` when recorded. One `job-run` event per terminal transition (AD-12) |
+| `finish` | `{run_id, state, reason?, status_block?, total_cost_usd?}` (0.1.18; CLI `jobrun.py finish --directory DIR --run-id RID --state STATE [--reason R] [--status-block JSON] [--total-cost-usd USD]`) | `{run_id, state, reason, capture?}` | the executing wrapper's terminal-transition verb (§2). `state` is one of `complete\|partial\|blocked\|cancelled` (the run schema's terminal states; the CLI refuses any other); `partial`, `blocked` and `cancelled` require a `reason`, refused by name otherwise. `total_cost_usd` (ST-061) is optional — the worker's `--output-format json` cost — a non-negative, finite number recorded in `run.json`; absent when not given, never zero-filled; an invalid value is refused by name before anything is written (AD-3). On a terminal state the run is finalized (`capture`) and one `job-run` event is emitted, carrying `total_cost_usd` when recorded. One `job-run` event per terminal transition (AD-12). `finish` is single-writer: a concurrent finish on one run is not supported (DW-129, TKSTUDIO-222 A) |
 
 Guarantees a driver can rely on:
 
@@ -965,8 +965,8 @@ is the only starter of runs on that checkout. `submit` and `wake` honour it:
   before; only then is the lock read, and a refusal mints nothing (no run
   record, no `job-run` event, no directive).
 - **Matching lock.** `starter` is the queue's and `checkout` equals the
-  project root as canonical absolute paths (case-folded on Windows). An
-  unreadable or malformed lock (bad JSON; a missing `starter`, `checkout`
+  project root as canonical absolute paths (case-folded on Windows and
+  macOS, as the supervisor's `foldCase`). An unreadable or malformed lock (bad JSON; a missing `starter`, `checkout`
   or `supervisor_pid`; a pid that is not a positive integer; an unparsable
   `since`), a foreign `starter` or another checkout is **no lock** — it
   never refuses.
@@ -2684,7 +2684,8 @@ definition snapshot>)`: `guards.host_verify_seconds`, else `guards.max_wall_cloc
 **The guard text:** every step of the leg names its trip `guard: <key> (<N>s)` — `guard: host_verify_seconds (<N>s)`,
 `max_wall_clock_seconds` only for a definition without the key; the worker's own trip (`guard: max_wall_clock_seconds
 (<N>s)`) is unchanged. **The lease (a run in its close-out):** before a close-out leg (boundary or sweep tail) the
-supervisor notes `host-verify-leg {owner: {pid, host, nonce, start?}, by: "close-out"}`, closed by the leg's own
+supervisor notes `host-verify-leg {owner: {pid, host, nonce, start?}, by: "close-out"}` (DW-184: plus `guard_s` and
+`deadline`), closed by the leg's own
 `host-verify` exactly as the re-run's `takeVerifyLeg` lease is. **The measure:** `tools/verify_host.py` prints one `==
 durations: <suite>=<N>s, …` line (the suites that ran, in run order — `lib suite`, `conformance`, `supervisor`,
 `studio-web` — integer seconds) immediately before its final `verify_host: ok|FAILED (…)` line, after every failure
@@ -2702,7 +2703,8 @@ engine-step trip stay red. On an `inconclusive (guard)` leg (any host step ended
 step's (and a slice run's skipped assets step's) reason is `verify.host timed out`, added to the skip reasons beside
 `verify.host red`, so the PR body's `Engine gate:`/`Assets:` lines say timed out, never red. **The beside-leg refusal:** `tools/verify_host.py` reads the queue read-only before its first
 gate (`queue.db` at `TK_SUPERVISOR_DB`, opened `file:<Path.as_uri()>?mode=ro`; the API serves no `GET /runs` list): a
-live leg is a run's latest `host-verify-leg` with a non-null `owner` and no later `host-verify`. While one is live it
+live leg is a run's latest `host-verify-leg` with a non-null `owner` and no later `host-verify` (DW-184: and no
+`deadline`, or one still ahead). While one is live it
 refuses, exit 2: `verify_host: refused: a host leg is live on this box: queue run <id> (by <by>, since <at>)[; …]; two
 gates on one box halve each other (hole 113): wait for its host-verify event (GET /runs/<id>), or pass --beside-leg to
 run anyway`; `--beside-leg` prints `verify_host: WARNING: --beside-leg: running beside the live host leg of queue run
@@ -3018,6 +3020,33 @@ composes, runs `engage.py closeout`, applies `run-ended` from `in-progress` and 
 line. **The serve process:** `approve.ts` and `delivery.ts` run in serve, so the operator stops the supervisor before
 `apps/supervisor` is built and restarts it through the scheduled task after the merge. No state-table row, route or version
 changes; every other field, kind and route is unchanged.
+
+**0.1.34 (DW-27, DW-128, DW-129, clarification).** `finish` emits its event exactly once, is single-writer, and the starter
+lock folds case on macOS (TKSTUDIO-222). A terminal `finish` whose summary write raises still emits its one `job-run` event
+before the error propagates to the caller (DW-128, AD-12), so no terminal run is left without its event. `finish` is
+single-writer: a concurrent finish on one run is not supported (DW-129, TKSTUDIO-222 A) — its pre-check and the run update
+are not atomic, so two racing calls can both emit; the owner accepted this with no lock. The starter lock's matching folds
+case on Windows and on macOS, to match the supervisor's `foldCase` (DW-27): a mixed-case macOS root now matches a live lock.
+No verb, field, route or version changes.
+
+**0.1.34 (DW-184, DW-195, additive).** The host leg's lease carries its deadline; a hand `bun test` refuses beside a live
+leg (hole 118). **The lease:** every `host-verify-leg` lease carrying an owner — the close-out's (`noteCloseOutLease`,
+boundary and sweep tail) and the re-run's (`takeVerifyLeg`) — also records `guard_s` (the leg's guard,
+`legGuard(...).seconds`) and `deadline` (ISO 8601, the lease's start plus `guard_s` seconds). **The live-leg rule:** a
+live leg is a run's latest `host-verify-leg` with a non-null `owner`, no later `host-verify`, and either no `deadline` (a
+lease written before DW-184: live, as before) or a `deadline` still ahead; an unparsable `deadline` reads as none, and a
+lease without one is never treated as stale. A lease past its deadline is stale, so a crashed serve's lease no longer
+refuses every later `tools/verify_host.py` run. `tools/verify_host.py` (`live_legs`) and `apps/supervisor/src/liveleg.ts`
+read the same SQL and rule, read-only (`mode=ro`; `{ readonly: true }`); no owner pid is probed. **The test refusal:**
+`apps/supervisor/test/preload.ts` refuses a `bun test` beside a live leg before any test runs, exit 2: `bun test: refused:
+a host leg is live on this box: queue run <id> (by <by>, since <at>)[; …]; a hand test beside the leg slows its bounded
+drives (hole 118): wait for its host-verify event (GET /runs/<id>), or set TK_VERIFY_BESIDE_LEG=1 to run anyway`, unless
+`TK_VERIFY_BESIDE_LEG=1`. No queue (`TK_SUPERVISOR_DB` unset or its file absent) is no check; an unreadable one writes one
+stderr note and the tests run; the leg's own run (`TK_SUPERVISOR_HOST_LEG` set) never reads it. The host leg's command env
+carries `TK_VERIFY_BESIDE_LEG=1`, and `verify_host.py --beside-leg` sets it for its gates' children. **The serve
+process:** `closeout.ts`, `worktree.ts`, `hostleg.ts`, `hostverify.ts` and `queue.ts` run in serve, so the operator stops
+the supervisor before `apps/supervisor` is built and restarts it through the scheduled task after the merge. The refusal
+and warning wording of `verify_host.py` is unchanged; no verb, route or version changes.
 
 ## 8. Conformance
 

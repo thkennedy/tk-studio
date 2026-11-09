@@ -9,6 +9,7 @@ import { join, resolve } from "node:path";
 import { createApi } from "../src/api";
 import { closeOutOrphans, launchStopGraceful, relauncher, type Started } from "../src/cli";
 import { AUTO_RESUME, autoResumeRefusedLine, armingRefusedStop, closableVerdict, closeOutPaused, engineClockPause, ESCALATION_BLOCKED_REASON, pausedLegs, renderSignature, RENDER_UNREADABLE_RE, secondHaltLine, staleRenderView, findSpec, frontmatter, gracefulStopInForce, harvestMessage, jiraBound, landing, launchedSinceMove, NOT_HANDED, REARM_SKIPPED, rearmFailedLine, resumePaused, ResumeRefused, trackArgs, unblocksOwed, type PausedDeps } from "../src/closeout";
+import { legGuard } from "../src/hostverify";
 import { renderPage, type PageData } from "../src/page";
 import { Queue, STUDIO_END_RETRY_LIMIT, type Owner, type Probes } from "../src/queue";
 import { runProcess, toVmPath, type RunResult } from "../src/server";
@@ -1670,6 +1671,14 @@ describe("Story 35.2: no relaunch across a story boundary while a graceful stop 
     expect(verifies(fx).map((e) => e.detail)).toEqual([expect.objectContaining({ green: true, code_head: head, paused_leg: { pr: PR, flip: "ready" } })]);
     const k = kinds(fx.queue, fx.run.run_id);
     expect(k.indexOf("awaiting-ruling")).toBeLessThan(k.indexOf("host-verify-leg"));
+    // DW-184: the paused leg's lease carries `by: close-out`, the leg's guard and its deadline (the lease plus one guard).
+    const pausedLease = ev(fx.queue, fx.run.run_id, "host-verify-leg")[0]!;
+    const g = legGuard(fx.queue.definition(fx.get()));
+    const d = pausedLease.detail as { by: string; guard_s: number; deadline: string };
+    expect(d.by).toBe("close-out");
+    expect(d.guard_s).toBe(g.seconds);
+    expect(new Date(d.deadline).toISOString()).toBe(d.deadline);
+    expect(Math.abs(Date.parse(d.deadline) - (Date.parse(pausedLease.at) + g.seconds * 1000))).toBeLessThan(1000);
     expect(readies()).toEqual(["ready"]);
     expect(gh.calls().find((c) => c.argv[1] === "edit")!.body).toMatch(/## Host verify\n\nLegs: 1 — close-out green/);
     expect(await pausedLegs(fx.queue, deps)).toEqual([]); // one leg per code head
@@ -1792,6 +1801,12 @@ describe("Story 35.2: no relaunch across a story boundary while a graceful stop 
     expect(lease).toBeGreaterThanOrEqual(0);
     expect(evs[lease]!.detail).toMatchObject({ by: "close-out", owner: { pid: expect.any(Number), host: expect.any(String), nonce: expect.any(String) } });
     expect(evs.findIndex((e) => e.kind === "host-verify")).toBeGreaterThan(lease);
+    // DW-184: the lease carries the leg's guard and its deadline (the lease plus one guard).
+    const g = legGuard(b.fx.queue.definition(b.fx.get()));
+    const d = evs[lease]!.detail as { guard_s: number; deadline: string };
+    expect(d.guard_s).toBe(g.seconds);
+    expect(new Date(d.deadline).toISOString()).toBe(d.deadline);
+    expect(Math.abs(Date.parse(d.deadline) - (Date.parse(evs[lease]!.at) + g.seconds * 1000))).toBeLessThan(1000);
   }, 60_000);
 
   test("Story 38.1 (CAP-2): the boundary's leg ended on the guard with every verdict so far green: `partial` naming the guard and the unrun suites, a draft", async () => {

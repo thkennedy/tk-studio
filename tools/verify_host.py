@@ -30,9 +30,12 @@ Story 38.1 (DW-174): the script ends with one `== durations: <suite>=<N>s, …` 
 integer seconds) immediately before its final `verify_host: ok|FAILED (…)` line; the host leg records it as
 `suite_durations` on its `host-verify` event. Before the first gate it reads the supervisor's queue read-only
 (`queue.db` at TK_SUPERVISOR_DB, opened `file:<path>?mode=ro`): while a host leg is live on this box (a run's latest
-`host-verify-leg` lease with a non-null owner and no later `host-verify`: a re-run, or a run in its close-out) it
-refuses to start, exit 2, naming the lease's run id and the remedy (hole 113: two gates on one box halve each other);
-`--beside-leg` runs anyway after a printed warning. No queue (the variable unset, or its file absent) is no check; an
+`host-verify-leg` lease with a non-null owner and no later `host-verify`: a re-run, or a run in its close-out; DW-184:
+and either no `deadline`, a lease written before it, or a `deadline` still ahead, so a crashed serve's lease goes stale
+one guard after it was taken; an unparsable `deadline` reads as none) it refuses to start, exit 2, naming the lease's
+run id and the remedy (hole 113: two gates on one box halve each other); `--beside-leg` runs anyway after a printed
+warning, and sets TK_VERIFY_BESIDE_LEG=1 for its gates' children (DW-195: the supervisor's test preload then lets
+their `bun test` run beside the leg). No queue (the variable unset, or its file absent) is no check; an
 unreadable one prints one line and the gates run. The leg's own run (TK_SUPERVISOR_HOST_LEG set) never reads it.
 
 Usage: uv run python tools/verify_host.py [--tail N] [--beside-leg]
@@ -51,7 +54,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 # The console may be cp1252 (the supervisor's host leg on Windows); bun's output carries arrows and ticks.
 for _stream in (sys.stdout, sys.stderr):
@@ -385,6 +388,7 @@ def run_supervisor_gate() -> tuple[int, str]:
 # ------------------------------------------------------------ the beside-leg gate (Story 38.1, hole 113)
 
 HOST_LEG_ENV = "TK_SUPERVISOR_HOST_LEG"  # set by the supervisor's host leg on its own run (hostverify.ts)
+BESIDE_LEG_ENV = "TK_VERIFY_BESIDE_LEG"  # DW-195: lets test/preload.ts run a `bun test` beside a live leg
 QUEUE_ENV = "TK_SUPERVISOR_DB"  # the supervisor's configured queue path
 QUEUE_TIMEOUT_S = 5
 LIVE_LEGS_SQL = """
@@ -395,13 +399,45 @@ WHERE l.kind = 'host-verify-leg'
 """
 
 
-def live_legs(env=None) -> tuple[list[tuple[str, str, str]], str | None]:
+# The only deadline form read (src/liveleg.ts `DEADLINE_RE`, the same rule): extended ISO-8601 with an explicit `Z` or
+# `+-HH:MM` offset, untrimmed; a zoneless, padded or basic-format value is no deadline.
+DEADLINE_RE = re.compile(
+    r"(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(Z|([+-])(\d{2}):(\d{2}))", re.ASCII)
+
+
+def lease_deadline(detail: dict) -> datetime | None:
+    """DW-184: a lease's `deadline` as an aware datetime; None when absent, not in `DEADLINE_RE`'s form, or an
+    impossible date/time (hour 0-23, minute and second 0-59, a real day of the month, an offset under 24h) — read as
+    no deadline."""
+    raw = detail.get("deadline")
+    m = DEADLINE_RE.fullmatch(raw) if isinstance(raw, str) else None
+    if m is None:
+        return None
+    y, mo, d, h, mi, s = (int(g) for g in m.group(1, 2, 3, 4, 5, 6))
+    micro = int((m.group(7) or "0")[:6].ljust(6, "0"))
+    try:
+        if m.group(8) == "Z":
+            tz = timezone.utc
+        else:
+            oh, om = int(m.group(10)), int(m.group(11))
+            if oh > 23 or om > 59:
+                return None
+            sign = -1 if m.group(9) == "-" else 1
+            tz = timezone(sign * timedelta(hours=oh, minutes=om))
+        return datetime(y, mo, d, h, mi, s, micro, tzinfo=tz)
+    except ValueError:
+        return None
+
+
+def live_legs(env=None, now: datetime | None = None) -> tuple[list[tuple[str, str, str]], str | None]:
     """The live host legs in the supervisor's queue, read-only: `([(run_id, by, at), …], None)`, one per run whose
-    latest `host-verify-leg` lease has a non-null owner and no later `host-verify`. `([], None)` when TK_SUPERVISOR_DB
-    is unset or its file absent (no queue on this box); `([], "<error>")` when the queue could not be read. Never
-    probes the owner's pid (on win32 `os.kill(pid, 0)` terminates the process): a crashed leg's stale lease is
-    answered by `--beside-leg`."""
+    latest `host-verify-leg` lease has a non-null owner, no later `host-verify`, and either no `deadline` (a lease
+    written before DW-184, or an unparsable one) or a `deadline` after `now` (default: the current time). `([], None)`
+    when TK_SUPERVISOR_DB is unset or its file absent (no queue on this box); `([], "<error>")` when the queue could
+    not be read. Never probes the owner's pid (on win32 `os.kill(pid, 0)` terminates the process): a crashed leg's
+    lease is stale past its deadline, and one with no deadline is answered by `--beside-leg`."""
     env = os.environ if env is None else env
+    now = datetime.now(timezone.utc) if now is None else now
     raw = (env.get(QUEUE_ENV) or "").strip()
     if not raw:
         return [], None
@@ -417,6 +453,9 @@ def live_legs(env=None) -> tuple[list[tuple[str, str, str]], str | None]:
             d = json.loads(detail) if detail else {}
             if not isinstance(d, dict) or d.get("owner") is None:
                 continue
+            deadline = lease_deadline(d)
+            if deadline is not None and deadline <= now:
+                continue
             legs.append((str(run_id), str(d.get("by") or "re-run"), str(at)))
         return legs, None
     except (sqlite3.Error, OSError, ValueError) as exc:
@@ -429,8 +468,11 @@ def live_legs(env=None) -> tuple[list[tuple[str, str, str]], str | None]:
 def beside_leg_check(beside_leg: bool, env=None) -> int | None:
     """The beside-leg gate before the first gate: 2 (the refusal printed) while a host leg is live and `--beside-leg`
     is not given; None to run the gates (a warning printed first under `--beside-leg`, a note when the queue is
-    unreadable, nothing when there is none or this is the leg's own run)."""
+    unreadable, nothing when there is none or this is the leg's own run). DW-195: under `--beside-leg` it sets
+    TK_VERIFY_BESIDE_LEG=1 in `env` (default: this process's, so every gate's child inherits it)."""
     env = os.environ if env is None else env
+    if beside_leg:
+        env[BESIDE_LEG_ENV] = "1"
     if env.get(HOST_LEG_ENV):
         return None
     legs, error = live_legs(env)

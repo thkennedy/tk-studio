@@ -1,6 +1,6 @@
 # Deferred Work
 
-<!-- deferred-work counter: last minted DW-195; mint through plansync.py deferred mint -->
+<!-- deferred-work counter: last minted DW-199; mint through plansync.py deferred mint -->
 
 ### DW-124: Contract §4 `submit` admitted a full job definition but the CLI/skill surface was id-only
 origin: migrated from legacy ledger ("Deferred from: code review of feat/tk-studio-connector (2026-08-06)"), 2026-10-29
@@ -238,7 +238,8 @@ source_spec: `28-6-the-plugin-side-honours-the-queues-starter-lock-spec.md`
 location: plugins/tk-studio/lib/jobrun.py checkout match / apps/supervisor/src/queue.ts foldCase
 severity: low
 reason: apps/supervisor/src/queue.ts foldCase lowercases on win32 and darwin; the story (AC1) pins the plugin's compare as "case-folded on Windows", so folding darwin would extend the story. Supervisor hosts are the Windows agent PC and the Linux engine today. DEFERRAL DISCIPLINE (a): AC1's checkout match. Edge-case-hunter, review pass 2026-10-17.
-status: open
+status: done 2026-11-08
+resolution: resolved by sweep bundle dw-jobrun-finish-and-lock-match
 
 ### DW-28: Follow-up review still recommended for 29-3-the-office-projection-semantic-states-progress-and-its after the damping cap was spent
 origin: review-budget-followup
@@ -620,7 +621,8 @@ location: apps/supervisor/src/hostverify.ts defaultJudge; plugins/tk-studio/skil
 severity: medium
 reason: Review pass 1 (blind hunter). AC1 names the read-only rule; enforcing it needs a deny-profile design for invokeSkill's `deny_profile`, which this story's plan does not settle. Deferral class (a).
 decision: owner 2026-11-07 (TKSTUDIO-224): A — ship the judge deny profile: no Edit/Write/Bash and no Read of the project's code, `plugins`, `apps` and `_bmad-output` folders, passed by `defaultJudge` and pinned by a test; best effort, not a seal; stays open for the sweep bundle. Operator reading 2026-11-08 (the fourth sweep, run q-run-sweep-20261108T093348Z-f76978, bundle playable-judge-sandbox-hygiene paused at a CRITICAL escalation 12:55Z): the literal list breaks the judge itself — its SKILL.md runs `uv run playable_judge.py prepare|verdict` through Bash and writes `answer.json` through Write to produce the `judge.json` the host leg requires (`hostverify.ts` defaultJudge) — so the profile that carries the ruling's intent is the scoped one: bare `Edit` denied, `Write(...)` and `Read(...)` denied for `./plugins/**`, `./apps/**`, `./_bmad-output/**` and the project's code folders, Bash left open (best effort, as ruled: a Bash read of the code is not sealed). The literal list plus a host-run judge core (a `judge.json` contract change) was weighed and set aside as a rework beyond the bundle. The owner may override on TKSTUDIO-224 (a comment names the reading); the bundle re-queues in the next sweep with this intent. DW-69 does not depend on it and may bundle alone.
-status: open
+status: done 2026-11-08
+resolution: resolved by sweep bundle dw-playable-judge-deny-profile
 
 ### DW-69: A 33.8 re-run on an ended run pins (starts) the stopped sandbox for the judge and nothing releases it; it carries no pin record, so the launch check warns "started outside the supervisor" until the ne
 origin: spec-deferred b5240c800ca2
@@ -1035,7 +1037,8 @@ location: apps/supervisor/src/hostleg.ts:253-262 (the `-B` refusal), :217-232 (t
 severity: medium
 reason: 35.1's CAP-2 cut (`supervisor/run-<id>` reset to origin's tip, never detached) holds for a slice re-run that must commit, but a non-slice re-run after a close-out error meets the run's own kept worktree. Fix: cut detached when no slice commit is due; name the kept worktree in the `VerifyFailed` reason (and offer its removal); a test whose refusal comes from a close-out that kept its worktree.
 decision: owner 2026-11-07 (TKSTUDIO-221): A — the re-run cuts a detached checkout when no slice commit is due, so a plain re-run always works; the refusal (naming the kept worktree's path) stays only when a slice must commit onto the run branch; a test born from a close-out that kept its worktree pins it; stays open for the sweep bundle
-status: open
+status: done 2026-11-08
+resolution: resolved by sweep bundle dw-hostleg-rerun-detached-cut
 
 ### DW-118: The sweep's end rule overrides the engine's own end: `sweepEndState` applies whenever a summary exists and the engine was not killed, so an engine that ended `failed`/`blocked` after its last bundle reads `complete` by bundle count.
 origin: retro-epic-35, B9, AI-2
@@ -1099,7 +1102,8 @@ source_spec: `spec-dw-5-job-finish-idempotence.md`
 location: plugins/tk-studio/lib/jobrun.py:375
 severity: low
 reason: update_run persists the terminal state before _finalize_run; _finalize_run guards only capture, and _land_summary (write_workspace_json) can raise before the emit. Before DW-5 a repeat finish re-ran _finalize_run. The intent mandates the no-op, so the fix belongs in _finalize_run ordering or a finalized marker (deferral class b, AD-12 exactly-once).
-status: open
+status: done 2026-11-08
+resolution: resolved by sweep bundle dw-jobrun-finish-and-lock-match
 
 ### DW-129: Two concurrent finish calls on the same non-terminal run can both pass the pre-read and both emit a job-run event.
 origin: spec-deferred a597f7911645
@@ -1108,7 +1112,8 @@ location: plugins/tk-studio/lib/jobrun.py:701
 severity: low
 reason: The read_run check in finish and the write in update_run are separate, unlocked steps, and update_run accepts a same-state terminal rewrite (job.py:586). This race predates DW-5 (which only closes the sequential repeat); closing it needs a check inside update_run or a lock, which the DW-5 spec forbids changing (deferral class b, AD-12).
 decision: owner 2026-11-07 (TKSTUDIO-222): A — accept it: `finish` is single-writer and a concurrent finish on one run is not supported, written into `jobrun.py`'s docstring and the contract's §4, then closed; stays open for that docstring and contract line (the sweep bundle)
-status: open
+status: done 2026-11-08
+resolution: resolved by sweep bundle dw-jobrun-finish-and-lock-match
 
 ### DW-130: A block the operator resolved by resuming the run leaves its Jira issue in `Blocked - Awaiting User`: no resume path transitions out of the block, and the Done promotion then holds as an AD-5 conflict with the owner still tagged (hole 101).
 origin: hole 101 (Story 35.2's run, 2026-10-29 02:52Z; noticed by the owner 19:xxZ)
@@ -1560,7 +1565,8 @@ source_spec: `38-1-the-host-legs-own-guard-and-its-measure-spec.md`
 location: tools/verify_host.py:398-449
 severity: medium
 reason: live_legs treats any latest host-verify-leg with a non-null owner and no later host-verify as live (tools/verify_host.py:398-418); the lease records no guard or deadline (apps/supervisor/src/hostverify.ts:238-242); no pid probe by design (plan Settled shape 7: os.kill on win32 is TerminateProcess). Meets deferral (a): the refusal is behaviour AC3 names. A re-run of the leg (takeVerifyLeg takes over a dead owner) or --beside-leg clears it today. Raised by both review layers.
-status: open
+status: done 2026-11-08
+resolution: resolved by sweep bundle dw-host-leg-live-lease-guards
 
 ### DW-185: On the Windows host a guard's tree kill (taskkill /F /T) may kill a gate's child before verify_host.py itself, letting it print "== <suite>: FAILED rc=1" so a guard-cut leg reads red instead of inconc
 origin: spec-deferred 7d0b593c83a5
@@ -1584,7 +1590,8 @@ source_spec: `kb/agent-pc-setup-runbook.md` fixes row "hole 115"; `handoff-phase
 location: plugins/tk-studio/lib/plansync.py plan-status (the Jira call behind the `in-progress` sync); apps/supervisor/src/planstatus.ts (the pass that records the answer)
 severity: low
 reason: At launch the pass read `ok: false, error: blocked, reason: "cannot reach api.atlassian.com: <urlopen error [WinError 10060] A connection attempt failed …"` and the story's `in-progress` never reached Jira; the end-of-run pass at 06:12:47Z synced fine (TKSTUDIO-228 `Done`), so the record healed itself, but a `blocked` written on a single transient refusal is a false alarm the operator reads past, and a launch whose only Jira write is this one leaves the issue `Backlog` for the run's whole length. Fix to make: retry a connection-level error (`URLError`, socket timeouts) a bounded number of times with a short back-off before writing `blocked`, and name the retry count in the reason when it still fails.
-status: open
+status: done 2026-11-08
+resolution: resolved by sweep bundle dw-atlassian-client-hardening
 
 ### DW-188: Follow-up review still recommended for 38-4-the-owners-decisions-have-a-source-and-a-sink after the damping cap was spent
 origin: review-budget-followup
@@ -1600,7 +1607,8 @@ source_spec: `kb/atlassian-free-tier.md` item 5 (the rewritten scope lists); `ha
 location: plugins/tk-studio/lib/jirabackend.py `find_statuses` (`_paged_values(client, "/statuses/search", …, scope=SCOPE_READ)` twice: the Jira v2 spec lists `manage:jira-configuration`), `find_workflow` (`/workflow/search` with `scope=SCOPE_READ`: the deprecated endpoint lists `manage:jira-project`), `create_project` (`POST /project` with `scope=SCOPE_PROJECT`: the spec lists `manage:jira-configuration`); plugins/tk-studio/lib/confluence.py `upload_attachment` (the v1 `PUT /content/{id}/child/attachment` (`scope=SCOPE_ATTACHMENT, v1=True`: the v1 spec adds `read:content-details:confluence`)
 severity: low
 reason: A `403` on one of these calls prints a remedy naming a scope the token already has, so the operator recreates a token that fails the same way (the pattern Tim named on TKSTUDIO-236: "I have recreated the API keys multiple times and yet we still seem to be missing permissions"). Fix to make: carry the spec's scope on each call (`SCOPE_CONFIGURATION` for `/statuses/search` and `POST /project`, `SCOPE_PROJECT` for `/workflow/search`, `read:content-details:confluence` beside `write:attachment:confluence` on the v1 upload) and pin each in the backends' tests; the message shape is unchanged. Sweep-safe.
-status: open
+status: done 2026-11-08
+resolution: resolved by sweep bundle dw-atlassian-client-hardening
 
 ### DW-190: Two engagements of one project starting their first append in separate supervisor processes at once can both see no holder: the approve lock is per engagement, so the DW-49 wait check is not atomic ac
 origin: spec-deferred 098796f73cb8
@@ -1648,4 +1656,37 @@ source_spec: `handoff-phase1-loop-2026-10-09.md` 2026-11-08 day-9a update; Story
 location: apps/supervisor/test/preload.ts (bunfig's `[test] preload`: the one hook every `bun test` in apps/supervisor runs); tools/verify_host.py (the beside-a-live-leg check: the lease the close-out notes, `legGuard`/`noteCloseOutLease`); plugins/tk-studio/lib/_budget.py (the drives' bounds); kb/agent-pc-setup-runbook.md (the fixes table's hole-118 row)
 severity: low
 reason: A red leg costs 62 to 70 minutes and a second POST; the one guard built (38.1's) covers `verify_host.py` alone, so an operator sizing a fix by hand beside the leg contends the drives whose bounds assume a quiet box and reads a hang that is not one. Fix to make: the supervisor suite's preload (or a `bun test` wrapper the runbook names) reads the same live-leg signal `verify_host.py` reads and refuses (exit 2 naming the run) unless `TK_VERIFY_BESIDE_LEG=1` — the leg's own `bun test` children carry that variable; the runbook's rule: hand checks before the POST, never during. The rule itself is recorded in the handoff and the runbook now.
+status: done 2026-11-08
+resolution: resolved by sweep bundle dw-host-leg-live-lease-guards
+
+### DW-196: A re-run's lease deadline starts at takeVerifyLeg, before the cut and materialise, so the leg's host step can outlive the deadline by the cut time and both guards stop refusing in that tail.
+origin: spec-deferred 794305febb82
+source_spec: `spec-dw-184-dw-195-host-leg-live-lease-guards.md`
+location: apps/supervisor/src/hostleg.ts:285
+severity: low
+reason: hostleg.ts rerunHostLeg takes the lease (with guard_s) before git fetch / worktree add / materialise; runLeg's host step then gets a fresh guardS. The intent fixes the deadline as lease started-at plus host_verify_seconds, so a margin or a re-noted lease is a follow-up decision (deferral (a): the refusal behaviour the criteria name).
+status: open
+
+### DW-197: A close-out lease's deadline is one leg guard after the lease, but hostVerify runs up to four steps (host, assets, engine, playable) each under the full guard, so a multi-step leg can outlive its dead
+origin: spec-deferred 357b9811d58e
+source_spec: `spec-dw-184-dw-195-host-leg-live-lease-guards.md`
+location: apps/supervisor/src/hostverify.ts:244
+severity: low
+reason: leaseClock(guardS) at apps/supervisor/src/liveleg.ts:33-35 is written by noteCloseOutLease (hostverify.ts:244-249) before hostVerify; steps at hostverify.ts:607/618/640/650 each get guardS. The intent fixes the deadline as lease start plus one leg guard; the later steps (assets, engine, playable) run past it by design, so a whole-leg deadline is a follow-up decision (deferral (a); consult 2026-11-08T21:47:05Z). The host step, which carries the bun drives hole 118 names, lies inside the first guard window.
+status: open
+
+### DW-198: The judge profile leaves all of `.bmad-loop/` readable, including the engine run's transcripts, tasks, bundles and journal beside the media folder, which carry the code and the spec.
+origin: spec-deferred 1146d732fa3b
+source_spec: `spec-dw-68-playable-judge-deny-profile.md`
+location: apps/supervisor/src/hostverify.ts judgeDenyRules
+severity: medium
+reason: Review pass 1 (blind hunter): `judgeDenyRules` skips `.bmad-loop` wholesale; only the media chain `.bmad-loop/runs/<engine>/playable/` must stay open. The bundle intent enumerates plugins/apps/_bmad-output and the project's code folders only, so denying run state siblings level by level along the media path is beyond this bundle. Deferral class (a): DW-68's read-only rule.
+status: open
+
+### DW-199: The judge profile also leaves `.bmad-loop/` writable by the Write/Edit tools, so the judge could overwrite the engine run's state (transcripts, tasks, journal) beside the media.
+origin: spec-deferred 0a806c96b78e
+source_spec: `spec-dw-68-playable-judge-deny-profile.md`
+location: apps/supervisor/src/hostverify.ts judgeDenyRules
+severity: medium
+reason: Review pass 2 (blind hunter): `judgeDenyRules` skips `.bmad-loop` wholesale, so no `Edit(...)`/`Write(...)` rule covers the run folder's siblings of `playable/`. Same root as the read-side deferral; denying siblings level by level along the media path is beyond the bundle intent's enumerated folders. The half about rewriting the profile itself is moot: `--settings` is loaded at session start. Deferral class (a): DW-68's read-only rule.
 status: open

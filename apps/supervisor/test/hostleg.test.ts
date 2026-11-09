@@ -13,7 +13,7 @@ import { runCost } from "../src/inbox";
 import { Queue, type Owner } from "../src/queue";
 import { runProcess, type RunResult } from "../src/server";
 import { sweepRecord, type SweepSummary } from "../src/sweep";
-import { runBranch, type WorktreeDeps } from "../src/worktree";
+import { closeOut, closeOutDetail, runBranch, type CloseOut, type WorktreeDeps } from "../src/worktree";
 import { gitRepo, LEG_GUARD_ROWS, RUNTIME_GITIGNORE, testGit } from "./fakes";
 import { tempDir } from "./tmp";
 
@@ -29,8 +29,10 @@ type GhView = { state: string; isDraft: boolean; body?: string };
 /** The launch's status block, on the fixture's `launched` event (the PR body re-renders it). */
 const LAUNCH_BLOCK = { status: "complete", intent: "tk-studio-launch", artifacts: [".bmad-loop/runs/E1"] };
 
-/** An ended sbx run with its branch pushed to origin and its worktree removed, as a close-out leaves one. */
-async function fixture(o: { code?: number; pr?: string | null; push?: boolean; worktree?: boolean; definition?: Record<string, unknown>; config?: string; files?: Record<string, string>; engine?: boolean; studioRunId?: string; workerGuardS?: number } = {}) {
+/** An ended sbx run with its branch pushed to origin and its worktree removed, as a close-out leaves one. DW-117:
+ * `kept` runs the real `closeOut` instead, failing on the fake `gh pr create` (unsupported, exit 2), so it keeps the
+ * run's worktree — holding the run branch — as a close-out that errored does (`closeout` the answer). */
+async function fixture(o: { kept?: boolean; code?: number; pr?: string | null; push?: boolean; worktree?: boolean; definition?: Record<string, unknown>; config?: string; files?: Record<string, string>; engine?: boolean; studioRunId?: string; workerGuardS?: number } = {}) {
   const repo = gitRepo({ ".tk-studio/config.yaml": o.config ?? verifyConfig(o.code ?? 0), ...(o.files ?? {}) });
   const work = tempDir("tk-sup-hostleg-work-");
   const alive = new Set<string>([me.nonce]);
@@ -84,6 +86,7 @@ async function fixture(o: { code?: number; pr?: string | null; push?: boolean; w
   const branch = runBranch(id);
   const wt = join(work, "worktrees", "proj", id);
   let tip = "";
+  let closeout: CloseOut | undefined;
   if (o.worktree !== false) {
     mkdirSync(join(work, "worktrees", "proj"), { recursive: true });
     testGit(repo.checkout, "worktree", "add", "-q", wt, "-b", branch, "main");
@@ -95,12 +98,19 @@ async function fixture(o: { code?: number; pr?: string | null; push?: boolean; w
     queue.recordWorktree(id, wt, { branch, base_ref: "main" });
     queue.note(id, "launched", { engine_run_id: "E1", status_block: LAUNCH_BLOCK, worker_cost_usd: 0.5, end: {} });
     queue.note(id, "host-verify", { command: "x", argv: ["x"], cwd: wt, exit: 1, duration_ms: 5, green: false, stdout_tail: [], stderr_tail: ["boom"] });
-    testGit(repo.checkout, "worktree", "remove", "--force", wt);
+    if (o.kept) {
+      closeout = await closeOut(queue.get(id)!, { paused: false, statusBlock: LAUNCH_BLOCK, engineRunId: "E1" }, deps);
+      argvs.length = 0; gh.length = 0; bodies.length = 0; // the re-run's calls only
+    } else testGit(repo.checkout, "worktree", "remove", "--force", wt);
   }
-  queue.end(id, "partial", "host verify red: `x` exited 1", { detail: { ...(o.pr === null ? {} : { pr: o.pr ?? PR }), closeout: { result: "draft PR", host_verify: "red" } }, ...(o.engine ? { keepEngine: true } : {}) });
+  // DW-117: a `kept` run ends with the close-out it ran (no PR: `gh pr create` failed), a `pr` only when one is passed.
+  const detail = closeout
+    ? { ...closeOutDetail(closeout), ...(typeof o.pr === "string" ? { pr: o.pr } : {}) }
+    : { ...(o.pr === null ? {} : { pr: o.pr ?? PR }), closeout: { result: "draft PR", host_verify: "red" } };
+  queue.end(id, "partial", "host verify red: `x` exited 1", { detail, ...(o.engine ? { keepEngine: true } : {}) });
   const endedBefore = queue.events(id).find((e) => e.kind === "ended");
   const hostVerifies = () => queue.events(id).filter((e) => e.kind === "host-verify");
-  return { repo, work, queue, deps, argvs, gh, bodies, studio, answers, alive, id, wt, tip, branch, endedBefore, hostVerifies };
+  return { repo, work, queue, deps, argvs, gh, bodies, studio, answers, alive, id, wt, tip, branch, endedBefore, hostVerifies, closeout };
 }
 
 const refusal = async (p: Promise<unknown>): Promise<VerifyRefused> => {
@@ -118,16 +128,16 @@ async function captured<T>(fn: () => Promise<T>): Promise<{ value: T; out: strin
 }
 
 describe("AC1: the leg — cut, run, record, remove, flip", () => {
-  test("Story 35.1: green: `<worktree>.verify` cut on the run branch (`-B`) at the remote tip, materialised, one green `host-verify` with `rerun`, removed, the body rewritten with the `Legs:` history, the draft PR marked ready; the run's state and `ended` unchanged; the board reads green", async () => {
+  test("Story 35.1, DW-117: green: `<worktree>.verify` cut detached (`--detach`, a non-slice run) at the remote tip, materialised, one green `host-verify` with `rerun`, removed, the body rewritten with the `Legs:` history, the draft PR marked ready; the run's state and `ended` unchanged; the board reads green", async () => {
     const fx = await fixture({ code: 0 });
     const before = fx.hostVerifies().length;
     const started = await rerunHostLeg(fx.queue, fx.id, { by: "api" }, fx.deps);
     expect(started).toMatchObject({ run_id: fx.id, state: "partial", head: fx.tip });
     const r = await started.done;
     const path = `${fx.wt}.verify`;
-    // The cut: fetched, then the run branch reset (`-B`) to the tip origin answered — never detached.
+    // The cut: fetched, then (DW-117: a non-slice run commits nothing) detached at the tip origin answered.
     expect(fx.argvs.find((a) => a.args[0] === "fetch")!.args).toEqual(["fetch", "origin", `+refs/heads/${fx.branch}:refs/remotes/origin/${fx.branch}`]);
-    expect(fx.argvs.find((a) => a.args[0] === "worktree" && a.args[1] === "add")).toEqual({ bin: "git", args: ["worktree", "add", "--relative-paths", "-B", fx.branch, path, fx.tip], cwd: fx.repo.checkout });
+    expect(fx.argvs.find((a) => a.args[0] === "worktree" && a.args[1] === "add")).toEqual({ bin: "git", args: ["worktree", "add", "--relative-paths", "--detach", path, fx.tip], cwd: fx.repo.checkout });
     // Materialised (the drift check, twice: clean, so no install).
     expect(fx.studio.filter((s) => s.endsWith("drift_check.py"))).toHaveLength(2);
     // One new green `host-verify`, run in the fresh worktree.
@@ -154,7 +164,8 @@ describe("AC1: the leg — cut, run, record, remove, flip", () => {
     expect(fx.queue.events(fx.id).filter((e) => e.kind === "ended")).toEqual([fx.endedBefore!]);
     expect(hostVerifyOf(fx.queue.events(fx.id))).toBe("green");
     // The lease: taken (`by: api`), closed by the result; a second re-run takes it again.
-    expect(fx.queue.events(fx.id).filter((e) => e.kind === "host-verify-leg").map((e) => e.detail)).toEqual([{ owner: me, by: "api" }]);
+    // DW-184: it records the leg's guard (`legGuard`: 600 for a definition with none) and its deadline.
+    expect(fx.queue.events(fx.id).filter((e) => e.kind === "host-verify-leg").map((e) => e.detail)).toEqual([{ owner: me, by: "api", guard_s: 600, deadline: expect.any(String) }]);
     expect(fx.queue.takeVerifyLeg(fx.id, other, "cli")).toBe(true);
   }, 60_000);
 
@@ -584,9 +595,9 @@ describe("Story 35.1: a slice re-run commits and pushes its placed art and proof
    * the sheet; the judge passes; origin's URL read as a GitHub one so the body embeds the sheet. Story 35.3: the core's
    * `playable_judge.py rubric` answers the five ids; `manifest: false` leaves the manifest off main (`skipped: no
    * manifest`); `assets` a verb's exit (a red one ends the assets step); `ignore` lines added to main's `.gitignore`. */
-  async function sliceFixture(o: { hostCode?: number; playable?: "pass" | "fail"; manifest?: boolean; assets?: Record<string, number>; ignore?: string; studioRunId?: string } = {}) {
+  async function sliceFixture(o: { kept?: boolean; hostCode?: number; playable?: "pass" | "fail"; manifest?: boolean; assets?: Record<string, number>; ignore?: string; studioRunId?: string } = {}) {
     const files = { ...(o.manifest === false ? {} : { "assets/manifest.yaml": "schema: 1\n" }), ...(o.ignore ? { ".gitignore": RUNTIME_GITIGNORE + o.ignore } : {}) };
-    const fx = await fixture({ config: sliceConfig(o.hostCode ?? 0), files, definition: SLICE, engine: true, ...(o.studioRunId ? { studioRunId: o.studioRunId } : {}) });
+    const fx = await fixture({ config: sliceConfig(o.hostCode ?? 0), files, definition: SLICE, engine: true, ...(o.studioRunId ? { studioRunId: o.studioRunId } : {}), ...(o.kept ? { kept: true } : {}) });
     const home = tempDir("tk-sup-hostleg-home-");
     fx.deps.env = { ...fx.deps.env, TK_STUDIO_HOME: home };
     const inner = fx.deps.run!;
@@ -848,24 +859,71 @@ describe("Story 35.1: a slice re-run commits and pushes its placed art and proof
     expect(testGit(fx.repo.checkout, "rev-parse", fx.branch)).toBe(testGit(fx.repo.origin, "rev-parse", fx.branch));
   }, 180_000);
 
-  test("Story 35.1: another worktree holding the run branch: `VerifyFailed` naming it, that worktree untouched, the lease released", async () => {
-    const fx = await fixture();
-    const held = join(fx.work, "held");
-    testGit(fx.repo.checkout, "worktree", "add", "-q", held, fx.branch);
-    const e = await refusal(rerunHostLeg(fx.queue, fx.id, { by: "api" }, fx.deps));
-    expect(e.code).toBe("VerifyFailed");
-    expect(e.message).toContain(`the run branch '${fx.branch}' is held by another worktree`);
-    // git names the held worktree with forward slashes on Windows too: compare separator-insensitively
-    expect(e.message.replaceAll("\\", "/")).toContain(held.replaceAll("\\", "/"));
-    expect(existsSync(join(held, "feature.txt"))).toBe(true);
-    expect(fx.queue.takeVerifyLeg(fx.id, other)).toBe(true);
-  }, 60_000);
-
-  test("Story 35.1: a local run branch ahead of origin (an unpushed commit): `VerifyFailed` naming the branch and the commit, the branch and its commit untouched, the lease released", async () => {
-    const fx = await fixture();
+  /** DW-117: an unpushed commit on the local run branch (origin left at the tip); answers its sha. */
+  const aheadCommit = (fx: Awaited<ReturnType<typeof fixture>>): string => {
     const tree = testGit(fx.repo.checkout, "rev-parse", `${fx.branch}^{tree}`);
     const ahead = testGit(fx.repo.checkout, "commit-tree", tree, "-p", fx.branch, "-m", "unpushed hand fix");
     testGit(fx.repo.checkout, "update-ref", `refs/heads/${fx.branch}`, ahead);
+    return ahead;
+  };
+  const cutArgv = (fx: Awaited<ReturnType<typeof fixture>>) => fx.argvs.find((a) => a.bin === "git" && a.args[0] === "worktree" && a.args[1] === "add")?.args;
+
+  test("DW-117: a slice run whose close-out kept its worktree on error (holding the run branch): `VerifyFailed` naming the branch and the kept worktree's path, that worktree untouched, the lease released, no `host-verify`", async () => {
+    const fx = await sliceFixture({ kept: true });
+    expect(fx.closeout).toMatchObject({ worktree: "kept", error: expect.stringContaining("gh pr create") });
+    expect(fx.queue.events(fx.id).find((e) => e.kind === "ended")!.detail).toMatchObject({ closeout: { result: "failed", worktree: "kept" } });
+    expect(existsSync(join(fx.wt, "feature.txt"))).toBe(true);
+    const before = fx.hostVerifies().length;
+    const e = await refusal(rerunHostLeg(fx.queue, fx.id, { by: "api" }, fx.deps));
+    expect(e.code).toBe("VerifyFailed");
+    expect(e.message).toContain(`the run branch '${fx.branch}' is held by another worktree at '`);
+    // git names the worktree with forward slashes on Windows too: compare separator-insensitively
+    expect(e.message.replaceAll("\\", "/")).toContain(fx.wt.replaceAll("\\", "/"));
+    expect(cutArgv(fx)).toEqual(["worktree", "add", "--relative-paths", "-B", fx.branch, `${fx.wt}.verify`, fx.tip]);
+    expect(existsSync(join(fx.wt, "feature.txt"))).toBe(true);
+    expect(testGit(fx.wt, "rev-parse", "--abbrev-ref", "HEAD")).toBe(fx.branch);
+    expect(existsSync(`${fx.wt}.verify`)).toBe(false);
+    expect(fx.hostVerifies()).toHaveLength(before);
+    expect(fx.queue.takeVerifyLeg(fx.id, other)).toBe(true);
+  }, 120_000);
+
+  test("DW-117: the held refusal's stderr naming no path: the kept worktree's path read from `git worktree list --porcelain`", async () => {
+    const fx = await sliceFixture({ kept: true });
+    const inner = fx.deps.run!;
+    fx.deps.run = async (bin, args, opts) =>
+      bin === "git" && args[0] === "worktree" && args[1] === "add" ? { exit: 128, stdout: "", stderr: `fatal: '${fx.branch}' is already used by worktree` } : inner(bin, args, opts);
+    const e = await refusal(rerunHostLeg(fx.queue, fx.id, { by: "api" }, fx.deps));
+    expect(e.code).toBe("VerifyFailed");
+    expect(e.message).toContain(`the run branch '${fx.branch}' is held by another worktree at '`);
+    expect(e.message.replaceAll("\\", "/")).toContain(fx.wt.replaceAll("\\", "/"));
+    expect(fx.argvs.some((a) => a.bin === "git" && a.args.join(" ") === "worktree list --porcelain")).toBe(true);
+    expect(existsSync(join(fx.wt, "feature.txt"))).toBe(true);
+    expect(fx.queue.takeVerifyLeg(fx.id, other)).toBe(true);
+  }, 120_000);
+
+  test("DW-117: a non-slice run whose close-out kept its worktree on error: the re-run cuts detached at the tip, the leg runs and is recorded, `.verify` removed, the kept worktree untouched", async () => {
+    const fx = await fixture({ kept: true });
+    expect(fx.closeout).toMatchObject({ worktree: "kept", error: expect.stringContaining("gh pr create") });
+    const before = fx.hostVerifies().length;
+    const r = await (await rerunHostLeg(fx.queue, fx.id, { by: "api" }, fx.deps)).done;
+    const path = `${fx.wt}.verify`;
+    expect(cutArgv(fx)).toEqual(["worktree", "add", "--relative-paths", "--detach", path, fx.tip]);
+    // The close-out opened no PR and `gh pr list` answers none: no PR to edit or flip.
+    expect(fx.queue.events(fx.id).find((e) => e.kind === "ended")!.detail).toMatchObject({ closeout: { result: "failed", worktree: "kept", error: expect.stringContaining("gh pr create") } });
+    expect("pr" in fx.queue.events(fx.id).find((e) => e.kind === "ended")!.detail!).toBe(false);
+    expect(r).toMatchObject({ green: true, rerun: { head: fx.tip, worktree: "removed", pr: null } });
+    expect(fx.gh.map((a) => a.slice(0, 2))).toEqual([["pr", "list"]]);
+    expect(fx.hostVerifies()).toHaveLength(before + 1);
+    expect(fx.hostVerifies().at(-1)!.detail).toMatchObject({ green: true, rerun: { worktree: "removed" } });
+    expect(existsSync(path)).toBe(false);
+    expect(readFileSync(join(fx.wt, "feature.txt"), "utf-8")).toBe("the engine's work");
+    expect(testGit(fx.wt, "rev-parse", "--abbrev-ref", "HEAD")).toBe(fx.branch);
+    expect(testGit(fx.repo.checkout, "rev-parse", fx.branch)).toBe(fx.tip);
+  }, 60_000);
+
+  test("Story 35.1: a slice run's local run branch ahead of origin (an unpushed commit): `VerifyFailed` naming the branch and the commit, the branch and its commit untouched, the lease released", async () => {
+    const fx = await sliceFixture();
+    const ahead = aheadCommit(fx);
     const e = await refusal(rerunHostLeg(fx.queue, fx.id, { by: "api" }, fx.deps));
     expect(e.code).toBe("VerifyFailed");
     expect(e.message).toContain(`'${fx.branch}'`);
@@ -874,9 +932,21 @@ describe("Story 35.1: a slice re-run commits and pushes its placed art and proof
     expect(testGit(fx.repo.checkout, "rev-parse", fx.branch)).toBe(ahead);
     expect(testGit(fx.repo.checkout, "log", "-1", "--format=%s", ahead)).toBe("unpushed hand fix");
     expect(testGit(fx.repo.origin, "rev-parse", fx.branch)).toBe(fx.tip);
-    expect(fx.argvs.some((a) => a.bin === "git" && a.args[0] === "worktree" && a.args[1] === "add")).toBe(false);
+    expect(cutArgv(fx)).toBeUndefined();
     expect(fx.hostVerifies()).toHaveLength(1);
     expect(fx.queue.takeVerifyLeg(fx.id, other)).toBe(true);
+  }, 60_000);
+
+  test("DW-117: a non-slice run's local run branch ahead of origin: the re-run cuts detached and runs; the branch still points at its unpushed commit", async () => {
+    const fx = await fixture();
+    const ahead = aheadCommit(fx);
+    const r = await (await rerunHostLeg(fx.queue, fx.id, { by: "api" }, fx.deps)).done;
+    expect(cutArgv(fx)).toEqual(["worktree", "add", "--relative-paths", "--detach", `${fx.wt}.verify`, fx.tip]);
+    expect(r).toMatchObject({ green: true, rerun: { head: fx.tip, worktree: "removed" } });
+    expect(fx.hostVerifies()).toHaveLength(2);
+    expect(testGit(fx.repo.checkout, "rev-parse", fx.branch)).toBe(ahead);
+    expect(testGit(fx.repo.checkout, "log", "-1", "--format=%s", ahead)).toBe("unpushed hand fix");
+    expect(testGit(fx.repo.origin, "rev-parse", fx.branch)).toBe(fx.tip);
   }, 60_000);
 
   test("Story 35.1: the slice proof commit refused: `commit: error: …`, nothing pushed, the PR left as it was (no edit, no flip), the leg still recorded", async () => {
@@ -894,9 +964,10 @@ describe("Story 35.1: a slice re-run commits and pushes its placed art and proof
     expect(fx.hostVerifies().at(-1)!.detail).toMatchObject({ green: true, rerun: { commit: r.rerun.commit } });
   }, 120_000);
 
-  test("Story 35.1: a non-slice re-run uses the same cut and commits nothing", async () => {
+  test("DW-117: a non-slice re-run cuts detached (`--detach`, never `-B`) and commits nothing", async () => {
     const fx = await fixture();
     const r = await (await rerunHostLeg(fx.queue, fx.id, { by: "api" }, fx.deps)).done;
+    expect(cutArgv(fx)).toEqual(["worktree", "add", "--relative-paths", "--detach", `${fx.wt}.verify`, fx.tip]);
     expect("commit" in r.rerun || "pushed" in r.rerun).toBe(false);
     expect(fx.argvs.some((a) => a.bin === "git" && (a.args[0] === "commit" || a.args[0] === "push"))).toBe(false);
   }, 60_000);
@@ -1035,6 +1106,16 @@ describe("Story 38.1: the re-run's own guard, its measure and `inconclusive (gua
       expect(fx.hostVerifies().at(-1)!.detail).toMatchObject({ guard: row.trip });
     }, 30_000);
   }
+
+  test("DW-184: the re-run's lease records `guard_s` (the leg's `legGuard` seconds) and its ISO `deadline`, the lease plus one guard", async () => {
+    const fx = await fixture({ definition: { ...DEFN, guards: { max_wall_clock_seconds: 50, host_verify_seconds: 7 } }, config: scriptConfig("console.log('ok')"), workerGuardS: 50 });
+    await (await rerunHostLeg(fx.queue, fx.id, { by: "api" }, fx.deps)).done;
+    const ev = fx.queue.events(fx.id).find((e) => e.kind === "host-verify-leg")!;
+    expect(ev.detail).toMatchObject({ by: "api", guard_s: 7 });
+    const deadline = ev.detail!.deadline as string;
+    expect(new Date(deadline).toISOString()).toBe(deadline);
+    expect(Math.abs(Date.parse(deadline) - (Date.parse(ev.at) + 7000))).toBeLessThan(1000);
+  }, 30_000);
 
   test("AC2: a re-run ended on the guard with every verdict so far green — `inconclusive (guard)`: no flip, the body Timed out, `suite_durations` recorded, the verb's exit 1", async () => {
     const fx = await fixture({

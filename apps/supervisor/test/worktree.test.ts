@@ -14,7 +14,7 @@ import {
   driftingPlanes, worktreeClean, editPrBody, markPrDraft, markPrReady, proofCommit, proofCommitDue, treeClean, withRunWorktreeRollback,
   commitsAhead, NO_CHANGES_SKIP, noStoryEnd, STAGE_CARRY,
 } from "../src/worktree";
-import { FRAMES_DIR, legVerdict, type HostVerifyResult, type PlayableJudge } from "../src/hostverify";
+import { FRAMES_DIR, legGuard, legVerdict, type HostVerifyResult, type PlayableJudge } from "../src/hostverify";
 import { endNotice, noticeText } from "../src/hygiene";
 import { supervisorRows } from "../src/planstatus";
 import { fakeGh, fakeSbx, FIXTURE_POLICY, gitRepo, LEG_GUARD_ROWS, testGit } from "./fakes";
@@ -1152,6 +1152,12 @@ describe("Story 27.4: the host verify leg runs before any PR opens", () => {
     expect(evs[lease]!.detail).toMatchObject({ by: "close-out", owner: { pid: expect.any(Number), host: expect.any(String), nonce: expect.any(String) } });
     expect(evs.findIndex((e) => e.kind === "host-verify")).toBeGreaterThan(lease);
     expect(evs.filter((e) => e.kind === "host-verify-leg")).toHaveLength(1);
+    // DW-184: the lease carries the leg's guard and its deadline (the lease plus one guard).
+    const g = legGuard(fx.queue.definition(fx.get()));
+    const d = evs[lease]!.detail as { guard_s: number; deadline: string };
+    expect(d.guard_s).toBe(g.seconds);
+    expect(new Date(d.deadline).toISOString()).toBe(d.deadline);
+    expect(Math.abs(Date.parse(d.deadline) - (Date.parse(evs[lease]!.at) + g.seconds * 1000))).toBeLessThan(1000);
   });
 
   test("Story 38.1 (CAP-2): a tail leg ended on the guard with every verdict so far green is `inconclusive (guard)`: `partial`, a draft, Timed out", async () => {

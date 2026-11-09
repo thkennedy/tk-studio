@@ -189,7 +189,8 @@ def _pid_alive(pid: int, platform: str | None = None) -> bool:
 
 def _same_checkout(lock_checkout: str, root: Path,
                    platform: str | None = None) -> bool:
-    """Canonical absolute paths compared, case-folded on win32."""
+    """Canonical absolute paths compared, case-folded on win32 and darwin,
+    as the supervisor's foldCase (DW-27)."""
     if platform is not None and platform != sys.platform:
         # A simulated platform (the suite's cross-platform cases): compare the
         # spellings alone — realpath would ask this host's filesystem, which on
@@ -199,6 +200,8 @@ def _same_checkout(lock_checkout: str, root: Path,
         a, b = os.path.realpath(lock_checkout), os.path.realpath(str(root))
     if (platform or sys.platform) == "win32":
         a, b = ntpath.normcase(a), ntpath.normcase(b)
+    elif (platform or sys.platform) == "darwin":
+        a, b = a.lower(), b.lower()
     return a == b
 
 
@@ -396,13 +399,17 @@ def _finalize_run(key: str, record: dict, summary: dict,
     riding the wrapper's close; idempotent by the queue's dedupe key, so a
     boundary capture already landed is just duplicates here), land
     summary.json with the capture evidence, emit the job-run event. Capture
-    never masks the transition — a failure is recorded, not raised."""
+    never masks the transition — a failure is recorded, not raised. The
+    job-run event is emitted even when the summary write raises (DW-128,
+    AD-12 exactly-once); that error still propagates after the emit."""
     try:
         captured = reconcilelib.capture(key, record["run_id"])
     except Exception as exc:
         captured = {"captured": 0, "errors": [str(exc)]}
-    _land_summary(key, record, {**summary, "capture": captured})
-    _emit_job_event(record, key, detail=detail)
+    try:
+        _land_summary(key, record, {**summary, "capture": captured})
+    finally:
+        _emit_job_event(record, key, detail=detail)
     return captured
 
 
@@ -738,7 +745,10 @@ def finish(project_root: Path, run_id: str, state: str,
     no-op (DW-5, AD-12): run.json is not rewritten, nothing is captured or
     landed, no second job-run event is emitted; the current record's
     result shape returns, without `capture`. A different terminal state is
-    still refused by update_run (terminal states are immutable)."""
+    still refused by update_run (terminal states are immutable).
+    finish is single-writer: a concurrent finish on one run is not supported
+    (DW-129, TKSTUDIO-222 A) — the read_run pre-check and update_run are not
+    atomic, so two racing calls can both emit."""
     cost = None if total_cost_usd is None else _validate_cost(total_cost_usd)
     pv_cost = (None if playable_verify_cost_usd is None
                else _validate_cost(playable_verify_cost_usd,

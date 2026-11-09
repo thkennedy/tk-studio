@@ -1919,6 +1919,18 @@ describe("Story 33.8: the host-leg re-run's lease (`takeVerifyLeg`, `releaseVeri
     queue.releaseVerifyLeg(run.run_id, B); // closed by the result: nothing appended
     expect(legs(queue, run.run_id)).toHaveLength(3);
   });
+
+  test("DW-184: given the leg's guard seconds, the lease records `guard_s` and its ISO `deadline` (the lease plus one guard)", () => {
+    const { queue, enqueue } = fixture();
+    const { run } = enqueue();
+    queue.end(run.run_id, "partial");
+    expect(queue.takeVerifyLeg(run.run_id, A, "api", 900)).toBe(true);
+    const ev = queue.events(run.run_id).filter((e) => e.kind === "host-verify-leg").at(-1)!;
+    expect(ev.detail).toEqual({ owner: { pid: A.pid, host: A.host, nonce: A.nonce }, by: "api", guard_s: 900, deadline: expect.any(String) });
+    const deadline = ev.detail!.deadline as string;
+    expect(new Date(deadline).toISOString()).toBe(deadline);
+    expect(Math.abs(Date.parse(deadline) - (Date.parse(ev.at) + 900_000))).toBeLessThan(1000);
+  });
 });
 
 describe("Story 36.5 (DW-105): the supervisor's own block", () => {

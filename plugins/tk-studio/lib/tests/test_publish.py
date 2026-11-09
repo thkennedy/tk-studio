@@ -442,6 +442,31 @@ class RefusalTests(PublishTestCase):
                          {"Brief: b1", "Decisions: decisions"})
 
 
+class AttachmentScopeTests(unittest.TestCase):
+    """DW-189: the v1 attachment PUT's 403 names both scopes it needs, in
+    the unchanged `token lacks <scope> — create a new scoped token` shape."""
+
+    def test_403_on_upload_attachment_names_both_scopes(self):
+        calls = []
+
+        def transport(method, url, body):
+            calls.append((method, url))
+            return 403, {"message": "Forbidden"}
+        client = confluence.ConfluenceClient(
+            "cloud-test", "agent@example.com", "fake-confluence-token",
+            transport=transport)
+        with self.assertRaises(confluence.ConfluenceError) as caught:
+            confluence.upload_attachment(client, "123", "a.png", b"png",
+                                         "sha256:00")
+        reason = str(caught.exception)
+        self.assertIn("token lacks write:attachment:confluence and "
+                      "read:content-details:confluence — create a new "
+                      "scoped token", reason)
+        self.assertEqual(calls[0][0], "PUT")
+        self.assertIn("/wiki/rest/api/content/123/child/attachment",
+                      calls[0][1])
+
+
 class ImageTests(PublishTestCase):
     def setUp(self):
         super().setUp()

@@ -1776,7 +1776,7 @@ export async function sweepEngines(queue: Queue, deps: WorktreeDeps = {}): Promi
       if (!verify && notKilled && !paused) {
         // Story 38.1 (CAP-1): the leg's own guard, never the worker's; the close-out's lease noted first (CAP-3).
         const g = legGuard(queue.definition(run));
-        noteCloseOutLease(queue, run.run_id, (deps as { self?: Owner }).self ?? selfOwner());
+        noteCloseOutLease(queue, run.run_id, g.seconds, (deps as { self?: Owner }).self ?? selfOwner());
         verify = await hostVerify(run, g.seconds, deps, { ...(slice ? { slice } : {}), guardKey: g.key });
         queue.note(run.run_id, "host-verify", { ...verify, ...(sweep ? {} : headed) } as Record<string, unknown>);
       }

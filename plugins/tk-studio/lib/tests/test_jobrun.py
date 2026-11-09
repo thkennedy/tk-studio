@@ -274,6 +274,21 @@ class JobRunTestCase(unittest.TestCase):
         self.assertEqual(run_json.read_bytes(), before_bytes)
         self.assertEqual(len(self._job_run_events()), 1)
 
+    # ------------------------- DW-128: a failing summary write still emits
+
+    def test_finish_summary_write_failure_still_emits_one_event(self):
+        self._declare("agentic", self._skill_defn("agentic"))
+        run_id = jobrun.submit(self.root, "agentic")["run_id"]
+        with mock.patch.object(jobrun.joblib, "write_workspace_json",
+                               side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                jobrun.finish(self.root, run_id, "complete")
+        self.assertEqual(joblib.read_run("proj", run_id)["state"],
+                         "complete")
+        events = self._job_run_events()
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["payload"]["run_id"], run_id)
+
     # ------------------------- ST-061 / Story 20.1: finish records the cost
 
     def _queued_skill_run(self) -> str:
@@ -990,6 +1005,19 @@ class StarterLockTests(JobRunTestCase):
         self._declare_both()
         with mock.patch.object(jobrun.sys, "platform", "win32"):
             self._assert_refused()
+
+    def test_checkout_case_fold_by_platform(self):
+        # DW-27: win32 and darwin fold case, as the supervisor's foldCase.
+        self._lock(pid=self.DEAD_PID, since=self._since(60),
+                   checkout=str(self.root).upper())
+        for platform, expected in (("win32", "live"), ("darwin", "live"),
+                                   ("linux", None)):
+            with self.subTest(platform=platform):
+                state, lock = jobrun.starter_lock_state(self.root,
+                                                        platform=platform)
+                self.assertEqual(state, expected)
+                if expected is None:
+                    self.assertIsNone(lock)
 
     def test_win32_probe_never_reaches_os_kill(self):
         with mock.patch.object(jobrun.os, "kill",

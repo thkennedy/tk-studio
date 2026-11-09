@@ -54,6 +54,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync } from "
 import { homedir, hostname } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { pluginRoot } from "./env";
+import { leaseClock } from "./liveleg";
 import { processCreationTime } from "./winproc";
 import { probeEngine, sameStart, vmLaunchStatus, type ProbeResult, type SandboxDeps } from "./sandbox";
 import { lastJsonObject, runUv, SBX_GUARD_KILL_AFTER_S, type OwnBlock, type RunResult } from "./server";
@@ -1754,8 +1755,10 @@ export class Queue {
   /** Story 33.8: the lease of an ended run's host-leg re-run (`hostleg.ts`), taken atomically by appending a
    * `host-verify-leg {owner, by}` event (the terminal row is never updated). Refused on a run that is not terminal,
    * and while the latest lease is held by a live owner and neither a `host-verify` (the leg's result, which closes it)
-   * nor a later `host-verify-leg` follows it. A dead owner's lease is taken over. */
-  takeVerifyLeg(runId: string, self: Owner = selfOwner(), by?: string): boolean {
+   * nor a later `host-verify-leg` follows it. A dead owner's lease is taken over. DW-184: given the leg's guard
+   * seconds (`legGuard(...).seconds`), the lease records `guard_s` and its ISO `deadline` (the lease plus one guard),
+   * past which `tools/verify_host.py` and test/preload.ts read it as stale. */
+  takeVerifyLeg(runId: string, self: Owner = selfOwner(), by?: string, guardS?: number): boolean {
     return this.db.transaction(() => {
       const run = this.get(runId);
       if (!run || !isTerminal(run.state)) return false;
@@ -1766,7 +1769,7 @@ export class Queue {
         const closed = evs.slice(at + 1).some((e) => e.kind === "host-verify" || e.kind === "host-verify-leg");
         if (lease && !closed && this.ownerLive(lease, self)) return false;
       }
-      this.event(runId, "host-verify-leg", run.state, run.state, { owner: ownerDetail(self), ...(by ? { by } : {}) });
+      this.event(runId, "host-verify-leg", run.state, run.state, { owner: ownerDetail(self), ...(by ? { by } : {}), ...(guardS !== undefined ? leaseClock(guardS) : {}) });
       return true;
     }).immediate();
   }

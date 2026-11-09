@@ -13,13 +13,15 @@
  *   spawn    argv only, through the `CAPTURE` wrapper spawned by `runProcess` (`windowsHide`, never
  *            `detached` on win32, the tree killed on timeout), the worker's env (`buildWorkerEnv`) with
  *            `TK_SUPERVISOR_HOST_LEG=<run id>` (Story 38.1: `tools/verify_host.py` skips its beside-leg check for the
- *            leg's own run), under the leg's own guard (`legGuard`); both streams go to files, so a timeout keeps
+ *            leg's own run) and `TK_VERIFY_BESIDE_LEG=1` (DW-195: its gates' `bun test` children pass test/preload.ts's
+ *            beside-leg refusal), under the leg's own guard (`legGuard`); both streams go to files, so a timeout keeps
  *            their tails.
  *   guard    Story 38.1 (DW-174): every caller of the leg (the close-out's boundary and sweep-tail legs, the re-run)
  *            reads `legGuard(queue.definition(run))`: the job's `guards.host_verify_seconds`, else (a definition
  *            snapshot taken before 38.1) `guards.max_wall_clock_seconds`, else 600 — never the worker's
  *            `worker_guard_s`. Every step's trip reads `guard: <key> (<N>s)`. The close-out legs note a
- *            `host-verify-leg {owner, by: "close-out"}` lease first (closed by the leg's `host-verify`). A ran leg
+ *            `host-verify-leg {owner, by: "close-out", guard_s, deadline}` lease first (closed by the leg's
+ *            `host-verify`; DW-184: stale past its `deadline`, the lease plus one guard). A ran leg
  *            records `suite_durations` (`suiteDurations`: the last `== durations:` line, else the gate-level
  *            `ok|FAILED … in Ns` lines). A host step ended on the guard after at least one gate-level suite verdict,
  *            none red, is `inconclusive (guard)` (`guardInconclusive`, Story 35.3's shape): `partial`, the reason
@@ -59,7 +61,10 @@
  *            judge can read. On exit 0 with `verdict: pass` the judge runs: `tk-studio-playable-judge` through
  *            `invokeSkill` on the sbx tier (`deps.judge`), its model and effort from the route's `playable-verify`
  *            leg (default `claude-sonnet-5`, `medium`), reading only `report.json` and the frames; its verdict is
- *            read back from `<media>/judge.json`. Recorded as `playable: {verdict: pass | fail | skipped | inconclusive, reason?,
+ *            read back from `<media>/judge.json`. DW-68: the default judge runs under a scoped deny-only profile
+ *            written to `.bmad-loop/runs/<engine run id>/judge-deny.settings.json` (beside the media) and passed as
+ *            `--settings`: `Edit`/`Read`/`Write` denied for `plugins`, `apps`, `_bmad-output` and every top-level
+ *            entry but `.bmad-loop`; Bash stays open (best effort, not a seal). Recorded as `playable: {verdict: pass | fail | skipped | inconclusive, reason?,
  *            exit?, status?, failed?, duration_ms?, store?, media?, judge?, findings?, frames?}`. Skip reasons: `no
  *            playable`, `playable is malformed: <field>`, `no verify.engine` (Story 35.6: a declared `playable`
  *            with no `verify.engine`), `engine gate not green`. On a configured project every
@@ -98,13 +103,14 @@
  *   judge    Story 35.3: the rubric ids are the core's (`playable_judge.py rubric`, run once per judge step under
  *            the guard); a finding naming another id is refused. A judge that cannot run or answer — no sandbox, a
  *            thrown invoke, the sandbox pin failed, the auth preflight blocked (`ran: false`), no status block
- *            (`conformance_failure`), or an unreadable rubric — is `playable.verdict: inconclusive` with `reason:
+ *            (`conformance_failure`), an unreadable rubric, or (DW-68) a deny profile that cannot be written
+ *            (`infrastructure: sbx: …`) — is `playable.verdict: inconclusive` with `reason:
  *            infrastructure: <pin|sbx|status-block|auth|rubric>: <detail>`, never a rubric `fail`: the leg is not
  *            green and not red (`isInconclusive`), the run ends `partial` (`host verify inconclusive (playable):
  *            <reason>`), no finding recorded, the PR line `Playable: inconclusive — <reason>`. The judge's own
  *            `blocked` (a game cause) stays `fail`.
  */
-import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join } from "node:path";
 
@@ -132,6 +138,7 @@ import { load as loadYaml } from "js-yaml";
 import { buildWorkerEnv, invokeSkill, lastJsonObject, runProcess, type RunResult, type Spawner } from "./server";
 import { selfOwner, servedRoot, type Owner, type Queue, type QueueEvent, type QueueRun } from "./queue";
 import { pluginRoot, studioHome } from "./env";
+import { leaseClock } from "./liveleg";
 import { showAtBase } from "./gitshow";
 import { resolveRoute } from "./route";
 import { pinSandbox, studioRunDir } from "./sandbox";
@@ -234,11 +241,14 @@ export function legGuard(defn: Record<string, any> | null | undefined): { second
 }
 
 /** Story 38.1 (CAP-3): the close-out's lease, noted before a close-out leg (boundary or sweep tail): `host-verify-leg
- * {owner: {pid, host, nonce, start?}, by: "close-out"}`, closed by the leg's own `host-verify` (as `takeVerifyLeg`'s
- * is) — the queue record of "a run in its close-out" that `tools/verify_host.py` refuses to start beside. */
-export function noteCloseOutLease(queue: Pick<Queue, "note">, runId: string, self: Owner = selfOwner()): void {
+ * {owner: {pid, host, nonce, start?}, by: "close-out", guard_s, deadline}`, closed by the leg's own `host-verify` (as
+ * `takeVerifyLeg`'s is) — the queue record of "a run in its close-out" that `tools/verify_host.py` and test/preload.ts
+ * refuse to start beside. DW-184: `guard_s` is the leg's guard (`legGuard(...).seconds`) and `deadline` the ISO time
+ * one guard after the lease, past which the lease is stale (a crashed serve's lease no longer refuses). */
+export function noteCloseOutLease(queue: Pick<Queue, "note">, runId: string, guardS: number, self: Owner = selfOwner()): void {
   queue.note(runId, "host-verify-leg", {
     owner: { pid: self.pid, host: self.host, nonce: self.nonce, ...(self.start ? { start: self.start } : {}) }, by: "close-out",
+    ...leaseClock(guardS),
   });
 }
 
@@ -582,6 +592,9 @@ export async function hostVerify(
   const env = buildWorkerEnv(deps.env ?? process.env);
   // Story 38.1 (CAP-3): the leg's own `tools/verify_host.py` never refuses itself beside its own lease.
   env.TK_SUPERVISOR_HOST_LEG = run.run_id ?? "host-leg";
+  // DW-195 (hole 118): its gates' `bun test` children pass test/preload.ts's beside-leg refusal (verify_host.py strips
+  // only `TK_SUPERVISOR_*` from them, so this one reaches them).
+  env.TK_VERIFY_BESIDE_LEG = "1";
   // Hole 46: on the Windows host the console's `bash` is the WindowsApps WSL launcher, so a `verify.host`
   // that says `bash …` (and the lib suite's own bash-driven tests) ran inside WSL against Windows paths. Git's
   // own `usr\bin` (Git Bash, not on PATH by default) goes first when it is there.
@@ -753,13 +766,52 @@ async function rubricIds(
   return { ids: ids as string[] };
 }
 
+/** DW-68: the judge's deny profile file name, written beside (never inside) the media folder. */
+export const JUDGE_DENY_PROFILE = "judge-deny.settings.json";
+/** DW-68: the folders the judge's profile always denies, present or not. */
+const JUDGE_DENY_FIXED = ["plugins", "apps", "_bmad-output"];
+/** DW-68: the media's ancestor under the served root, never denied (the judge reads its frames and writes its answer there). */
+const JUDGE_MEDIA_TOP = ".bmad-loop";
+
+/** DW-68: the judge's deny rules over the served root `root`: `Edit(t)`, `Read(t)` and `Write(t)` per target `t` — the
+ * fixed folders and every top-level entry except `.bmad-loop` (a directory as `./<name>/**`, a file as `./<name>`),
+ * sorted and deduped. POSIX rule strings (resolved by Claude Code against the session cwd), never `path.join`ed.
+ * Never denies Bash, nor a bare `Edit`/`Read`/`Write` (a bare `Edit` deny also denies the Write tool, blocking the
+ * judge's `answer.json`). Throws when the root cannot be listed. */
+export function judgeDenyRules(root: string): string[] {
+  const targets = new Set(JUDGE_DENY_FIXED.map((n) => `./${n}/**`));
+  for (const name of readdirSync(root)) {
+    if (name === JUDGE_MEDIA_TOP) continue;
+    let dir = false;
+    try { dir = statSync(join(root, name)).isDirectory(); } catch { /* a dangling link: denied as a file */ }
+    targets.add(dir ? `./${name}/**` : `./${name}`);
+  }
+  return [...targets].sort().flatMap((t) => [`Edit(${t})`, `Read(${t})`, `Write(${t})`]);
+}
+
+/** DW-68: write the judge's deny-only profile atomically (tmp + rename) beside the media folder (`media` relative to
+ * `root`); answers its absolute path. Throws on any failure (the leg's judge `catch`: `inconclusive`, cause `sbx`). */
+function writeJudgeDenyProfile(root: string, media: string): string {
+  const path = join(root, dirname(media), JUDGE_DENY_PROFILE);
+  const body = JSON.stringify({ permissions: { deny: judgeDenyRules(root) } }, null, 2) + "\n";
+  mkdirSync(dirname(path), { recursive: true });
+  const tmp = `${path}.tk-studio-${process.pid}.tmp`;
+  try {
+    writeFileSync(tmp, body, { encoding: "utf-8" });
+    renameSync(tmp, path);
+  } finally { rmSync(tmp, { force: true }); }
+  return path;
+}
+
 /** The default judge: `invokeSkill` with the sandbox pinned first (`sbx run -d --name <sb>`), so a re-run on an
- * ended run (its sandbox stopped) never `sbx exec`s into a stopped sandbox; a pin failure is a `blocked` block. */
-const defaultJudge = (deps: Deps): PlayableJudge => (root, args) =>
-  invokeSkill(root, PLAYABLE_JUDGE_SKILL, args, deps.spawner ?? runProcess, {
-    vmHostRoot: root,
-    pin: (sb) => pinSandbox(sb, { ...(deps.env ? { env: deps.env } : {}), ...(deps.sbx ?? {}) }),
-  });
+ * ended run (its sandbox stopped) never `sbx exec`s into a stopped sandbox; a pin failure is a `blocked` block.
+ * DW-68: under a scoped deny profile (`--settings`, best effort, not a seal: Bash stays open). */
+const defaultJudge = (deps: Deps): PlayableJudge => async (root, args) =>
+  invokeSkill(root, PLAYABLE_JUDGE_SKILL, { ...args, deny_profile: writeJudgeDenyProfile(root, args.payload.media) },
+    deps.spawner ?? runProcess, {
+      vmHostRoot: root,
+      pin: (sb) => pinSandbox(sb, { ...(deps.env ? { env: deps.env } : {}), ...(deps.sbx ?? {}) }),
+    });
 const defaultRoute: PlayableRoute = (root, projectId) => resolveRoute(root, projectId);
 
 /** The `playable-verify` leg's `{model, effort}` from the project's route, or the shipped default (a route without
