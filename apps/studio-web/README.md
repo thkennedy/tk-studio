@@ -119,7 +119,7 @@ absolute `/app/` asset base and the `<base href="/app/">` make it load from `/`)
 answers the supervisor's read-only status page with its "not built" note. Build it with
 `cd apps/studio-web && bun install --frozen-lockfile && bun run build` (the supervisor's `WEB_BUILD_COMMAND`).
 
-- **The remembered screen.** `src/screen.ts`: the switch in `App.tsx` is Office / Board / Status, and the screen
+- **The remembered screen** (replaced by the addresses, Story 39.1, below: the key is migrated once and no longer written). `src/screen.ts`: the switch in `App.tsx` is Office / Board / Status, and the screen
   shown is stored per browser under `tk-studio.web.screen` (`rememberedScreen` / `rememberScreen`, the storage
   injectable as `rememberedProject`'s is). Absent, unknown or a storage that throws: Office. One screen is mounted at
   a time, so the Office canvas (the one Pixi Application) exists only on the Office screen, and the one stream stays
@@ -172,6 +172,39 @@ desktop or the iPad, without a terminal. The switch gains Chat (`src/screen.ts`)
   project and id, `state: null` removes the row); the Chat nav item counts the rows in `awaiting-answers` or `quoted`
   across projects (none: no count). The open engagement is remembered per browser under `tk-studio.web.chat` as
   `{project, id}`.
+
+## The addresses (Story 39.1)
+
+The web has URLs under `/app` (addendum §3.3), served by the supervisor's single-page fallback. `src/screen.ts` is the
+route module, pure and vitest-driven: `parseRoute(pathname, search)`, `routePath(route)` and a hand-rolled router over
+the History API (`createRouter(win)`, the browser's `window` or a fake; no router package, so `bun.lock` is unchanged).
+`App.tsx` builds one router at module level beside the one store and reads it with `useSyncExternalStore`.
+
+| Path | Screen |
+|---|---|
+| `/app`, `/app/`, any path outside `/app` (`/`, `/index.html`) | replaced (`replaceState`) by `/app/office` |
+| `/app/office`, `/app/office/<project>` | the Office; with no project, the remembered one replaces the address |
+| `/app/board`, `/app/board/<project>` | the Board (its row view), the same project rule |
+| `/app/story/<ST-id>` | `Not built yet: Story 39.4` |
+| `/app/run/<run-id>` | `Not built yet: Story 39.5` |
+| `/app/inbox` | the Inbox |
+| `/app/inbox/<KEY>[?project=]` | the Issue screen; the project is `?project=`, else the open inbox row's (`Loading the inbox…` while it loads; with none, the failed inbox reads `error <project>: <msg>`, one per line, when a read failed, else `Not in the inbox: <KEY>`) |
+| `/app/chat` | the engagement Chat screen under the strip `Not built yet: Story 39.3` (the studio chat) |
+| `/app/chat/<engagement-id>[?project=]` | the Chat screen opened on it; the project is `?project=`, else the store's single project for the id, else (once the store's snapshot is in; before it, no project: the screen waits) the remembered chat project |
+| `/app/checkin/<engagement-id>/<n>[?project=]` (`n` ≥ 1) | `Not built yet: Story 39.7` |
+| `/app/status` | the Status screen |
+| `/app/settings` | `Not built yet: Story 39.2` |
+| anything else under `/app` | `No page at <path>` |
+
+- **The rules.** Segments are `decodeURIComponent`-decoded (a bad escape is not found); trailing slashes are dropped;
+  `routePath` encodes each segment and appends `?project=<id>` when the route carries one.
+- **The nav** is Office, Board, Status, Inbox (its count), Chat (its count), Settings; each pushes its path, and the
+  button for the current address is disabled. Issue leaves the nav: an issue is `/app/inbox/<KEY>`. Back and forward
+  (`popstate`) switch screens. A project chosen in the Office or the Board pushes its address; picking an engagement in
+  the Chat pushes `/app/chat/<id>?project=<p>`; an Inbox row pushes `/app/inbox/<KEY>?project=<p>`.
+- **The migration.** At load, `migrateRemembered` reads `tk-studio.web.screen` and `tk-studio.web.issue` once, removes
+  both and carries the screen (`issue` with a stored issue: `/app/inbox/<KEY>?project=<p>`) onto the landing only — a
+  deep link wins. Nothing writes either key again. `tk-studio.office.project` and `tk-studio.web.chat` are kept.
 
 ## Commands (from `apps/studio-web`)
 

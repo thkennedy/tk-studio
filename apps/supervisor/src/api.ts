@@ -110,6 +110,10 @@
  * carrying the requested path and query as `next`, where a successful
  * form sign-in returns (`303`; a `next` that is not a same-origin path returns to `/`). Everything else
  * stays 401 JSON.
+ * Story 39.1: a cookie session's `GET /` with the web built answers `302 → /app/office` (`cache-control: no-store`),
+ * so a signed-in owner (and a form sign-in returning to `/`) lands on the office; the bearer still gets the built
+ * web's index.html, and with no built web both get the read-only page. A signed-out `GET /app/<route>` keeps its
+ * `next`, so a notifier line's link returns to its route after the sign-in. The origin is `env.supervisorOrigin`.
  *
  * Run ids are queue run ids; answers carry `studio_run_id` too. The API never
  * drives or claims a run (drain and the pacer do).
@@ -129,7 +133,7 @@ import { appendChatLineHeld, ChatBusy, chatSince, checkChatBody, dropChatLineHel
 import { afterEngagementInput, CancelRaced, cancelRun, chatDeps, ExternalRunRefused, resumeRun, StartError, submitProject, type AgentsOption } from "./cli";
 import { ResumeRefused, type ResumeAnswer } from "./closeout";
 import { rerunHostLeg, VerifyRefused, type HostLegStarted } from "./hostleg";
-import { apiBind, apiPort, apiToken, checkTlsFiles, notifier, oauthLeftovers, sessionSecret, tlsConfig } from "./env";
+import { apiBind, apiPort, apiToken, checkTlsFiles, notifier, oauthLeftovers, sessionSecret, supervisorOrigin, tlsConfig } from "./env";
 import {
   applyInput, chatPointer, checkCreateBody, checkInputBody, ENGAGEMENT_ID_RE, EngagementCounterInvalid, engagementPath, EngagementRecordInvalid,
   listEngagements, mintEngagementId, newEngagement, readEngagement, TERMINAL_STATES, writeEngagement, type Engagement,
@@ -1143,7 +1147,13 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
       // 405: the allowed methods in the `Allow` header (RFC 9110) and the body alike.
       const allow = (m: string) => json(405, { ok: false, error: "MethodNotAllowed", allow: m }, { allow: m });
       // Story 30.6: the home is the built web's index.html (as `GET /app`); no built web, the read-only page (never a 503).
-      if (path === "/") return method !== "GET" ? allow("GET") : webRoot(deps.web ?? {}) !== null ? await web("/app") : await page(csrf);
+      // Story 39.1: a cookie session lands on the office (`302 → /app/office`); the bearer keeps the index.html.
+      if (path === "/") {
+        if (method !== "GET") return allow("GET");
+        if (webRoot(deps.web ?? {}) === null) return await page(csrf);
+        if (via === "cookie") return new Response(null, { status: 302, headers: { location: "/app/office", "cache-control": "no-store" } });
+        return await web("/app");
+      }
       if (path === "/app" || path.startsWith("/app/")) return method === "GET" ? await web(path) : allow("GET");
       if (path === "/jobs") {
         if (method === "POST") return await postJobs(req);
@@ -1288,7 +1298,8 @@ export function serve(env: Env = process.env, bunServe: BunServe = (o) => Bun.se
   if (tls) checkTlsFiles(tls);
   notifier(env); // Story 22.3: a misconfigured notifier is a named start error (cancels notify from here)
   const queue = Queue.open(env);
-  const origin = tls ? `https://${tls.name}:${port}` : `http://${bind}:${port}`;
+  // Story 39.1: the same value as before on every environment serve accepts (`tlsConfig` refused a partial set).
+  const origin = supervisorOrigin(env)!;
   for (const name of oauthLeftovers(env)) {
     console.warn(`serve: ${name} is set but ignored — the Google and GitHub sign-in is gone (Story 29.1); the first visit creates the account`);
   }

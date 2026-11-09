@@ -919,3 +919,39 @@ describe("Story 34.8: the slice's verdicts per story in the closeout input (AC2)
     expect(input.slices).toEqual([{ story: "41-1-csv-button", engine: "green", assets: "green", playable: "pass", contact_sheet: "/store/s-2/contact-sheet.png" }]);
   });
 });
+
+// Story 39.1: the close-out and its refusal carry the engagement's chat page; the reason keeps the page URL (or the
+// closeout.md path). Each env names the three origin variables explicitly (the fixture spreads `process.env`).
+describe("Story 39.1: the close-out notices' route_url", () => {
+  const TLS = { TK_SUPERVISOR_TLS_NAME: "studio.example.ts.net", TK_SUPERVISOR_BIND: "100.100.1.2", TK_SUPERVISOR_PORT: "8787" };
+  const NO_ORIGIN = { TK_SUPERVISOR_TLS_NAME: "", TK_SUPERVISOR_BIND: "", TK_SUPERVISOR_PORT: "8787" };
+  const URL_ = "https://studio.example.ts.net:8787/app/chat/ENG-001?project=p";
+
+  test("delivered with an origin: route_url is the chat page, the reason keeps the page URL", async () => {
+    const queue = newQueue();
+    await deliveredEngagement(queue);
+    const fx = deps({ prStates: { [PR_1]: "MERGED", [PR_2]: "MERGED" } });
+    fx.deps.env = { ...fx.deps.env, ...TLS };
+    expect(await closeoutPass(queue, fx.deps)).toEqual({ closed: [ENG], refused: [] });
+    expect(fx.notices).toHaveLength(1);
+    expect(fx.notices[0]).toMatchObject({ state: "delivered", reason: `engagement ${ENG} delivered: ${PAGE.url}`, route_url: URL_ });
+  });
+
+  test("a refusal with an origin: route_url is the chat page; with no origin there is none", async () => {
+    const queue = newQueue();
+    await deliveredEngagement(queue);
+    const R1 = "engage refused: NoScope: no _bmad-output/engagements/ENG-001/scope.md";
+    const fx = deps({ prStates: { [PR_1]: "MERGED", [PR_2]: "MERGED" }, lib: () => ({ ok: false, status: "blocked", engagement: ENG, outcome: null, page: null, written: [], reason: R1 }) });
+    fx.deps.env = { ...fx.deps.env, ...TLS };
+    expect(await closeoutPass(queue, fx.deps)).toEqual({ closed: [], refused: [ENG] });
+    expect(fx.notices[0]).toMatchObject({ state: "closeout-refused", reason: `engagement ${ENG} closeout refused: ${R1}`, route_url: URL_ });
+
+    const q2 = newQueue();
+    await deliveredEngagement(q2, { bound: false });
+    const plain = deps({ lib: () => ({ ok: true, status: "complete", engagement: ENG, outcome: "partial", page: null, written: [REPORT] }) });
+    plain.deps.env = { ...plain.deps.env, ...NO_ORIGIN };
+    expect((await closeoutPass(q2, plain.deps)).closed).toEqual([ENG]);
+    expect(plain.notices[0]!.reason).toBe(`engagement ${ENG} partial: ${REPORT}`);
+    expect("route_url" in plain.notices[0]!).toBe(false);
+  });
+});

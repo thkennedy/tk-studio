@@ -10,6 +10,19 @@ owner, names the reason and says what resolves it:
     [~accountid:<owner>] Blocked: <reason>
     Resolves when: <resolves>
     Blocked by: <story's key>          (a dependent's comment only)
+    Open: <origin>/app/inbox/<KEY>     (Story 39.1, when an origin resolves)
+
+Story 39.1: every block comment (`_block_issue`, the one choke point: the
+story's and its dependents', the engagement's questions, cap and ask,
+`validate --fail`'s follow-up and the sweep's decisions) ends with the line
+`Open: <origin>/app/inbox/<KEY>`, `KEY` the commented issue's own key and
+the origin the supervisor's own (`supervisor_origin`: `https://
+<TK_SUPERVISOR_TLS_NAME>:<port>`, else `http://<TK_SUPERVISOR_BIND>:<port>`,
+the port `TK_SUPERVISOR_PORT` else 8787). The skip rules compare bodies
+with that trailing line ignored (`strip_route`), so a re-block skips
+whether the newest comment carries this origin, another or none. With
+no origin (neither variable, or an invalid port) the body is byte-identical
+to before.
 
   uv run track.py block --directory ROOT --story <ST-NNN | N-M-slug>
       --reason TEXT --resolves TEXT [--source run|engagement]
@@ -281,6 +294,7 @@ import os
 import re
 import sys
 import time
+import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -340,6 +354,61 @@ def comment_body(owner: str, reason: str, resolves: str,
     if blocked_by:
         body += f"\nBlocked by: {blocked_by}"
     return body
+
+
+DEFAULT_SUPERVISOR_PORT = 8787
+
+
+def supervisor_origin(env=None) -> str | None:
+    """Story 39.1: the supervisor's own origin (the rule of
+    `apps/supervisor/src/env.ts` `supervisorOrigin`): `https://<TLS_NAME>:
+    <port>` when TK_SUPERVISOR_TLS_NAME is set (trimmed), else `http://
+    <BIND>:<port>`, else None; `<port>` is TK_SUPERVISOR_PORT (1-5 digits,
+    1-65535) else 8787, and an invalid port is None. Never raises."""
+    env = os.environ if env is None else env
+    raw = env.get("TK_SUPERVISOR_PORT")
+    port = DEFAULT_SUPERVISOR_PORT
+    if raw is not None:
+        value = raw.strip()
+        if (not re.fullmatch(r"[0-9]{1,5}", value)
+                or not 1 <= int(value) <= 65535):
+            return None
+        port = int(value)
+    name = (env.get("TK_SUPERVISOR_TLS_NAME") or "").strip()
+    if name:
+        return f"https://{name}:{port}"
+    bind = (env.get("TK_SUPERVISOR_BIND") or "").strip()
+    if bind:
+        return f"http://{bind}:{port}"
+    return None
+
+
+def inbox_route_url(key: str, env=None) -> str | None:
+    """Story 39.1: the web's page for an inbox item, `<origin>/app/inbox/
+    <KEY>` (the key percent-encoded), or None with no origin."""
+    origin = supervisor_origin(env)
+    if origin is None:
+        return None
+    return f"{origin}/app/inbox/{urllib.parse.quote(key, safe='')}"
+
+
+def with_route(body: str, key: str, env=None) -> str:
+    """Story 39.1: the block comment ending `Open: <inbox_route_url>`; the
+    body unchanged with no origin."""
+    url = inbox_route_url(key, env)
+    return body if url is None else f"{body}\nOpen: {url}"
+
+
+_ROUTE_LINE_RE = re.compile(r"\nOpen: \S+\s*\Z")
+
+
+def strip_route(body: str | None) -> str | None:
+    """Story 39.1: the body (stripped) without its trailing `Open: <url>`
+    line, for the skip and repeat compares: a body posted with no origin
+    (or another origin) and the routed one compare equal. None stays None."""
+    if body is None:
+        return None
+    return _ROUTE_LINE_RE.sub("", body.strip()).strip()
 
 
 def newest_agent_comment(client, key: str, owner: str) -> dict | None:
@@ -429,6 +498,10 @@ def _block_issue(client, owner: str, front: dict, key: str, role: str,
     what is still open."""
     entry = {"issue": key, "entity": front["id"], "role": role,
              "transitioned": False, "commented": False}
+    # Story 39.1: the comment ends with the issue's page in the web; the skip
+    # compare ignores that line (`strip_route`), so a re-block skips whether
+    # the newest comment was posted with this origin, another or none.
+    body = with_route(body, key)
     skipped: list[str] = []
     name, _ = jirabackend._current_status(client, key)
     if name == jirabackend.BLOCKED_STATUS:
@@ -448,7 +521,8 @@ def _block_issue(client, owner: str, front: dict, key: str, role: str,
     else:
         entry["transitioned"] = True
     if name == jirabackend.BLOCKED_STATUS and \
-            newest_agent_body(client, key, owner) == body.strip() and \
+            strip_route(newest_agent_body(client, key, owner)) \
+            == strip_route(body) and \
             not (repost_after_owner
                  and owner_after_agent(client, key, owner)):
         skipped.append(f"comment: {key}'s newest agent comment already "
@@ -1538,8 +1612,9 @@ def validate(project_root: Path, issue: str, check: bool = False,
                     (into_resolved or {}).get("created"))
                 resumed = (b_at is not None and r_at is not None
                            and b_at > r_at
-                           and newest_agent_body(client, issue, owner)
-                           != follow_body.strip())
+                           and strip_route(newest_agent_body(
+                               client, issue, owner))
+                           != strip_route(follow_body))
             if not resumed:
                 return refuse(f"{issue}'s live status is {name!r}, not "
                               f"{target!r} — there is no resolution to "

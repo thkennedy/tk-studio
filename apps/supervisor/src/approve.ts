@@ -87,7 +87,7 @@
  *   the run pass  `engagementRunPass`, per engagement its `engagement-run-queued` events link to runs:
  *                - `launched` on a linked run: `applyEvent(launched)` (`approved → in-progress`), once per engagement;
  *                - the cap: `spend.runs_usd >= quote.cap` in `in-progress` → `applyEvent(cap)` (`partial`), one
- *                  notifier line, then the live linked run stopped gracefully (`launch.py stop --graceful`) and the
+ *                  notifier line (Story 39.1: its `route_url` the engagement's chat page when the origin resolves), then the live linked run stopped gracefully (`launch.py stop --graceful`) and the
  *                  engagement's issue blocked `track.py block --engagement --kind cap` with `runs_usd`, `cap`,
  *                  `band85.usd` and `band95.usd`; `partial + go {cap}` (32.1's `raise-cap`) then resubmits;
  *                  `cancel` stops the live run gracefully;
@@ -131,7 +131,7 @@ import {
 } from "./engagement";
 import { notifier, workDir } from "./env";
 import { SLICE_JOB_TYPE } from "./hostverify";
-import { notify as sendNotice, type EndNotice } from "./hygiene";
+import { engagementRoute, notify as sendNotice, routeUrl, type EndNotice } from "./hygiene";
 import { readComments } from "./inbox";
 import { readInbox } from "./office";
 import { runPr } from "./planstatus";
@@ -1312,6 +1312,12 @@ function capReason(record: Engagement): string {
     + `runs_usd: ${record.spend?.runs_usd ?? 0}\ncap: ${q.cap ?? null}\nband85.usd: ${b85 ?? null}\nband95.usd: ${b95 ?? null}`;
 }
 
+/** Story 39.1: a cap or close-out notice's `route_url` (the engagement's chat page), when the origin resolves. */
+export function routeOf(deps: ApproveDeps, project: string, id: string): { route_url?: string } {
+  const url = routeUrl(engagementRoute(project, id), deps.env ?? process.env);
+  return url ? { route_url: url } : {};
+}
+
 export async function defaultNotify(deps: ApproveDeps, notice: EndNotice): Promise<Record<string, unknown>> {
   try {
     const selected = notifier(deps.env ?? process.env);
@@ -1369,6 +1375,7 @@ async function runStep(queue: Queue, deps: ApproveDeps, t: Target, out: Engageme
       const notice: EndNotice = {
         run_id: run?.run_id ?? "", job_id: run?.job_id ?? allLinks.at(-1)!.job, project_id: run?.project_id ?? project, studio_run_id: run?.studio_run_id ?? null,
         state: "partial", reason: `engagement ${id} ${capReason(record).split("\n")[0]}: reply go {cap} or cancel`,
+        ...routeOf(deps, project, id),
       };
       const notify = await (deps.notify ?? ((n: EndNotice) => defaultNotify(deps, n)))(notice).catch((e) => ({ ok: false, error: clip(message(e)) }));
       queue.serviceEvent(CAP_EVENT, { engagement: id, project, run_id: run?.run_id ?? null, runs_usd: runsUsd, cap, notify }, nowIso(deps));

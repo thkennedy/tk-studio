@@ -2356,5 +2356,160 @@ class EngagementDropTests(EngagementTestCase):
         self.assertIn("NoIssue", json.loads(out.getvalue())["reason"])
 
 
+# ---- Story 39.1: the block comment ends with the issue's page in the web
+
+TLS_ORIGIN = {"TK_SUPERVISOR_TLS_NAME": "studio.example.ts.net"}
+TLS_URL = "https://studio.example.ts.net:8787/app/inbox"
+
+
+class Story39_1RouteTests(TrackTestCase):
+    """Story 39.1: every block comment (`_block_issue`) ends `Open: <origin>
+    /app/inbox/<KEY>` when the supervisor's origin resolves; with none the
+    body is byte-identical to before. `SetupTestCase` clears the three
+    origin variables, so each case sets its own."""
+
+    def test_the_story_and_a_dependent_end_with_their_own_inbox_url(self):
+        self.depends("ST-002", "ST-001")
+        with unittest.mock.patch.dict(os.environ, TLS_ORIGIN):
+            result = self.block()
+        self.assert_track_block(result, "complete")
+        self.assertEqual(self.fake.posted, {
+            f"{KEY}-1": [f"{body()}\nOpen: {TLS_URL}/{KEY}-1"],
+            f"{KEY}-2": [f"{body(blocked_by=f'{KEY}-1')}\n"
+                         f"Open: {TLS_URL}/{KEY}-2"]})
+        # the inbox still reads it as a block comment, the head unchanged
+        self.assertTrue(inbox.BLOCK_COMMENT_RE.match(
+            self.fake.posted[f"{KEY}-1"][0]))
+
+    def test_the_bind_and_port_when_no_tls_name(self):
+        env = {"TK_SUPERVISOR_BIND": "100.100.1.2", "TK_SUPERVISOR_PORT": "9000"}
+        with unittest.mock.patch.dict(os.environ, env):
+            self.block()
+        (text,) = self.fake.posted[f"{KEY}-1"]
+        self.assertTrue(text.endswith(
+            f"\nOpen: http://100.100.1.2:9000/app/inbox/{KEY}-1"))
+
+    def test_a_bad_port_and_no_origin_keep_the_old_body(self):
+        env = dict(TLS_ORIGIN, TK_SUPERVISOR_PORT="70000")
+        with unittest.mock.patch.dict(os.environ, env):
+            self.block()
+        self.assertEqual(self.fake.posted[f"{KEY}-1"], [body()])
+        self.fake.status[f"{KEY}-1"] = "In Progress"
+        self.block()
+        self.assertEqual(self.fake.posted[f"{KEY}-1"], [body(), body()])
+        self.assertNotIn("Open:", json.dumps(self.fake.posted))
+
+    def test_a_re_block_with_the_same_routed_body_is_skipped(self):
+        with unittest.mock.patch.dict(os.environ, TLS_ORIGIN):
+            self.block()
+            again = self.block()
+        self.assert_track_block(again, "complete")
+        self.assertEqual(len(self.fake.posted[f"{KEY}-1"]), 1)
+        (entry,) = again["issues"]
+        self.assertEqual((entry["transitioned"], entry["commented"]),
+                         (False, False))
+        self.assertTrue(any("already says this" in n
+                            for n in entry["skipped"]))
+
+    def test_a_routed_re_block_after_an_unrouted_body_is_skipped(self):
+        """The skip compare ignores the trailing `Open:` line: a body posted
+        with no origin (a manual run, before the deploy) is not posted again
+        once an origin resolves."""
+        self.block()
+        self.assertEqual(self.fake.posted[f"{KEY}-1"], [body()])
+        with unittest.mock.patch.dict(os.environ, TLS_ORIGIN):
+            again = self.block()
+        self.assert_track_block(again, "complete")
+        self.assertEqual(self.fake.posted[f"{KEY}-1"], [body()])
+        (entry,) = again["issues"]
+        self.assertFalse(entry["commented"])
+        self.assertTrue(any("already says this" in n
+                            for n in entry["skipped"]))
+
+    def test_strip_route(self):
+        self.assertEqual(track.strip_route(f"x\nOpen: {TLS_URL}/{KEY}-1\n"),
+                         "x")
+        self.assertEqual(track.strip_route(" x "), "x")
+        self.assertEqual(track.strip_route("x\nOpen: a\ny"), "x\nOpen: a\ny")
+        self.assertIsNone(track.strip_route(None))
+
+    def test_supervisor_origin_rows(self):
+        origin = track.supervisor_origin
+        self.assertEqual(origin({"TK_SUPERVISOR_TLS_NAME": " studio.example.ts.net ",
+                                 "TK_SUPERVISOR_BIND": "100.100.1.2"}),
+                         "https://studio.example.ts.net:8787")
+        self.assertEqual(origin({"TK_SUPERVISOR_BIND": "100.100.1.2",
+                                 "TK_SUPERVISOR_PORT": "9000"}),
+                         "http://100.100.1.2:9000")
+        self.assertEqual(origin({"TK_SUPERVISOR_TLS_NAME": "  ",
+                                 "TK_SUPERVISOR_BIND": " "}), None)
+        self.assertIsNone(origin({}))
+        for port in ("0", "65536", "x", "", "123456", "\u0661"):
+            with self.subTest(port=port):
+                self.assertIsNone(origin({"TK_SUPERVISOR_TLS_NAME": "n",
+                                          "TK_SUPERVISOR_PORT": port}))
+        self.assertEqual(origin({"TK_SUPERVISOR_TLS_NAME": "n",
+                                 "TK_SUPERVISOR_PORT": " 8443 "}),
+                         "https://n:8443")
+        # os.environ by default
+        with unittest.mock.patch.dict(os.environ, TLS_ORIGIN):
+            self.assertEqual(origin(), "https://studio.example.ts.net:8787")
+            self.assertEqual(track.inbox_route_url("A B/1"),
+                             f"{TLS_URL}/A%20B%2F1")
+        self.assertIsNone(track.inbox_route_url(f"{KEY}-1"))
+        self.assertEqual(track.with_route("x", f"{KEY}-1"), "x")
+
+
+class Story39_1EngagementRouteTests(EngagementTestCase):
+    def test_the_engagement_questions_comment_ends_with_its_issue_url(self):
+        with unittest.mock.patch.dict(os.environ, TLS_ORIGIN):
+            result = self.block_eng()
+            self.assert_track_block(result, "complete")
+            key = f"{KEY}-100"
+            self.assertEqual(self.fake.posted[key],
+                             [f"{engagement_body(QUESTIONS)}\n"
+                              f"Open: {TLS_URL}/{key}"])
+            # the same routed body again: skipped
+            again = self.block_eng()
+        self.assertEqual(again["issues"][0]["commented"], False)
+        self.assertEqual(len(self.fake.posted[key]), 1)
+
+
+class Story39_1ValidateRouteTests(ValidateTestCase):
+    def test_a_fail_retry_after_the_routed_follow_up_landed_is_refused(self):
+        """The resume rule compares the newest agent comment with the routed
+        follow-up, so a landed follow-up is not posted or recorded twice."""
+        with unittest.mock.patch.dict(os.environ, TLS_ORIGIN):
+            self.fake.force[("POST", f"/issue/{self.ISSUE}/comment")] = (
+                502, "bad gateway")
+            self.validate(failed=True, follow_up="x")
+            del self.fake.force[("POST", f"/issue/{self.ISSUE}/comment")]
+            result = self.validate(failed=True, follow_up="x")
+            self.assert_validate_block(result, "complete")
+            (posted,) = self.fake.posted[self.ISSUE]
+            self.assertTrue(posted.endswith(f"\nOpen: {TLS_URL}/{self.ISSUE}"))
+            again = self.validate(failed=True, follow_up="x")
+        self.assert_validate_block(again, "blocked")
+        self.assertEqual(len(self.fake.posted[self.ISSUE]), 1)
+        self.assertEqual(len(self.lines()), 1)
+
+
+    def test_a_routed_fail_retry_after_an_unrouted_follow_up_is_refused(self):
+        """The resume rule ignores the trailing `Open:` line: a follow-up
+        that landed with no origin is not posted again once one resolves."""
+        self.fake.force[("POST", f"/issue/{self.ISSUE}/comment")] = (
+            502, "bad gateway")
+        self.validate(failed=True, follow_up="x")
+        del self.fake.force[("POST", f"/issue/{self.ISSUE}/comment")]
+        result = self.validate(failed=True, follow_up="x")
+        self.assert_validate_block(result, "complete")
+        (posted,) = self.fake.posted[self.ISSUE]
+        self.assertNotIn("Open:", posted)
+        with unittest.mock.patch.dict(os.environ, TLS_ORIGIN):
+            again = self.validate(failed=True, follow_up="x")
+        self.assert_validate_block(again, "blocked")
+        self.assertEqual(len(self.fake.posted[self.ISSUE]), 1)
+        self.assertEqual(len(self.lines()), 1)
+
 if __name__ == "__main__":
     unittest.main()

@@ -161,9 +161,9 @@ describe("GET /app (AC1)", () => {
     expect(await cookie.json()).toEqual({ ok: false, error: "Unauthorized" });
   });
 
-  test("Story 30.6: GET / with a session is the web's index.html (no-store), as GET /app — the cookie and the bearer alike", async () => {
+  test("Story 30.6: GET / with the bearer is the web's index.html (no-store), as GET /app (Story 39.1: a cookie session 302s, below)", async () => {
     const fx = fixture();
-    for (const { init } of await auths(fx)) {
+    for (const { init } of (await auths(fx)).filter((a) => a.label === "bearer")) {
       const res = await fx.call("GET", "/", init);
       expect(res.status).toBe(200);
       expect(res.headers.get("content-type")).toBe("text/html; charset=utf-8");
@@ -394,6 +394,72 @@ describe("the sign-in's return path (AC1)", () => {
     const html = signInPage({ mode: "signin", next: '/app/"><script>' });
     expect(html).toContain('value="/app/&quot;&gt;&lt;script&gt;"');
     expect(html).not.toContain("<script>");
+  });
+});
+
+describe("Story 39.1: the home lands on /app/office; a notifier link returns to its route after the sign-in", () => {
+  const TABLE = [
+    "/app/office", "/app/office/p", "/app/board/p", "/app/story/ST-174", "/app/run/q-1", "/app/inbox", "/app/inbox/TKS-3?project=p", "/app/chat",
+    "/app/chat/ENG-001?project=p", "/app/checkin/ENG-001/2?project=p", "/app/status", "/app/settings",
+  ];
+
+  test("a cookie GET / is 302 → /app/office, no-store; the bearer keeps index.html; no built web is the page for both", async () => {
+    const fx = fixture();
+    const [cookie, bearer] = await auths(fx);
+    const res = await fx.call("GET", "/", cookie!.init);
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe("/app/office");
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(await res.text()).toBe("");
+    const index = await fx.call("GET", "/", bearer!.init);
+    expect(index.status).toBe(200);
+    expect(await index.text()).toBe(INDEX);
+    const unbuilt = fixture({ built: false });
+    for (const { init } of await auths(unbuilt)) {
+      const home = await unbuilt.call("GET", "/", init);
+      expect(home.status).toBe(200);
+      expect(await home.text()).toContain("The web is not built");
+    }
+  });
+
+  test("the sign-in chain: POST /auth/account (no next) → 303 / → 302 /app/office", async () => {
+    const fx = fixture();
+    const created = await fx.call("POST", "/auth/account", form({ username: USER, password: PASSWORD }));
+    expect(created.status).toBe(303);
+    expect(created.headers.get("location")).toBe("/");
+    const cookie = created.headers.getSetCookie()[0]!.split(";")[0]!;
+    const home = await fx.call("GET", created.headers.get("location")!, { cookie });
+    expect(home.status).toBe(302);
+    expect(home.headers.get("location")).toBe("/app/office");
+    // signed out, GET / stays the sign-in page with no next
+    const root = await fx.call("GET", "/");
+    expect(root.status).toBe(401);
+    expect(await root.text()).not.toContain('name="next"');
+  });
+
+  test("signed out, a notifier link is the sign-in page with its route as next, and the sign-in returns to it", async () => {
+    const fx = fixture();
+    await cookieSession(fx); // the account exists: the sign-in form
+    for (const path of ["/app/run/q-1", "/app/chat/ENG-001?project=p"]) {
+      const res = await fx.call("GET", path);
+      expect(res.status).toBe(401);
+      const hidden = `<input type="hidden" name="next" value="${path.replace("&", "&amp;")}">`;
+      expect(await res.text()).toContain(`<form method="post" action="/auth/signin">${hidden}`);
+      const signedIn = await fx.call("POST", "/auth/signin", form({ username: USER, password: PASSWORD, next: path }));
+      expect(signedIn.status).toBe(303);
+      expect(signedIn.headers.get("location")).toBe(path);
+    }
+  });
+
+  test("every path of the route table answers index.html (the single-page fallback), the cookie and the bearer alike", async () => {
+    const fx = fixture();
+    for (const { init } of await auths(fx)) {
+      for (const path of TABLE) {
+        const res = await fx.call("GET", path, init);
+        expect(res.status).toBe(200);
+        expect(await res.text()).toBe(INDEX);
+      }
+    }
   });
 });
 

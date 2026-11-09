@@ -14,6 +14,9 @@
  *              notification — ntfy (a POST to the topic URL) or Telegram (Bot API `sendMessage`),
  *              chosen by TK_SUPERVISOR_NOTIFY — naming the run, its state, its reason and its PR
  *              (a GitHub pull-request URL among the status block's `artifacts[]`) when there is one.
+ *              Story 39.1: and, when the supervisor's origin resolves (`supervisorOrigin`: TK_SUPERVISOR_TLS_NAME,
+ *              else the bind), the absolute URL of the page that answers it (`route_url`, `open: <url>`, the last
+ *              line): `/app/run/<id>` for a run's end; a cap or close-out carries `/app/chat/<id>?project=<p>`.
  *   transcript every terminal host run's session transcript is copied to TK_SUPERVISOR_TRANSCRIPT_BACKUP
  *              in the nightly layout (`<backup>/<slug>/<sid>.jsonl` + `<sid>/subagents/`), so the
  *              Story 21.6 restore finds it; an sbx transcript is VM-resident (skipped, recorded).
@@ -30,7 +33,7 @@
  */
 import { cpSync, copyFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
 import { basename, dirname, join, posix, win32 } from "node:path";
-import { notifier, underBunTest, WorkDirMissing, workDir, type Notifier } from "./env";
+import { notifier, supervisorOrigin, underBunTest, WorkDirMissing, workDir, type Notifier } from "./env";
 import { canonicalPr } from "./planseams";
 import type { Queue, QueueRun } from "./queue";
 import { runProcess, type RunResult } from "./server";
@@ -146,6 +149,19 @@ export interface EndNotice {
   state: string; reason: string | null; pr?: string;
   /** Story 35.7: a sweep run's line content (`<landed>/<n> bundles; blocked: …; decisions: …`), from its ending event. */
   sweep?: string;
+  /** Story 39.1: the absolute URL of the page that answers the line (`routeUrl`), when the origin resolves. */
+  route_url?: string;
+}
+
+/** Story 39.1: a run's page. */
+export const runRoute = (runId: string): string => `/app/run/${encodeURIComponent(runId)}`;
+/** Story 39.1: an engagement's chat page (engagement ids are per project, so the project rides along). */
+export const engagementRoute = (project: string, id: string): string =>
+  `/app/chat/${encodeURIComponent(id)}?project=${encodeURIComponent(project)}`;
+/** Story 39.1: `path` under the supervisor's own origin, or undefined when none resolves. */
+export function routeUrl(path: string, env: Env = process.env): string | undefined {
+  const origin = supervisorOrigin(env);
+  return origin === null ? undefined : `${origin}${path}`;
 }
 
 /** The notice of a terminal queue run: the PR from its ending event's detail (`mirror` records it). */
@@ -187,12 +203,14 @@ function clipBytes(s: string, budget: number): string {
 /** The notification text: the run, its state, its reason, and its PR when there is one — within
  * NOTICE_MAX_BYTES. Only the reason is ever cut (ending with TRUNCATED_MARKER); the run id, the
  * state and the PR are kept whole. Story 35.7: a sweep run adds one `sweep: …` line before the PR — omitted only
- * when the reason line as composed (after any clipping) already carries `sweep: <notice>` verbatim. */
+ * when the reason line as composed (after any clipping) already carries `sweep: <notice>` verbatim. Story 39.1: a
+ * notice with a `route_url` ends `open: <route_url>`, after the PR, kept whole. */
 export function noticeText(n: EndNotice): string {
   const head = `supervisor: run ${n.run_id} ended ${n.state}`;
   const job = `job: ${n.job_id}${n.project_id ? ` (project ${n.project_id})` : ""}${n.studio_run_id ? `, studio run ${n.studio_run_id}` : ""}`;
   const reason = n.reason ?? "none";
-  const prLine = n.pr ? [`PR: ${n.pr}`] : [];
+  // Story 39.1: the page's URL is the last line, kept whole like the PR.
+  const prLine = [...(n.pr ? [`PR: ${n.pr}`] : []), ...(n.route_url ? [`open: ${n.route_url}`] : [])];
   const build = (tail: string[]): { text: string; reasonLine: string } => {
     const compose = (jobLine: string, r: string) => [head, ...(jobLine ? [jobLine] : []), `reason: ${r}`, ...tail].join("\n");
     const full = compose(job, reason);
@@ -368,9 +386,10 @@ async function notifyEnd(queue: Queue, run: QueueRun, env: Env, note: Note, fetc
   catch (e) { note("notify-failed", { error: message(e) }); } // a named error: it names the variable, never a value
   if (selected?.kind === "none") note("notify-skipped", { why: "no notifier configured (TK_SUPERVISOR_NOTIFY is unset)" });
   else if (selected) {
-    const notice = endNotice(queue, run);
+    const routed = routeUrl(runRoute(run.run_id), env);
+    const notice: EndNotice = { ...endNotice(queue, run), ...(routed ? { route_url: routed } : {}) };
     const sent = await notify(selected, notice, fetchFn);
-    if (sent.ok) note("notified", { via: sent.via, state: notice.state, ...(notice.pr ? { pr: notice.pr } : {}) });
+    if (sent.ok) note("notified", { via: sent.via, state: notice.state, ...(notice.pr ? { pr: notice.pr } : {}), ...(notice.route_url ? { route_url: notice.route_url } : {}) });
     else note("notify-failed", { via: sent.via, error: sent.error });
   }
 }

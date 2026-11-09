@@ -2045,3 +2045,33 @@ describe("DW-46, DW-50: the served checkout pulled fast-forward-only before the 
     expect(fx.submitted).toEqual([]);
   }, 60_000);
 });
+
+// Story 39.1: the cap's notifier line carries the engagement's chat page. Each env names the three origin variables
+// explicitly (an empty string is unset): the fixture spreads `process.env`, which a host may set them in.
+describe("Story 39.1: the cap notice's route_url", () => {
+  const TLS = { TK_SUPERVISOR_TLS_NAME: "studio.example.ts.net", TK_SUPERVISOR_BIND: "100.100.1.2", TK_SUPERVISOR_PORT: "8787" };
+  const NO_ORIGIN = { TK_SUPERVISOR_TLS_NAME: "", TK_SUPERVISOR_BIND: "", TK_SUPERVISOR_PORT: "8787" };
+
+  test("an origin: route_url is <origin>/app/chat/ENG-001?project=p, the reason unchanged", async () => {
+    const queue = newQueue();
+    const { run } = linkedRoot(queue, { state: "in-progress", runsUsd: 41.5 });
+    const fx = approveDeps(queue);
+    fx.deps.env = { ...fx.deps.env, ...TLS };
+    await launch(queue, run);
+    expect((await engagementRunPass(queue, fx.deps)).capped).toEqual([ENG]);
+    expect(fx.notices).toHaveLength(1);
+    expect(fx.notices[0]!.route_url).toBe("https://studio.example.ts.net:8787/app/chat/ENG-001?project=p");
+    expect(fx.notices[0]!.reason).toBe(`engagement ${ENG} reached its cap: runs_usd $41.5 of cap $40: reply go {cap} or cancel`);
+  });
+
+  test("no origin: no route_url", async () => {
+    const queue = newQueue();
+    const { run } = linkedRoot(queue, { state: "in-progress", runsUsd: 41.5 });
+    const fx = approveDeps(queue);
+    fx.deps.env = { ...fx.deps.env, ...NO_ORIGIN };
+    await launch(queue, run);
+    expect((await engagementRunPass(queue, fx.deps)).capped).toEqual([ENG]);
+    expect(fx.notices).toHaveLength(1);
+    expect("route_url" in fx.notices[0]!).toBe(false);
+  });
+});

@@ -632,3 +632,17 @@
 - What no longer holds: Story 38.7 AC3, "the follow-up-review entries (DW-145, 152, 156, 158, 163, 181) stay `open (owner's decision …)`", and the handoff list naming "the fourth sweep's `max_runs` once 38.3 lands" as owed.
 - Suggested adjustment: none needed to run. The 38-6 gate absorbed both into 38-7's invoke_dev_with and plan: the entries stay byte-unchanged as resolved, recorded in a DRIFT line, and the list names Jira tasks. A `bmad-correct-course` of the epics.md wording is optional, for the record.
 - Status: open — operator note, no pause
+
+## 39-3-the-studio-chat — scope: stories — from 39-1-the-web-has-addresses — 2026-11-09
+
+- What changed: 39.1 mounts today's `ChatScreen` (the engagement picker) at `/app/chat` under the strip `PLACEHOLDER.chat`. `ChatScreen` takes `open`/`onOpen`, and its project and engagement resolve through `screen.ts` `engagementRefFor`, `chatOpenState` and `chatProjectCheck`. A project-less `/app/chat/<id>` waits until the store's engagements snapshot arrives. `navActive` keys on the screen name. `App.tsx` navigates with `go(route, replace)` / `router.navigate(path)`.
+- What no longer holds: plans/39-3.md:154 "`/app/chat` renders \"Not built yet: Story 39.3\" until this story" and :150 "`ChatScreen.tsx` … stays at `/app/chat/<id>`, unchanged" (it changed in 39.1).
+- Suggested adjustment: At `/app/chat`, replace the strip and the ChatScreen mount with `StudioChatScreen`. Keep `ChatScreen` at `/app/chat/<id>` and keep its 39.1 resolution helpers and pins as they are: do not reorder `engagementRefFor`'s fallback. Once `/app/chat` never opens an engagement in `ChatScreen`, flip the `chatOpenState` "keeps the project and opens none" pin and the PLACEHOLDER.chat pin in `screen.test.ts`, and name both flips in the spec. Navigate through 39.1's `router.navigate`.
+- Status: closed — applied to the unstarted entry's invoke_dev_with by the 39-1 gate session (2026-11-09)
+
+## 39-4-the-kanban-and-the-story — scope: stories — from 39-1-the-web-has-addresses — 2026-11-09
+
+- What changed: 39.1's `BoardScreen` already takes `project` and `onProject(p, replace)` from the `/app/board/<project>` address. `addressProject` (in `screen.ts`) remembers a served address project and replaces an unserved one by `rememberedProject(projects) ?? projects[0]`. `navActive` keys on the screen name. `/app/story/<id>` is `PLACEHOLDER.story`.
+- What no longer holds: plans/39-4.md:351 "`BoardScreen.tsx` (modify): the project from the route" (already done by 39.1).
+- Suggested adjustment: Keep 39.1's `project`/`onProject`/`addressProject` flow in `BoardScreen` and add only the `?view=`/`?epic=` toggles and the kanban default. A toggle must preserve the address project, using replace for a view change. `StoryScreen`'s project fallback reuses `rememberedProject`, as planned. Flip the `PLACEHOLDER.story` pin in `screen.test.ts` and name the flip in the spec.
+- Status: closed — applied to the unstarted entry's invoke_dev_with by the 39-1 gate session (2026-11-09)

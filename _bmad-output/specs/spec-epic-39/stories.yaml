@@ -84,6 +84,17 @@
     executor spec as `stories/39-3-the-studio-chat-spec.md` in the spec folder; the
     engine resolves it by the glob `39-3-the-studio-chat-*.md`, and a file named
     `39-3-the-studio-chat.md` is read as pending (loop deficiency 1, story 21-6).
+    Replan (39-1 gate, 2026-11-09): 39.1 mounts today's ChatScreen (the engagement
+    picker) at `/app/chat` under the `PLACEHOLDER.chat` strip, not a bare placeholder.
+    ChatScreen takes `open`/`onOpen`, and its project and engagement resolve through
+    `screen.ts` `engagementRefFor` (a project-less `/app/chat/<id>` waits for the
+    store's engagements snapshot), `chatOpenState` and `chatProjectCheck`. `navActive`
+    keys on the screen name. Mount StudioChatScreen at `/app/chat` in place of the
+    strip and the ChatScreen. Keep ChatScreen and those helpers as they are at
+    `/app/chat/<id>`, and do not reorder `engagementRefFor`'s fallback. Flip the
+    `PLACEHOLDER.chat` pin and the `chatOpenState` pin "`/app/chat` keeps the project
+    and opens none" in `screen.test.ts`, and name both in the spec. Navigate through
+    39.1's `router.navigate`; build no second router.
 
 - id: "39-4-the-kanban-and-the-story"
   title: "The Kanban and the Story"
@@ -110,7 +121,13 @@
     executor spec as `stories/39-4-the-kanban-and-the-story-spec.md` in the spec folder;
     the engine resolves it by the glob `39-4-the-kanban-and-the-story-*.md`, and a file
     named `39-4-the-kanban-and-the-story.md` is read as pending (loop deficiency 1,
-    story 21-6).
+    story 21-6). Replan (39-1 gate, 2026-11-09): 39.1's BoardScreen already takes
+    `project` and `onProject(p, replace)` from `/app/board/<project>`, and
+    `addressProject` (`screen.ts`) remembers a served address project and replaces an
+    unserved one. Keep that flow and add only the `?view=`/`?epic=` toggles and the
+    kanban default. A toggle preserves the address project, using replace for a view
+    change. Flip the `PLACEHOLDER.story` pin in `screen.test.ts` and name the flip in
+    the spec.
 
 - id: "39-5-the-runs-timeline-and-the-progress-in-view"
   title: "The Run's Timeline and the Progress in View"

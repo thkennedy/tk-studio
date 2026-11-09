@@ -612,6 +612,13 @@ describe("Story 32.3: review fixes (lost re-block, late owner comments, close re
     expect(parseAnswers("scope: Large\n> quoting you:\nscope: How big is the first cut?", QUESTIONS)).toEqual({ scope: "Large" });
   });
 
+  test("Story 39.1: a pasted block comment's `Open: <url>` line answers nothing, even for a question id'd `open`", () => {
+    const qs = [{ id: "open", text: "Open the beta to everyone?", options: [{ label: "Yes" }, { label: "No", default: true }], impact: "Who can sign up." }];
+    const pasted = "Blocked: ENG-001 needs 1 answer(s)\nopen: Open the beta to everyone?\n- Yes\n- No (default)\nImpact: Who can sign up.\nOpen: https://studio.example.ts.net:8787/app/inbox/TKS-100";
+    expect(parseAnswers(pasted, qs)).toEqual({});
+    expect(parseAnswers("open: yes", qs)).toEqual({ open: "Yes" });
+  });
+
   test("finding 5: a pasted block comment through the pass applies nothing and re-blocks", async () => {
     const { root, queue, uv, count } = await engagementWith();
     syncBack(root, [agentComment("c1", 2), ownerComment("c2", 3, "scope: How big is the first cut?\ndb: Which database?")]);

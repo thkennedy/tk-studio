@@ -13,43 +13,52 @@
 // Story 32.7: the Chat screen joins the switch. Its nav count is the office store's engagements (snapshot +
 // `office.engagement` deltas) in `awaiting-answers` or `quoted`, across projects (none: no count, as the Inbox); the
 // same rows are passed to the Chat screen, which refetches its list and open record when they change.
-import { useEffect, useState, useSyncExternalStore } from "react";
+// Story 39.1: the web has addresses (addendum §3.3). The screen is the URL under `/app` (`screen.ts`'s route table,
+// read through one module-level router over the History API with `useSyncExternalStore`): the nav pushes its path,
+// back and forward switch screens, `/app` (and a client-side `/`) is replaced by `/app/office`, the screens not built
+// yet show "Not built yet: Story 39.N", and `/app/chat` keeps the engagement Chat screen under that strip. The two
+// remembered keys (`tk-studio.web.screen`, `tk-studio.web.issue`) are migrated once at load and never written again.
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { createOfficeStore, LIVE_RUN_STATES } from "./live/store";
 import { openOfficeStream } from "./live/stream";
 import { BoardScreen } from "./board/BoardScreen";
 import { ChatScreen } from "./chat/ChatScreen";
-import { chatNavCount } from "./chat/model";
+import { chatNavCount, rememberedEngagement } from "./chat/model";
 import { InboxScreen, useInbox } from "./inbox/InboxScreen";
 import { navCount } from "./inbox/model";
 import { IssueScreen } from "./issue/IssueScreen";
-import { rememberedIssue, rememberIssue, type IssueRef } from "./issue/model";
 import { OfficeScreen, type CanvasStats } from "./office/OfficeScreen";
-import { rememberedScreen, rememberScreen, SCREENS, type Screen } from "./screen";
+import {
+  createRouter, engagementRefFor, isLanding, issueRefFor, migrateRemembered, NAV, navActive, notFoundText, PLACEHOLDER, routePath, type Route,
+} from "./screen";
 import { StatusScreen } from "./status/StatusScreen";
 
 /** The tab's one store (module-level: it outlives StrictMode's remount, so the view is never cleared). */
 const officeStore = createOfficeStore();
+/** The tab's one router (module-level, beside the store); the remembered screen is carried once onto the landing. */
+const router = createRouter(window);
+const carried = migrateRemembered();
+if (carried !== null && isLanding(router.current().route)) router.navigate(carried, { replace: true });
 const STREAM_LABEL = { live: "stream live", connecting: "connecting", reconnecting: "reconnecting" } as const;
-const SCREEN_LABEL: Record<Screen, string> = { office: "Office", board: "Board", status: "Status", inbox: "Inbox", issue: "Issue", chat: "Chat" };
+const font = "12px ui-monospace, Menlo, Consolas, monospace";
+const pageText = { position: "absolute", inset: 0, padding: "48px 16px 16px", font: "13px/1.4 ui-monospace, Menlo, Consolas, monospace", color: "#e8e8e8", background: "#161616" } as const;
+
+const go = (route: Route, replace = false) => router.navigate(routePath(route), { replace });
 
 export function App() {
   const [hud, setHud] = useState<CanvasStats>({ zoom: 0, ratio: window.devicePixelRatio || 1, fps: 0 });
   const live = useSyncExternalStore(officeStore.subscribe, officeStore.getState);
-  const [screen, setScreenState] = useState<Screen>(() => rememberedScreen());
-  const setScreen = (s: Screen) => {
-    setScreenState(s);
-    rememberScreen(s);
-  };
+  const { route, path } = useSyncExternalStore(router.subscribe, router.current);
   const inbox = useInbox(officeStore);
   const count = navCount(inbox.rows);
   const chatCount = chatNavCount(live.view?.engagements);
-  const [issue, setIssue] = useState<IssueRef | null>(() => rememberedIssue());
-  const openIssue = (project: string, key: string) => {
-    const ref = { project, key };
-    setIssue(ref);
-    rememberIssue(ref);
-    setScreen("issue");
-  };
+  const openIssue = (project: string, key: string) => go({ name: "issue", key, project });
+  // `/app/chat/<id>`'s engagement (`?project=`, else the store's single project for the id, else, once the store's
+  // snapshot is in, the remembered one; before the snapshot no project, so the Chat screen waits).
+  const resolved = route.name === "engagement" ? engagementRefFor(route, live.view?.engagements, rememberedEngagement()?.project ?? null) : null;
+  const openId = resolved?.id ?? null;
+  const openProject = resolved?.project ?? null;
+  const open = useMemo(() => (openId === null ? null : { id: openId, project: openProject }), [openId, openProject]);
 
   // One EventSource per mount, closed in the cleanup: StrictMode's double mount leaves one open.
   useEffect(() => {
@@ -59,25 +68,36 @@ export function App() {
 
   return (
     <>
-      {screen === "office" ? (
-        <OfficeScreen store={officeStore} onStats={setHud} />
-      ) : screen === "board" ? (
-        <BoardScreen store={officeStore} />
-      ) : screen === "inbox" ? (
+      {route.name === "office" ? (
+        <OfficeScreen store={officeStore} onStats={setHud} project={route.project} onProject={(p, replace) => go({ name: "office", project: p }, replace)} />
+      ) : route.name === "board" ? (
+        <BoardScreen store={officeStore} project={route.project} onProject={(p, replace) => go({ name: "board", project: p }, replace)} />
+      ) : route.name === "inbox" ? (
         <InboxScreen rows={inbox.rows} errors={inbox.errors} loaded={inbox.loaded} onOpen={openIssue} />
-      ) : screen === "issue" ? (
-        <IssueScreen issue={issue} />
-      ) : screen === "chat" ? (
-        <ChatScreen engagements={live.view?.engagements} />
-      ) : (
+      ) : route.name === "issue" ? (
+        <IssueRoute route={route} rows={inbox.rows} errors={inbox.errors} loaded={inbox.loaded} />
+      ) : route.name === "chat" || route.name === "engagement" ? (
+        <>
+          <ChatScreen engagements={live.view?.engagements} open={open} onOpen={(ref) => go({ name: "engagement", id: ref.id, project: ref.project })} onClose={(replace) => go({ name: "chat" }, replace)} />
+          {route.name === "chat" && (
+            <div style={{ position: "fixed", top: 8, left: "50%", transform: "translateX(-50%)", padding: "4px 8px", font, color: "#e0b040", background: "rgba(0, 0, 0, 0.6)", borderRadius: 4, zIndex: 2 }}>
+              {PLACEHOLDER.chat}
+            </div>
+          )}
+        </>
+      ) : route.name === "status" ? (
         <StatusScreen store={officeStore} />
+      ) : route.name === "story" || route.name === "run" || route.name === "checkin" || route.name === "settings" ? (
+        <div style={pageText}>{PLACEHOLDER[route.name]}</div>
+      ) : (
+        <div style={pageText}>{notFoundText(route.path)}</div>
       )}
       <nav style={{ position: "fixed", bottom: 8, left: 8, display: "flex", gap: 4, zIndex: 2 }}>
-        {SCREENS.map((s) => (
-          <button key={s} type="button" onClick={() => setScreen(s)} disabled={s === screen} style={{ font: "12px ui-monospace, Menlo, Consolas, monospace" }}>
-            {SCREEN_LABEL[s]}
-            {s === "inbox" && count !== null ? ` (${count})` : ""}
-            {s === "chat" && chatCount !== null ? ` (${chatCount})` : ""}
+        {NAV.map((n) => (
+          <button key={n.path} type="button" onClick={() => router.navigate(n.path)} disabled={navActive(route, n)} style={{ font }}>
+            {n.label}
+            {n.count === "inbox" && count !== null ? ` (${count})` : ""}
+            {n.count === "chat" && chatCount !== null ? ` (${chatCount})` : ""}
           </button>
         ))}
       </nav>
@@ -104,4 +124,16 @@ export function App() {
       </div>
     </>
   );
+}
+
+/** `/app/inbox/<KEY>`: the Issue screen once the project is known (`?project=`, else the inbox row's; once resolved for
+ * the key it is kept while the route stays on it, so an answered issue whose row leaves the inbox stays open). */
+function IssueRoute({ route, rows, errors, loaded }: { route: { key: string; project: string | null }; rows: readonly { project: string; key: string }[]; errors: readonly string[]; loaded: boolean }) {
+  const kept = useRef<{ key: string; project: string } | null>(null);
+  const r = issueRefFor(route, rows, loaded, errors, kept.current?.key === route.key ? kept.current.project : null);
+  const project = "ref" in r ? r.ref.project : null;
+  if (project !== null) kept.current = { key: route.key, project };
+  const issue = useMemo(() => (project !== null ? { project, key: route.key } : null), [project, route.key]);
+  if (!("ref" in r)) return <div style={{ ...pageText, whiteSpace: "pre-wrap" }}>{r.text}</div>;
+  return <IssueScreen issue={issue} />;
 }

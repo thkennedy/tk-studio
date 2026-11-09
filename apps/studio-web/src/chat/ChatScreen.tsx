@@ -9,6 +9,13 @@
 // answered (read again when the project changes) and is disabled without it. Refetched on focus and on
 // `visibilitychange` to visible, and when the office store's `office.engagement` rows for the project change (the
 // `engagements` prop), never on a timer. The rules are in `model.ts`, the stream in `stream.ts`.
+// Story 39.1: the open engagement is the address's (`/app/chat/<id>[?project=]`, the `open` prop), which seeds the
+// project and the engagement and sets them again when it changes (back, forward); with none (`/app/chat`) the
+// remembered project is shown with no engagement open. Picking an engagement (the list, a created one) calls
+// `onOpen`, which pushes its address; nothing calls it on mount. Choosing another project (push), or the reset of an
+// unserved one (replace), while the address names an engagement calls `onClose`, which goes to `/app/chat`. An address
+// engagement whose project is not resolved yet (no `?project=`, the store's snapshot not in) opens under no project and
+// is neither reset nor closed: it opens once the store names its project (`open` changes).
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { OfficeEngagement } from "../live/store";
 import { fetchInbox } from "../inbox/model";
@@ -18,6 +25,7 @@ import {
   goInput, mergeLines, postChat, postEngagement, postInput, proposalButtons, questionCards, questionInput, quoteView, rememberedEngagement,
   rememberEngagement, reviseInput, scopeHref, stateNote, stepper, type ChatLine, type Engagement, type Input,
 } from "./model";
+import { chatOpenState, chatProjectCheck } from "../screen";
 import { openChatStream, type ChatStreamStatus } from "./stream";
 
 const font = "13px/1.4 ui-monospace, Menlo, Consolas, monospace";
@@ -26,16 +34,23 @@ const box = { width: "100%", boxSizing: "border-box", font, background: "#101010
 const section = { marginTop: 12, padding: 8, border: "1px solid #2a2a2a", borderRadius: 4 } as const;
 const STEP_COLOR = { done: "#7fd18a", current: "#e0b040", left: "#ff8080", todo: "#666" } as const;
 
-export function ChatScreen({ engagements }: { engagements?: readonly OfficeEngagement[] } = {}) {
+export function ChatScreen({ engagements, open = null, onOpen, onClose }: {
+  engagements?: readonly OfficeEngagement[];
+  open?: { id: string; project: string | null } | null;
+  onOpen?: (ref: { project: string; id: string }) => void;
+  /** The open engagement was cleared (another project chosen: push; an unserved project reset: replace). */
+  onClose?: (replace: boolean) => void;
+} = {}) {
   const remembered = useMemo(() => rememberedEngagement(), []);
   const [wake, setWake] = useState(0);
   const [projects, setProjects] = useState<string[] | null>(null);
-  const [project, setProject] = useState<string | null>(remembered?.project ?? null);
+  // An address naming an engagement whose project is not resolved yet waits with none (never another project).
+  const [project, setProject] = useState<string | null>(open ? open.project : remembered?.project ?? null);
   const [csrf, setCsrf] = useState<string | null>(null);
   const [list, setList] = useState<Engagement[]>([]);
   const [problems, setProblems] = useState<string[]>([]);
   const [listBump, setListBump] = useState(0);
-  const [id, setId] = useState<string | null>(remembered?.id ?? null);
+  const [id, setId] = useState<string | null>(open?.id ?? null);
   const [engagement, setEngagement] = useState<Engagement | null>(null);
   const [engBump, setEngBump] = useState(0);
   const [lines, setLines] = useState<ChatLine[]>([]);
@@ -61,6 +76,11 @@ export function ChatScreen({ engagements }: { engagements?: readonly OfficeEngag
   const current = useRef<string | null>(null);
   const projectRef = useRef<string | null>(project);
   projectRef.current = project;
+  // The address's engagement and the close callback, for the effects (only an address naming one is closed).
+  const openRef = useRef(open);
+  openRef.current = open;
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
   // Bumped whenever a post's record is applied: a record read started before it is older and is dropped.
   const applied = useRef(0);
 
@@ -77,6 +97,17 @@ export function ChatScreen({ engagements }: { engagements?: readonly OfficeEngag
     };
   }, []);
 
+  // The address changed (back, forward, a push): it opens its engagement; `/app/chat` opens none.
+  const openKey0 = open ? JSON.stringify([open.project, open.id]) : null;
+  const seenOpen = useRef(openKey0);
+  useEffect(() => {
+    if (seenOpen.current === openKey0) return;
+    seenOpen.current = openKey0;
+    const next = chatOpenState(open, projectRef.current);
+    setProject(next.project);
+    setId(next.id);
+  }, [openKey0]);
+
   // The served projects (`GET /agents`).
   useEffect(() => {
     let cancelled = false;
@@ -86,17 +117,20 @@ export function ChatScreen({ engagements }: { engagements?: readonly OfficeEngag
       readError("agents", null);
       const served = projectsFrom(ans.agents);
       setProjects((old) => (old && old.join("\n") === served.join("\n") ? old : served));
-      const p = projectRef.current;
-      if (!p || !served.includes(p)) {
-        // A remembered project no longer served: its engagement is not shown either.
-        setProject(served[0] ?? null);
-        setId(null);
-      }
     });
     return () => {
       cancelled = true;
     };
   }, [wake]);
+
+  // The shown project against the served ones (`chatProjectCheck`): a project no longer served is reset, and its
+  // engagement is not shown either; an address whose engagement's project the store has not resolved yet waits.
+  useEffect(() => {
+    if (chatProjectCheck(project, projects, open) !== "reset") return;
+    setProject(projects?.[0] ?? null);
+    setId(null);
+    if (openRef.current) onCloseRef.current?.(true);
+  }, [projects, project, openKey0]);
 
   // The project's CSRF token (Settled shape 2): cleared and read again when the project changes, and read again on a
   // wake (focus, visible) so a transient `GET /inbox` failure does not leave every send disabled; a failed read keeps
@@ -266,6 +300,7 @@ export function ChatScreen({ engagements }: { engagements?: readonly OfficeEngag
     setRequest("");
     setListBump((n) => n + 1);
     setId(r.engagement.id);
+    onOpen?.({ project: target, id: r.engagement.id });
   };
 
   const groups = byState(list);
@@ -279,7 +314,7 @@ export function ChatScreen({ engagements }: { engagements?: readonly OfficeEngag
     <div style={{ position: "absolute", inset: 0, overflow: "auto", padding: "48px 16px 56px", font, color: "#e8e8e8", background: "#161616", display: "flex", gap: 16 }}>
       <aside style={{ width: 260, flex: "0 0 auto" }}>
         <h2 style={{ margin: "0 0 8px", fontSize: 16 }}>Chat</h2>
-        <select value={project ?? ""} onChange={(e) => { setProject(e.target.value || null); setId(null); }} style={{ font, width: "100%" }}>
+        <select value={project ?? ""} onChange={(e) => { setProject(e.target.value || null); setId(null); if (open) onClose?.(false); }} style={{ font, width: "100%" }}>
           {(projects ?? []).map((p) => (
             <option key={p} value={p}>
               {p}
@@ -296,7 +331,10 @@ export function ChatScreen({ engagements }: { engagements?: readonly OfficeEngag
           <div key={g.state} style={{ marginTop: 8 }}>
             <div style={{ color: "#9a9a9a" }}>{g.state}</div>
             {g.engagements.map((e) => (
-              <button key={e.id} type="button" disabled={e.id === id} onClick={() => setId(e.id)} style={{ font, display: "block", width: "100%", textAlign: "left" }}>
+              <button key={e.id} type="button" disabled={e.id === id} onClick={() => {
+                  setId(e.id);
+                  if (project) onOpen?.({ project, id: e.id });
+                }} style={{ font, display: "block", width: "100%", textAlign: "left" }}>
                 {e.id} · {e.request.split("\n")[0].slice(0, 60)}
               </button>
             ))}
