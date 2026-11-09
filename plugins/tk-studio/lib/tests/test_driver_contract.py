@@ -3928,7 +3928,14 @@ class DriverContractTestCase(unittest.TestCase):
                        "`unreadable: true`", "no ok `queued` and no `PrClosed` refusal after it",
                        "a cancelled, absent or never-approved holder releases",
                        "its newest ok `pr` of any cycle, with no ok `queued` and no `PrClosed` refusal after it, "
-                       "still answers `OPEN` — an earlier approve PR open after a revise", "— additive) |"):
+                       "still answers `OPEN` — an earlier approve PR open after a revise", "— additive) |",
+                       "before a kept worktree of an earlier cycle whose push never landed is removed, from that "
+                       "worktree (DW-192), a failed drop there failing `append` (`DropFailed`/`DropRefused`) and "
+                       "keeping that worktree",
+                       "(DW-190) the wait check and a starting cycle's `append` through `commit` run under a "
+                       "per-project lockfile, `<TK_SUPERVISOR_WORK>/worktrees/<project>/approve.lock`, so the "
+                       "check-then-append holds across supervisor processes; a pass finding it held elsewhere "
+                       "records nothing and retries next pass"):
             self.assertIn(phrase, clause)
         track_row = next(line for line in self.text.splitlines() if line.startswith("| `tk-studio-track`"))
         self.assertIn("0.1.34 (DW-51), verb `drop`", track_row)

@@ -31,14 +31,23 @@
  *                `append` false `WaitOpenPr: <other>'s approve PR <url | pending | unknown (record unreadable)> for
  *                project <p> is still open (retried each pass)` with `wait: true` and `holder {engagement, pr}`
  *                (`unreadable: true` for an unreadable record), in none of done/refused/failed; a cycle already past
- *                `append` never waits. DW-51 (owner decision A): on a fresh re-approval cut from
+ *                `append` never waits. DW-190: that wait check and the steps through `commit` run under a per-project
+ *                lockfile too (`<TK_SUPERVISOR_WORK>/worktrees/<project>/approve.lock`, taken after the per-engagement
+ *                one, only while the cycle has no ok `append`; held elsewhere: no event, the next pass), so the
+ *                check-then-append holds across supervisor processes. DW-51 (owner decision A): on a fresh re-approval cut from
  *                `origin/engagement/ENG-NNN` of a Jira-bound project, after `worktree add` and before the tree reset
  *                and the second sync, the earlier cycle's promoted issues (by provenance: the `external.jira.key` of
  *                the plan entities at the branch's HEAD whose `source` is `epics.md#epic-N` / `epics.md#story-N.<m>`
  *                for each `## Epic N` there whose first body line is `engagement: ENG-NNN`, less any key a
  *                default-branch plan entity carries) are moved to `DNI` through `track.py drop`; the ok `append`
  *                detail carries `dropped: [keys]`; a transient failure fails `append` `DropFailed: …`, a refusal
- *                `DropRefused: <reason>`, both removing the worktree (retried next pass).
+ *                `DropRefused: <reason>`, both removing the worktree (retried next pass). DW-192: the same drop runs,
+ *                read from that worktree, before a fresh cycle removes a kept worktree of an earlier cycle whose push
+ *                never landed (no ok `append` since the newest approve line, a Jira-bound project, the worktree on
+ *                `engagement/ENG-NNN`); a failure there fails `append` the same way but keeps that worktree (the only
+ *                copy of its keys); the onBranch drop then takes only keys not already dropped, and `dropped` is the
+ *                sorted union; a failed `append` later in that pass (worktree add, the onBranch drop, the reset) records
+ *                the kept worktree's keys in its own `dropped`, the next pass having no kept worktree to re-read.
  *                The steps, in order, each one `engagement-approve {id, project, step, ok, detail}` service event (a
  *                failed step is retried at the next pass and never moves the state; the pass writes nothing into the
  *                record; a failure equal to the step's newest event is not repeated):
@@ -107,7 +116,8 @@
  *                `job-run` `total_cost_usd` summed over the runs the engagement's `engagement-run-queued` events
  *                name into `spend.runs_usd`, merged alone into a fresh read; never throws.
  *   Injected deps (the submit, the graceful stop, the queued-run cancel, the notifier); every pass never throws and is
- *   serialised per served root in-process; across processes the approve pass holds its per-engagement lockfile and
+ *   serialised per served root in-process; across processes the approve pass holds its per-engagement lockfile (and,
+ *   before a cycle's ok `append`, the per-project one, DW-190) and
  *   the run pass re-reads the events right before each write.
  */
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -593,9 +603,13 @@ async function openPrHolder(queue: Queue, deps: ApproveDeps, t: Target, project:
  * (checked out in `wt`, before the reset) whose first body line is `engagement: <id>`; the keys are those of the plan
  * entities at HEAD whose `source` is `epics.md#epic-N` or starts `epics.md#story-N.` for those N, leaving out any key a
  * plan entity of `defaultRef` also carries (a matched default-branch file whose frontmatter will not parse keeps every
- * candidate key found in its text off the list); deduped and sorted. Throws when a read or git cannot answer. */
+ * candidate key found in its text off the list); deduped and sorted. No `epics.md` answers none (DW-192). Throws when
+ * any other read or git cannot answer. */
 async function supersededKeys(deps: ApproveDeps, wt: string, prefix: string, defaultRef: string, id: string): Promise<string[]> {
-  const lines = readFileSync(join(wt, `${prefix}${EPICS_REL}`), "utf-8").split(/\r?\n/);
+  let text: string;
+  try { text = readFileSync(join(wt, `${prefix}${EPICS_REL}`), "utf-8"); }
+  catch (e) { if ((e as NodeJS.ErrnoException)?.code === "ENOENT") return []; throw e; } // DW-192: no epics.md, no keys
+  const lines = text.split(/\r?\n/);
   const ns = new Set<number>();
   for (let i = 0; i < lines.length; i++) {
     const m = EPIC_HEAD_RE.exec(lines[i]!);
@@ -700,7 +714,13 @@ function takeLock(path: string): (() => void) | null {
 async function worktreeSteps(queue: Queue, deps: ApproveDeps, t: Target, record: Engagement, since: string): Promise<boolean> {
   const project = record.project, id = t.engagement;
   const emit = (step: ApproveStep, ok: boolean, detail: Detail) => emitStep(queue, deps, t, project, since, step, ok, detail);
-  const fail = (step: ApproveStep, reason: string, extra: Detail = {}) => { emit(step, false, { reason, ...extra }); return false; };
+  // DW-192: the keys a kept worktree's drop moved this pass (its worktree then removed): every later failed `append`
+  // carries them in `dropped`, since the next pass has no kept worktree to re-read them from
+  let keptDropped: string[] = [];
+  const fail = (step: ApproveStep, reason: string, extra: Detail = {}) => {
+    emit(step, false, { reason, ...(step === "append" && keptDropped.length ? { dropped: keptDropped } : {}), ...extra });
+    return false;
+  };
   const work = workDir(deps.env ?? process.env);
   const wt = work ? worktreePath(work, project, id) : null;
   const appendOk = okStep(queue, project, id, since, "append"), syncOk = okStep(queue, project, id, since, "sync");
@@ -779,7 +799,25 @@ async function worktreeSteps(queue: Queue, deps: ApproveDeps, t: Target, record:
     }
   }
   let dropped: string[] = []; // DW-51: the earlier cycle's issues moved to DNI on this cut
+  const dropReason = `${id} re-approved after revise (approve ${since}): the earlier plan this issue came from is replaced wholesale`;
   if (mode === "fresh") {
+    if (existsSync(wt) && !appendOk && jiraBound(t.root)) {
+      // DW-192: a kept worktree of an earlier cycle whose push never landed (no origin branch, so no onBranch drop
+      // below) is the only copy of the keys its sync promoted: dropped from it before it is removed; a failure keeps it
+      let head = "";
+      try { head = (await git(deps, wt, ["rev-parse", "--abbrev-ref", "HEAD"], 30)).stdout.trim(); } catch { /* not a worktree */ }
+      if (head === branch) {
+        let keys: string[];
+        try { keys = await supersededKeys(deps, wt, prefix, defaultRef, id); }
+        catch (e) { return fail("append", `DropFailed: ${clip(message(e))}`); }
+        if (keys.length) {
+          const d = await dropSuperseded(deps, t.root, id, keys, dropReason);
+          if (!d.ok) return fail("append", d.reason);
+          dropped = keys;
+          keptDropped = [...keys];
+        }
+      }
+    }
     if (existsSync(wt)) await removeWorktree();
     try {
       mkdirSync(dirname(wt), { recursive: true });
@@ -791,11 +829,11 @@ async function worktreeSteps(queue: Queue, deps: ApproveDeps, t: Target, record:
         let keys: string[];
         try { keys = await supersededKeys(deps, wt, prefix, defaultRef, id); }
         catch (e) { await removeWorktree(); return fail("append", `DropFailed: ${clip(message(e))}`); }
+        keys = keys.filter((k) => !dropped.includes(k)); // DW-192: the kept worktree's drop already moved these
         if (keys.length) {
-          const d = await dropSuperseded(deps, t.root, id, keys,
-            `${id} re-approved after revise (approve ${since}): the earlier plan this issue came from is replaced wholesale`);
+          const d = await dropSuperseded(deps, t.root, id, keys, dropReason);
           if (!d.ok) { await removeWorktree(); return fail("append", d.reason); }
-          dropped = keys;
+          dropped = [...new Set([...dropped, ...keys])].sort();
         }
       }
       if (onBranch) {
@@ -1085,19 +1123,26 @@ async function approveStep(queue: Queue, deps: ApproveDeps, t: Target, out: Appr
       out.refused.push(id);
       return;
     }
-    // DW-49: before this cycle starts (no ok append yet), wait while another engagement's approve PR for the project
-    // is still open; told once (emitStep's dedupe), in none of done/refused/failed, the state never moved
-    if (!okStep(queue, project, id, since, "append")) {
-      const holder = await openPrHolder(queue, deps, t, project, id);
-      if (holder) {
-        emitStep(queue, deps, t, project, since, "append", false, {
-          reason: `WaitOpenPr: ${holder.engagement}'s approve PR ${holder.unreadable ? "unknown (record unreadable)" : holder.pr ?? "pending"} for project ${project} is still open (retried each pass)`,
-          wait: true, holder,
-        });
-        return;
+    // DW-190: before this cycle starts (no ok append yet) the wait check and the append run under the per-project
+    // lockfile, so the check-then-append holds across supervisor processes (held elsewhere: the next pass)
+    const starting = !okStep(queue, project, id, since, "append");
+    const releaseProject = starting && work ? takeLock(join(dirname(worktreePath(work, project, id)), "approve.lock")) : () => {};
+    if (!releaseProject) return;
+    try {
+      // DW-49: before this cycle starts, wait while another engagement's approve PR for the project is still open;
+      // told once (emitStep's dedupe), in none of done/refused/failed, the state never moved
+      if (starting) {
+        const holder = await openPrHolder(queue, deps, t, project, id);
+        if (holder) {
+          emitStep(queue, deps, t, project, since, "append", false, {
+            reason: `WaitOpenPr: ${holder.engagement}'s approve PR ${holder.unreadable ? "unknown (record unreadable)" : holder.pr ?? "pending"} for project ${project} is still open (retried each pass)`,
+            wait: true, holder,
+          });
+          return;
+        }
       }
-    }
-    if (!okStep(queue, project, id, since, "commit") && !(await worktreeSteps(queue, deps, t, record, since))) { out.failed.push(id); return; }
+      if (!okStep(queue, project, id, since, "commit") && !(await worktreeSteps(queue, deps, t, record, since))) { out.failed.push(id); return; }
+    } finally { releaseProject(); }
     if (!okStep(queue, project, id, since, "pr") && !(await prStep(queue, deps, t, project, since))) { out.failed.push(id); return; }
     if (!okStep(queue, project, id, since, "queued") && !(await queueStep(queue, deps, t, record, line))) return;
     emitStep(queue, deps, t, project, since, "done", true, {});

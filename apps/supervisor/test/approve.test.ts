@@ -756,6 +756,62 @@ describe("Story 32.6 review patches: re-approval, the kept worktree, the lock", 
     expect(existsSync(lock)).toBe(false); // released
   }, 60_000);
 
+  test("DW-190: the per-project lock — held by a live process, a cycle with no ok append waits (no event, no plansync, the lock untouched); a dead pid's is reclaimed and released", async () => {
+    const queue = newQueue();
+    const { root } = servedRepo();
+    const fx = approveDeps(queue);
+    const lock = join(fx.work, "worktrees", "p", "approve.lock");
+    mkdirSync(join(fx.work, "worktrees", "p"), { recursive: true });
+    const held = JSON.stringify({ pid: process.pid, host: hostname(), at: "2026-10-25T06:00:00.000Z" });
+    writeFileSync(lock, held);
+    expect(await approvePass(queue, fx.deps, { root, engagement: ENG })).toEqual({ done: [], refused: [], failed: [] });
+    expect(approveEvents(queue)).toEqual([]);
+    expect(fx.plansync.calls()).toEqual([]);
+    expect(readFileSync(lock, "utf-8")).toBe(held);
+    expect(existsSync(join(fx.work, "worktrees", "p", `engagement-${ENG}.lock`))).toBe(false); // the engagement lock released
+    // stale: its pid is past any pid_max
+    writeFileSync(lock, JSON.stringify({ pid: 4_194_305, host: hostname(), at: "2026-10-25T06:00:00.000Z" }));
+    await approvePass(queue, fx.deps, { root, engagement: ENG });
+    expect(steps(queue)).toEqual([["append", true], ["sync", true], ["job", true], ["commit", true], ["pr", true]]);
+    expect(existsSync(lock)).toBe(false); // released
+  }, 60_000);
+
+  test("DW-190: on a fresh cycle the per-project lock is held when plansync sync runs", async () => {
+    const queue = newQueue();
+    const { root } = servedRepo();
+    const fx = approveDeps(queue);
+    const lock = join(fx.work, "worktrees", "p", "approve.lock");
+    const inner = fx.deps.uv!;
+    const seen: boolean[] = [];
+    fx.deps.uv = (r, script, args, timeoutS) => {
+      if (script.endsWith("plansync.py") && args[0] === "sync") seen.push(existsSync(lock));
+      return inner(r, script, args, timeoutS);
+    };
+    await approvePass(queue, fx.deps, { root, engagement: ENG });
+    expect(steps(queue)).toEqual([["append", true], ["sync", true], ["job", true], ["commit", true], ["pr", true]]);
+    expect(seen).toEqual([true]);
+    expect(existsSync(lock)).toBe(false);
+  }, 60_000);
+
+  test("DW-190: a resumed cycle (an ok append, the worktree kept) never takes the per-project lock: it proceeds while a live process holds it", async () => {
+    const queue = newQueue();
+    const { root } = servedRepo();
+    let pushFails = true;
+    const fx = approveDeps(queue);
+    fx.deps.run = (bin, args, opts) => (bin === "git" && args[0] === "push" && pushFails
+      ? Promise.resolve({ exit: 1, stdout: "", stderr: "fatal: unable to access origin" })
+      : runProcess(bin, args, { cwd: opts.cwd, timeoutS: opts.timeoutS, env: { ...fx.deps.env, ...(opts.env ?? {}) } }));
+    expect((await approvePass(queue, fx.deps, { root, engagement: ENG })).failed).toEqual([ENG]);
+    expect(steps(queue)).toEqual([["append", true], ["sync", true], ["job", true], ["commit", false]]);
+    const lock = join(fx.work, "worktrees", "p", "approve.lock");
+    const held = JSON.stringify({ pid: process.pid, host: hostname(), at: "2026-10-25T06:00:00.000Z" });
+    writeFileSync(lock, held);
+    pushFails = false;
+    await approvePass(queue, fx.deps, { root, engagement: ENG });
+    expect(steps(queue).slice(4)).toEqual([["commit", true], ["pr", true]]);
+    expect(readFileSync(lock, "utf-8")).toBe(held);
+  }, 90_000);
+
   test("4, DW-49: two engagements approved before either PR merges: ENG-002 waits while ENG-001's approve PR is open, then takes a different ## Epic and EP id once it merged", async () => {
     const queue = newQueue();
     const { root, origin } = servedRepo();
@@ -1137,6 +1193,111 @@ describe("DW-51: a re-approval drops the superseded cycle's Jira issues", () => 
     expect(drops(fx)).toHaveLength(2); // retried; the same refusal told once
     expect(after()).toHaveLength(1);
     expect(readEngagement(root, ENG)!.state).toBe("approved");
+  }, 90_000);
+
+  /** DW-192: cycle 1's sync ok, its push failing (the worktree kept, no origin branch); the kept worktree's plan
+   * entities stamped TKS-101 (EP-034) and TKS-102 (ST-300, `epics.md#story-41.1`); then revised and approved again,
+   * the push working from then on. `notOurs`: the kept worktree moved off `engagement/ENG-001`. */
+  async function keptReapproval(track?: (args: string[]) => Record<string, unknown>, o: { bound?: boolean; notOurs?: boolean } = {}) {
+    const queue = newQueue();
+    const { root, origin } = servedRepo({ bound: o.bound ?? true });
+    const fx = approveDeps(queue, track ? { track } : {});
+    let pushFails = true;
+    fx.deps.run = (bin, args, opts) => (bin === "git" && args[0] === "push" && pushFails
+      ? Promise.resolve({ exit: 1, stdout: "", stderr: "fatal: unable to access origin" })
+      : runProcess(bin, args, { cwd: opts.cwd, timeoutS: opts.timeoutS, env: { ...fx.deps.env, ...(opts.env ?? {}) } }));
+    expect((await approvePass(queue, fx.deps, { root, engagement: ENG })).failed).toEqual([ENG]);
+    expect(steps(queue)).toEqual([["append", true], ["sync", true], ["job", true], ["commit", false]]);
+    const wt = join(fx.work, "worktrees", "p", `engagement-${ENG}`);
+    expect(existsSync(wt)).toBe(true);
+    expect(git(origin, "branch", "--list", "engagement/*")).toBe("");
+    const plan = join(wt, "_bmad-output", "planning-artifacts", "plan");
+    writeFileSync(join(plan, "EP-034.md"), readFileSync(join(plan, "EP-034.md"), "utf-8").replace("\n---\n", "\nexternal:\n  jira:\n    key: TKS-101\n---\n"));
+    writeFileSync(join(plan, "ST-300.md"), "---\nshape_version: 1\nid: ST-300\ntype: story\ntitle: CSV button\nstatus: planned\nsource: epics.md#story-41.1\nexternal:\n  jira:\n    key: TKS-102\n---\n");
+    if (o.notOurs) git(wt, "checkout", "-q", "-b", "someone-else");
+    pushFails = false;
+    writeFileSync(join(root, "_bmad-output", "engagements", ENG, "scope.md"), SCOPE.replace("### Epic 1: Report exports", "### Epic 1: Report exports, revised"));
+    input(root, fx.deps, "revise");
+    input(root, fx.deps, "go", undefined, { quote: structuredClone(QUOTE) });
+    input(root, fx.deps, "approve", { autonomy: "full" });
+    const since = readEngagement(root, ENG)!.inputs.findLast((l) => l.verb === "approve")!.at;
+    return { queue, root, origin, fx, since, wt, plan, before: approveEvents(queue).length };
+  }
+
+  test("DW-192: a bound kept worktree whose push never landed: its keys dropped before the second sync, the ok append lists dropped, the kept worktree replaced", async () => {
+    const { queue, root, origin, fx, since, wt, before } = await keptReapproval();
+    await approvePass(queue, fx.deps);
+    expect(approveEvents(queue).slice(before).map((d) => [d.step, d.ok])).toEqual([["append", true], ["sync", true], ["job", true], ["commit", true], ["pr", true]]);
+    expect(drops(fx)).toHaveLength(1);
+    const reason = `${ENG} re-approved after revise (approve ${since}): the earlier plan this issue came from is replaced wholesale`;
+    expect(drops(fx)[0]!.args).toEqual(["drop", "--directory", root, "--engagement", ENG, "--issue", "TKS-101", "--issue", "TKS-102", "--reason", reason]);
+    const dropAt = fx.uvCalls.indexOf(drops(fx)[0]!);
+    expect(syncIndexes(fx)).toHaveLength(2);
+    expect(dropAt).toBeGreaterThan(syncIndexes(fx)[0]!);
+    expect(dropAt).toBeLessThan(syncIndexes(fx)[1]!);
+    expect(approveEvents(queue).slice(before).find((d) => d.step === "append")!.detail.dropped).toEqual(["TKS-101", "TKS-102"]);
+    expect(existsSync(wt)).toBe(false); // replaced, then removed once pushed
+    expect(git(origin, "show", "engagement/ENG-001:_bmad-output/planning-artifacts/epics.md")).toContain("## Epic 41: Report exports, revised");
+  }, 90_000);
+
+  test("DW-192: the kept worktree's drop failing (retry: true, then blocked): append false DropFailed / DropRefused, no second sync, the kept worktree and its keys still there", async () => {
+    let answer: Record<string, unknown> = { ok: false, status: "partial", retry: true, reason: "track retry: TKS-101: Jira answered 503 — a temporary failure; call again" };
+    const { queue, fx, wt, plan, before } = await keptReapproval(() => answer);
+    await approvePass(queue, fx.deps);
+    const after = () => approveEvents(queue).slice(before);
+    expect(after().map((d) => [d.step, d.ok])).toEqual([["append", false]]);
+    expect(after()[0]!.detail.reason).toStartWith("DropFailed: track retry: TKS-101");
+    expect(syncIndexes(fx)).toHaveLength(1);
+    expect(existsSync(wt)).toBe(true);
+    expect(readFileSync(join(plan, "EP-034.md"), "utf-8")).toContain("key: TKS-101");
+    answer = { ok: false, status: "blocked", reason: "track refused: NoTransition: TKS-101: no transition reaches 'DNI' from 'To Do'" };
+    await approvePass(queue, fx.deps);
+    expect(drops(fx)).toHaveLength(2); // retried at the next pass
+    expect(after().map((d) => [d.step, d.ok])).toEqual([["append", false], ["append", false]]);
+    expect(after()[1]!.detail.reason).toBe("DropRefused: track refused: NoTransition: TKS-101: no transition reaches 'DNI' from 'To Do'");
+    expect(syncIndexes(fx)).toHaveLength(1);
+    expect(existsSync(wt)).toBe(true);
+    expect(readFileSync(join(plan, "ST-300.md"), "utf-8")).toContain("key: TKS-102");
+  }, 90_000);
+
+  test("DW-192: the kept worktree's drop ok, then `git worktree add` failing: the failed append records the kept keys in dropped, the kept worktree gone", async () => {
+    const { queue, fx, wt, before } = await keptReapproval();
+    const inner = fx.deps.run!;
+    let addFails = true;
+    fx.deps.run = (bin, args, opts) => (bin === "git" && args[0] === "worktree" && args[1] === "add" && addFails
+      ? Promise.resolve({ exit: 128, stdout: "", stderr: "fatal: could not create work tree dir" })
+      : inner(bin, args, opts));
+    await approvePass(queue, fx.deps);
+    const after = () => approveEvents(queue).slice(before);
+    expect(after().map((d) => [d.step, d.ok])).toEqual([["append", false]]);
+    expect(after()[0]!.detail.reason).toStartWith("WorktreeAdd: git worktree add");
+    expect(after()[0]!.detail.dropped).toEqual(["TKS-101", "TKS-102"]);
+    expect(drops(fx)).toHaveLength(1);
+    expect(syncIndexes(fx)).toHaveLength(1);
+    expect(existsSync(wt)).toBe(false);
+    // the next pass: no kept worktree, so no second drop; the cycle runs
+    addFails = false;
+    await approvePass(queue, fx.deps);
+    expect(after().map((d) => [d.step, d.ok])).toEqual([["append", false], ["append", true], ["sync", true], ["job", true], ["commit", true], ["pr", true]]);
+    expect(drops(fx)).toHaveLength(1);
+  }, 90_000);
+
+  test("DW-192: an unbound project's kept worktree: no track drop call, the cycle runs as before", async () => {
+    const { queue, fx, wt, before } = await keptReapproval(undefined, { bound: false });
+    await approvePass(queue, fx.deps);
+    expect(approveEvents(queue).slice(before).map((d) => [d.step, d.ok])).toEqual([["append", true], ["sync", true], ["job", true], ["commit", true], ["pr", true]]);
+    expect(drops(fx)).toEqual([]);
+    expect(approveEvents(queue).slice(before).find((d) => d.step === "append")!.detail).not.toHaveProperty("dropped");
+    expect(existsSync(wt)).toBe(false);
+  }, 90_000);
+
+  test("DW-192: a worktree at the path not on engagement/ENG-001 is not ours: removed as before, no drop", async () => {
+    const { queue, fx, wt, before } = await keptReapproval(undefined, { notOurs: true });
+    await approvePass(queue, fx.deps);
+    expect(approveEvents(queue).slice(before).map((d) => [d.step, d.ok])).toEqual([["append", true], ["sync", true], ["job", true], ["commit", true], ["pr", true]]);
+    expect(drops(fx)).toEqual([]);
+    expect(approveEvents(queue).slice(before).find((d) => d.step === "append")!.detail).not.toHaveProperty("dropped");
+    expect(existsSync(wt)).toBe(false);
   }, 90_000);
 });
 

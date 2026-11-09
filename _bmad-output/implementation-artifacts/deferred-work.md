@@ -1622,7 +1622,8 @@ source_spec: `spec-approve-concurrency-and-reapproval.md`
 location: apps/supervisor/src/approve.ts approveStep (the DW-49 wait check)
 severity: medium
 reason: approveStep takes only takeLock(<worktree>.lock) per engagement; serialised() covers one process. Serve and run/drain processes can each run approvePass concurrently. Meets DEFERRAL DISCIPLINE (b): AD-4 id uniqueness.
-status: open
+status: done 2026-11-09
+resolution: resolved by sweep bundle dw-approve-cross-process-hardening
 
 ### DW-191: Two engagements of one project that each still have an earlier approve PR open, both revised and re-approved before either new cycle appends, hold each other through the cross-cycle hold: a mutual Wai
 origin: spec-deferred e13671470a74
@@ -1638,7 +1639,8 @@ source_spec: `spec-approve-concurrency-and-reapproval.md`
 location: apps/supervisor/src/approve.ts the fresh re-approval path (removeWorktree before the cut)
 severity: medium
 reason: dropSuperseded runs only on the onBranch read-tree cut (the path DW-51 names); the fresh path's removeWorktree drops the only copy of the keys. Pre-existing path not changed by this bundle. Meets DEFERRAL DISCIPLINE (a): AC1's promote to Jira.
-status: open
+status: done 2026-11-09
+resolution: resolved by sweep bundle dw-approve-cross-process-hardening
 
 ### DW-193: A paused sweep bundle's `wip:` spec commit stays on the sweep's PR branch; the operator must drop it by hand before a host-leg re-run can mark the PR ready
 origin: operator session 2026-11-08 (the fourth sweep, run q-run-sweep-20261108T093348Z-f76978: bundle playable-judge-sandbox-hygiene paused at a CRITICAL escalation 12:55Z; the engine committed `wip: sweep bundle dw-playable-judge-sandbox-hygiene paused` (37a6532d, the blocked spec alone) and skipped the leg)
