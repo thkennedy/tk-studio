@@ -52,9 +52,10 @@ from pathlib import Path
 import config as configlib
 import jirabackend
 import plansync
+import stagelog
 
 INTENT = "tk-studio-report"
-NO = plansync.NO_VALUE
+NO = stagelog.NO_VALUE
 # Rows not written by the engine hook: the operator's plan, the supervisor's legs.
 NON_ENGINE_STAGES = frozenset({"plan", "host-leg", "re-run", "close-out", "merge"})
 # The supervisor's run-level rows: one run resolving several stories appends the same ones to each.
@@ -92,8 +93,8 @@ def _created(value) -> datetime | None:
 def _spans(rows: list[dict]) -> list[tuple[datetime, datetime] | None]:
     out = []
     for row in rows:
-        start = plansync.stage_moment(row["started"])
-        end = plansync.stage_moment(row["ended"])
+        start = stagelog.stage_moment(row["started"])
+        end = stagelog.stage_moment(row["ended"])
         out.append((start, end) if start and end and end >= start else None)
     return out
 
@@ -120,19 +121,19 @@ def _container(i: int, rows: list[dict], spans: list) -> int | None:
 
 def rollup(sid: str, rows: list[dict], posts: dict) -> dict:
     """One story's (or one row set's) rollup — see the module docstring."""
-    keyed = [(plansync.stage_row_key(sid, r), r) for r in rows]
+    keyed = [(stagelog.stage_row_key(sid, r), r) for r in rows]
     spans = _spans(rows)
     nested = []
-    starts = [plansync.stage_moment(r["started"]) for _, r in keyed]
+    starts = [stagelog.stage_moment(r["started"]) for _, r in keyed]
     starts = [s for s in starts if s]
-    merges = [plansync.stage_moment(r["ended"]) for _, r in keyed
-              if r["stage"] == "merge" and plansync.stage_moment(r["ended"])]
+    merges = [stagelog.stage_moment(r["ended"]) for _, r in keyed
+              if r["stage"] == "merge" and stagelog.stage_moment(r["ended"])]
     first = min(starts) if starts else None
     merged = max(merges) if merges else None
     hands_on = plan = 0
     by_stage: dict[str, dict] = {}
     for i, (_, row) in enumerate(keyed):
-        span = plansync.stage_span_seconds(row)
+        span = stagelog.stage_span_seconds(row)
         agg = by_stage.setdefault(row["stage"], {"rows": 0, "seconds": 0,
                                                  "tokens_in": 0, "tokens_out": 0,
                                                  "cost_usd": 0.0})
@@ -158,14 +159,14 @@ def rollup(sid: str, rows: list[dict], posts: dict) -> dict:
     gaps = []
     latest: tuple[datetime, dict] | None = None
     for _, row in sorted(keyed, key=lambda kr: kr[1]["started"]):
-        start = plansync.stage_moment(row["started"])
+        start = stagelog.stage_moment(row["started"])
         if latest is not None and start and start > latest[0]:
             gaps.append({"from": _iso(latest[0]), "to": _iso(start),
                          "seconds": int((start - latest[0]).total_seconds()),
                          "after": f"{latest[1]['stage']} {latest[1]['pass']}",
                          "before": f"{row['stage']} {row['pass']}",
                          "line": f"gap {_iso(latest[0])}..{_iso(start)}"})
-        end = plansync.stage_moment(row["ended"])
+        end = stagelog.stage_moment(row["ended"])
         if end and (latest is None or end > latest[0]):
             latest = (end, row)
     skews = []
@@ -173,7 +174,7 @@ def rollup(sid: str, rows: list[dict], posts: dict) -> dict:
         entry = posts.get(key) if isinstance(posts.get(key), dict) else {}
         for boundary, column in (("start", "started"), ("stop", "ended")):
             created = _created((entry.get(boundary) or {}).get("created"))
-            body = plansync.stage_moment(row[column])
+            body = stagelog.stage_moment(row[column])
             if created and body:
                 skews.append({"row_key": key, "stage": row["stage"],
                               "pass": row["pass"], "boundary": boundary,
@@ -236,13 +237,13 @@ def _epic_spans(rows: list[dict]) -> list[dict]:
 
 def rollup_epic(root: Path, epic: int, entity_id: str | None = None) -> dict:
     root = Path(root)
-    posts = plansync.load_stage_posts(root)
+    posts = stagelog.load_stage_posts(root)
     entity_id = entity_id or _epic_entity(root, epic)
     stories: dict[str, dict] = {}
     story_rows: list[dict] = []
     epic_rows: list[dict] = []
-    for sid, path in plansync.stage_documents(root):
-        rows = plansync.parse_stage_log(path.read_text(encoding="utf-8"))
+    for sid, path in stagelog.stage_documents(root):
+        rows = stagelog.parse_stage_log(path.read_text(encoding="utf-8"))
         if entity_id and sid == entity_id:
             epic_rows = rows
         elif re.match(rf"^{epic}-\d+-", sid):
@@ -262,8 +263,8 @@ def rollup_epic(root: Path, epic: int, entity_id: str | None = None) -> dict:
     hands_on = whole["hands_on_s"]
     plan = whole["planning_s"]
     skews = [s for p in parts for s in p["jira"]["skews"]]
-    first = plansync.stage_moment(min(starts)) if starts else None
-    last = plansync.stage_moment(max(merges)) if merges else None
+    first = stagelog.stage_moment(min(starts)) if starts else None
+    last = stagelog.stage_moment(max(merges)) if merges else None
     return {
         "epic": epic, "entity": entity_id,
         "first_start": min(starts) if starts else None,
@@ -282,11 +283,11 @@ def rollup_epic(root: Path, epic: int, entity_id: str | None = None) -> dict:
 
 
 def rollup_story(root: Path, story: str) -> dict:
-    target, sid = plansync._stage_target(Path(root), story, None)
+    target, sid = stagelog._stage_target(Path(root), story, None)
     if target is None:
         raise RollupError(f"rollup: no spec for story {sid}")
-    rows = plansync.parse_stage_log(target.read_text(encoding="utf-8"))
-    out = rollup(sid, rows, plansync.load_stage_posts(Path(root)))
+    rows = stagelog.parse_stage_log(target.read_text(encoding="utf-8"))
+    out = rollup(sid, rows, stagelog.load_stage_posts(Path(root)))
     out["story"] = sid
     out["max_skew"] = out["jira"]["max_skew"]
     return out
@@ -318,7 +319,7 @@ def post_rollup(root: Path, epic: int, entity_id: str, data: dict,
     root = Path(root)
     if plansync._recorded(root, "planning.jira.project_key") is None:
         return {"posted": "skipped: not bound"}
-    issue = plansync._jira_issue_of(root, entity_id)
+    issue = stagelog._jira_issue_of(root, entity_id)
     settings, gaps = jirabackend._resolve_settings(root, None)
     if not os.environ.get(jirabackend.AGENT_TOKEN_ENV) \
             and not os.environ.get(jirabackend.TOKEN_ENV):

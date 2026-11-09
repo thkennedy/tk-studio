@@ -1,11 +1,14 @@
 /**
  * Story 36.7 (DW-85): the small seams the sweep and the plan passes share, in a leaf so `sweep.ts` never imports
- * `planstatus.ts` or `board.ts`. Every name is re-exported at its old home (`planstatus.ts`, `board.ts`, `hygiene.ts`).
+ * `planstatus.ts` or `board.ts`. Every name is re-exported at its old home (`planstatus.ts`, `board.ts`, `hygiene.ts`),
+ * except DW-87's `message`, `clip`, `failed` and `planEvents`: the plan passes' shared helpers, private to `planstatus.ts`
+ * until moved here so `stagepass.ts` imports them without a module cycle, and not re-exported.
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { load as loadYaml } from "js-yaml";
 import type { QueueEvent } from "./queue";
+import type { RunResult } from "./server";
 
 /** Story 31.5: a project root's `planning.jira` binding — a non-empty `planning.jira.project_key` in its tracked
  * `.tk-studio/config.yaml` (read only; any read or parse failure is "not bound"). Story 38.4: moved here from
@@ -46,3 +49,10 @@ export function runPr(events: readonly QueueEvent[]): string | undefined {
   }
   return undefined;
 }
+
+export const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
+export const clip = (s: string, n = 300) => s.replace(/\/\/[^/@\s]+@/g, "//[redacted]@").trim().slice(0, n);
+export const failed = (r: RunResult) => `exit ${r.exit}: ${clip(r.stderr || r.stdout)}`;
+
+export const planEvents = (events: readonly QueueEvent[], phase: string) =>
+  events.filter((e) => e.kind === "plan-status" && e.detail?.phase === phase);
