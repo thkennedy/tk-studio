@@ -162,7 +162,7 @@ describe.skipIf(!hasUv)("Story 36.5 (AC1): a failure after the claim ends `block
   const dir = tempDir("tk-sup-drain-own-bin-");
   const answer = [
     `const argv = process.argv.slice(2);`,
-    `if (argv[0] === "skills") console.log("tk-studio-activate\\ntk-studio-launch");`,
+    `if (argv[0] === "skills") console.log("SKILL       STORE\\nsynced      /store/synced\\ntk-studio   /store/tk-studio");`,
     `else console.log(JSON.stringify({ loggedIn: true, authMethod: "claude.ai" }));`,
   ].join("\n");
   const claude = fakeBin(join(dir, "fake-claude.js"), answer), sbxBin = fakeBin(join(dir, "fake-sbx.js"), answer);

@@ -3767,6 +3767,64 @@ class DriverContractTestCase(unittest.TestCase):
                        if line.startswith("| Story / rulings"))
         self.assertRegex(stories, r"Story 38\.1, Story 38\.2, Story 38\.3, Story 38\.4, Story 38\.5(, Story 38\.\d+)* \(Epic 38\)")
 
+    def test_0_1_34_story_38_6_the_gates_coverage_widened(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.34**", header)
+        self.assertNotIn("**0.1.35**", header)
+        self.assertEqual(header.count("0.1.34 (Story 38.6, additive)"), 1)
+        self.assertLess(header.index("0.1.34 (Story 38.5, additive)"),
+                        header.index("0.1.34 (Story 38.6, additive)"))
+        clause = " ".join(header[header.index("0.1.34 (Story 38.6, additive)"):].split())
+        for phrase in ("the gate's coverage widened", "`plugins/tk-studio/skills/*/scripts` and `.bmad-loop/plugins`",
+                       "(`apps/*/scripts` gone)", "a `config verify commands` step",
+                       "the e2e suite (`command-line.test.ts`) in its own step under `tools/verify_host.py`",
+                       "the store folder walk as the skill check", "— additive) |"):
+            self.assertIn(phrase, clause)
+        flat = " ".join(self.text.split())
+        title = "**0.1.34 (Story 38.6, additive).**"
+        self.assertEqual(flat.count(title), 1)
+        self.assertLess(flat.index("**0.1.34 (DW-184, DW-195, additive).**"), flat.index(title))
+        note = flat[flat.index(title):]
+        note = note[:note.index("## 8. Conformance")]
+        subs = ("**The drives' roots (B9):**", "**The verify-command step:**", "**The e2e step (DW-167):**",
+                "**The skills listing (DW-183):**")
+        for sub in subs:
+            self.assertIn(sub, note)
+        self.assertEqual([note.index(sub) for sub in subs], sorted(note.index(sub) for sub in subs))
+        for phrase in ("DW-167, DW-172, DW-173, DW-183",
+                       "`e2e_windows_semantics.py` and `e2e_text_encoding.py` both scan",
+                       "an absent scope is a `not_run` step, `ok`",
+                       "`.bmad-loop/plugins`, `bounds`, `config verify commands`",
+                       "the vacuous `apps/*/scripts` step (0.1.31) is gone",
+                       "The nested `apps/supervisor/.bmad-loop` copy is never scanned",
+                       "a line running `bun test` with no `--timeout N`, or `N` under `_budget.HOST_TEST_TIMEOUT_MS`, "
+                       "fails naming `<rel>:<line>` and the 30 000 ms host figure",
+                       "a trailing `# win-ok: <reason>` exempts the line",
+                       "`host: bun test --timeout 30000`",
+                       "`bun test --timeout 30000 ./test/command-line.test.ts` after the per-file suites and before tsc",
+                       "`SUPERVISOR_E2E_TIMEOUT` (1800 s)",
+                       "`== supervisor: test/command-line.test.ts N pass, M fail[, S skip] in Ns[ rc=N| (timed out after 1800s)]`",
+                       "`== supervisor: test/command-line.test.ts skip: e2e suite absent`",
+                       "skips only without `uv`",
+                       "the 2026-11-06 capture gives `synced`, `tk-studio`",
+                       "is the skill check (`in_store: true`)",
+                       "`via: \"sbx skills ls\"`", "`via: \"store folder\"`",
+                       "`the listing names the tk-studio plugin folder, not skills; no store folder at <shown>`",
+                       "The listing never answers `true` alone",
+                       "`sandbox.ts` runs in serve",
+                       "Every other field, kind and route is unchanged."):
+            self.assertIn(phrase, note)
+        # Section 8's scope sentence names both drives' new roots and the Windows-semantics verify-command step
+        conformance = flat[flat.index("## 8. Conformance"):]
+        self.assertIn("(0.1.32, Story 37.2). From 0.1.34 (Story 38.6) both drives also scan the skills' scripts and "
+                      "`.bmad-loop/plugins`, and the Windows-semantics drive also reads every `.tk-studio/config.yaml` "
+                      "verify command.", conformance[:2500])
+        self.assertIn("`e2e_text_encoding.py` fails a text-mode open", conformance[:2500])
+        stories = next(line for line in self.text.splitlines()
+                       if line.startswith("| Story / rulings"))
+        self.assertRegex(stories, r"Story 38\.1, Story 38\.2, Story 38\.3, Story 38\.4, Story 38\.5, Story 38\.6(, Story 38\.\d+)* \(Epic 38\)")
+
     def test_0_1_34_dw_52_dw_53_closeout_retry_and_go_after_an_unstopped_end(self):
         header = next(line for line in self.text.splitlines()
                       if line.startswith("| **Contract version**"))

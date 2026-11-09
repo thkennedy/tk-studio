@@ -1423,7 +1423,7 @@ source_spec: `36-5-the-supervisors-own-faults-spec.md` (:323)
 location: tools/verify_host.py `SUPERVISOR_E2E`; apps/supervisor/test/command-line.test.ts
 severity: medium
 reason: The host leg excludes the file, and the engine's gate does not run it, so a fault it would catch reaches no gate. The `api.test.ts` store test also skips without `TK_STUDIO_ROOT`.
-status: open
+status: resolved 2026-11-09 by Story 38.6 (the e2e suite runs under the host leg in its own step, `bun test --timeout 30000 ./test/command-line.test.ts` under `SUPERVISOR_E2E_TIMEOUT` 1800 s with the per-file env, its absence one named skip line; the `api.test.ts` store test defaults `TK_STUDIO_ROOT` to its checkout and skips only without `uv`)
 
 ### DW-168: The four operator proofs Epic 36 owes are unrecorded: the nt `kill_tree` run on the host, the live `plansync setup`, an `sbx skills ls` capture and CAP-14's hold count on a live run.
 origin: retrospective C8 (`_bmad-output/specs/spec-epic-36/RETROSPECTIVE.md`:77), A5 (:49)
@@ -1465,7 +1465,7 @@ source_spec: `37-2-the-windows-classes-out-of-the-host-leg-spec.md`
 location: the planner's test guidance (the plan template the planner tier writes from; Story 37.3 changes the same guidance for its split rule); plugins/tk-studio/contracts/conformance/_budget.py `HOST_TEST_TIMEOUT_MS` (the figure to name)
 severity: low
 reason: Story 37.2 put the host figure on every `bun test` command and every drive's bound, and its `bounds` step catches a bound under it, so the gate now trips; what is left is the planning half: a plan that adds git-backed fixtures or widens a drive's filter is not told the host's figure before it is written, so the first sign is still a red step. Fix to make: the planner's test guidance names `_budget.HOST_TEST_TIMEOUT_MS` (30 000 ms per test on the Windows host) and the derived suite bound beside it, pinned by the guidance's test.
-status: open
+status: resolved 2026-11-09 by Story 38.6 (`task-planning.md` section 3 names `_budget.HOST_TEST_TIMEOUT_MS` (30 000 ms a test on the host) and the derived suite bound (the figure plus `_budget.HEADROOM_S`, 45 s), pinned by `test_planner_rules.py`)
 
 ### DW-173: `apps/supervisor/test/guards.test.ts` fails 2 tests when the box has `TK_ATLASSIAN_*` set: the sbx argv cases assert fixed positions that the env's `-e NAME` passthrough shifts (retrospective C7, the class `tier.test.ts` now pins).
 origin: Story 37.2 pass 1 deviation, consult ruling 2026-11-05T22:38Z (accept-deviation score 1: file the guards.test.ts env failures as a ledger entry, never skipped by name)
@@ -1473,7 +1473,7 @@ source_spec: `37-2-the-windows-classes-out-of-the-host-leg-spec.md`
 location: apps/supervisor/test/guards.test.ts "sbx: the in-VM wall-clock guard rides the argv (no shell)" ("buildSbxCommand puts `timeout -k <s> <guardS>` before `env`; the prompt stays one argv item" and "invokeSkill passes its timeout (the guard) to the in-VM `timeout`"); apps/supervisor/src/server.ts `sbxEnvPassthrough`; apps/supervisor/test/tier.test.ts (the pin to copy: save and delete `TK_*ATLASSIAN*` in `beforeAll`, restore in `afterAll`)
 severity: low
 reason: Reproduced on the agent PC 2026-11-05: `bun test --timeout 30000 test/guards.test.ts` is 55 pass, 2 fail with the box's `TK_ATLASSIAN_*` variables set and 57 pass, 0 fail with them unset. `tools/verify_host.py` strips those variables, so the host leg stays green, but a hand run on the box reads two false reds. Fix to make: pin the env in the file as `tier.test.ts` does (restored after, so a multi-file run is unchanged), or assert the argv around the passthrough pairs; never skip the tests by name.
-status: open
+status: resolved 2026-11-09 by Story 38.6 (`guards.test.ts` pins the env as `tier.test.ts` does: every `TK_*ATLASSIAN*` variable saved and removed in `beforeAll`, restored in `afterAll`; no case skipped by name)
 
 ### DW-174: The host verify leg runs under the run's worker guard (3600 s), not a guard sized to the host gate, and the gate on the agent PC now outlasts it: Story 37.2's close-out leg timed out inside the supervisor suites while the operator's own gate ran on the same box (hole 113).
 origin: hole 113 (Story 37.2's close-out, run q-run-epic-37-20261105T204854Z-4f20f3, 2026-11-06 00:40Z: `host-verify` `exit: null`, `duration_ms: 3600518`, `guard: max_wall_clock_seconds (3600s)`, the stdout tail at `test/web.test.ts` with the lib suite not yet started; the run ended `partial`, draft PR 331)
@@ -1557,7 +1557,7 @@ source_spec: `36-5-the-supervisors-own-faults-spec.md` § Consult Log (the 2026-
 location: apps/supervisor/src/sandbox.ts `skillInStore` :354 (`listed?.includes(skill)`), `parseSkillsList` (first token per line: the header's `SKILL` lands in the list), `skillsLsArgv`; apps/supervisor/test (the parser's fixture)
 severity: low
 reason: The real output on 2026-11-06 is three lines — `SKILL       STORE`, then `synced <store path>` and `tk-studio <store path>` — the store folder's entries, where `tk-studio` is the plugin folder whose `skills/` holds `tk-studio-launch` and the rest. So the listing can never contain a target skill's name; `in_store: true` comes from the walk of `<store>/tk-studio/skills/` on the host, and the listing check is dead weight that would also accept a plugin named like a skill. Fix to make: pin `parseSkillsList` to this capture (skip the header line; the first token is a store entry, not a skill); make the listing check a plugin-folder check (`tk-studio` present) and keep the `skills/` walk as the skill check, or drop the listing from the decision and keep it as evidence in the refusal text; one fixture from the capture.
-status: open
+status: resolved 2026-11-09 by Story 38.6 (`parseSkillsList` is pinned to the 2026-11-06 capture (the header skipped, each first token a store entry); the listing is the plugin-folder check (`tk-studio` present), the store folder walk the skill check, and the listing never answers `true` alone)
 
 ### DW-184: A stale host-verify-leg lease (serve died mid-leg, or a crash between noteCloseOutLease and host-verify with no later leg) makes every operator verify_host.py refuse with exit 2 until --beside-leg, an
 origin: spec-deferred c0b0d948903d

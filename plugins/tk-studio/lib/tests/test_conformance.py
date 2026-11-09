@@ -1011,23 +1011,39 @@ class TextEncodingDriveTestCase(unittest.TestCase):
         self.assertIn("lib/tests/test_bad.py:2 Path('x').read_text()", lib["detail"])
 
     def test_every_root_is_scanned_when_it_exists(self):
+        # Story 38.6 (B9): the skills' scripts and .bmad-loop/plugins are scanned; the vacuous apps/*/scripts step is gone
         plugin = self._tree({"apps/supervisor/package.json": "{}",
                              "tools/installer/cli/a.py": 'p.write_text("x")\n',
-                             "apps/supervisor/scripts/b.py": 'open("x")\n'})
+                             "plugins/tk-studio/skills/x/scripts/s.py": 'open("x")\n',
+                             ".bmad-loop/plugins/p/h.py": 'from pathlib import Path\nPath("x").read_text()\n'})
         report = e2e_text_encoding.run(plugin)
         steps = {s["step"]: s for s in report["steps"]}
         self.assertFalse(report["ok"])
         self.assertTrue(steps["lib"]["ok"])
         self.assertIn("tools/installer/cli/a.py:1", steps["tools/installer"]["detail"])
-        self.assertIn("apps/supervisor/scripts/b.py:1", steps["apps/*/scripts"]["detail"])
+        self.assertFalse(steps["plugins/tk-studio/skills/*/scripts"]["ok"])
+        self.assertIn("plugins/tk-studio/skills/x/scripts/s.py:1 open('x')",
+                      steps["plugins/tk-studio/skills/*/scripts"]["detail"])
+        self.assertFalse(steps[".bmad-loop/plugins"]["ok"])
+        self.assertIn(".bmad-loop/plugins/p/h.py:2 Path('x').read_text()", steps[".bmad-loop/plugins"]["detail"])
+        self.assertNotIn("apps/*/scripts", steps)
 
     def test_an_absent_root_is_a_not_run_step_and_ok(self):
         report = e2e_text_encoding.run(self._tree({"plugins/tk-studio/lib/a.py": "x = 1\n"}))
         self.assertTrue(report["ok"])
         steps = {s["step"]: s for s in report["steps"]}
-        self.assertIn("not_run", steps["tools/installer"])
-        self.assertIn("not_run", steps["apps/*/scripts"])
-        self.assertTrue(steps["tools/installer"]["ok"] and steps["apps/*/scripts"]["ok"])
+        self.assertEqual(list(steps), ["lib", "tools/installer", "plugins/tk-studio/skills/*/scripts", ".bmad-loop/plugins"])
+        for step in ("tools/installer", "plugins/tk-studio/skills/*/scripts", ".bmad-loop/plugins"):
+            with self.subTest(step=step):
+                self.assertIn("not_run", steps[step])
+                self.assertTrue(steps[step]["ok"])
+
+    def test_with_no_checkout_a_skills_hit_is_labelled_from_the_plugin_root(self):
+        plugin = self._tree({"plugins/tk-studio/skills/x/scripts/s.py": 'open("x")\n'})
+        self.assertIsNone(e2e_text_encoding._checkout(plugin))
+        step = next(s for s in e2e_text_encoding.run(plugin)["steps"] if s["step"] == "plugins/tk-studio/skills/*/scripts")
+        self.assertFalse(step["ok"])
+        self.assertIn(": skills/x/scripts/s.py:1 open('x')", step["detail"])
 
     def test_an_absent_lib_is_red_never_a_scan_of_nothing(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1121,7 +1137,8 @@ class TextEncodingDriveTestCase(unittest.TestCase):
 class WindowsSemanticsDriveTestCase(unittest.TestCase):
     """Story 37.2 (holes 108, 110; DW-154, DW-155): the Windows-only classes fail the run naming the call site."""
 
-    SCOPES = ["plugins/tk-studio/lib", "apps/supervisor/src", "apps/supervisor/test", "_bmad/scripts", "tools"]
+    SCOPES = ["plugins/tk-studio/lib", "apps/supervisor/src", "apps/supervisor/test", "_bmad/scripts", "tools",
+              "plugins/tk-studio/skills/*/scripts", ".bmad-loop/plugins"]
 
     def _tree(self, files: dict[str, str]) -> Path:
         tmp = tempfile.TemporaryDirectory()
@@ -1144,15 +1161,16 @@ class WindowsSemanticsDriveTestCase(unittest.TestCase):
         report = e2e_windows_semantics.run()
         self.assertTrue(report["ok"], json.dumps(report, indent=2))
         names = [s["step"] for s in report["steps"]]
-        self.assertEqual(names, [*self.SCOPES, "bounds"])
+        self.assertEqual(names, [*self.SCOPES, "bounds", "config verify commands"])
         if e2e_text_encoding._checkout(PLUGIN_ROOT) is not None:
             self.assertFalse(any("not_run" in s for s in report["steps"]), report["steps"])
         drives = runner.load_manifest()["surfaces"]["tk-studio-activate"]["drives"]
         entry = next(d for d in drives if d.get("argv") == ["contracts/conformance/e2e_windows_semantics.py"])
         self.assertEqual((entry["assertion"], entry["expect"]), ("headless-clean", "ok"))
         self.assertGreater(entry["timeout"], runner.DEFAULT_TIMEOUT)
-        # the encoding drive stays as it was: never widened (Settled shape 1)
-        self.assertEqual([s["step"] for s in e2e_text_encoding.run()["steps"]], ["lib", "tools/installer", "apps/*/scripts"])
+        # Story 38.6 (B9): the encoding drive scans the same two new roots; its vacuous apps/*/scripts step is gone
+        self.assertEqual([s["step"] for s in e2e_text_encoding.run()["steps"]],
+                         ["lib", "tools/installer", "plugins/tk-studio/skills/*/scripts", ".bmad-loop/plugins"])
 
     def test_a_planted_site_of_each_class_fails_the_drive_naming_the_site_and_the_rule(self):
         plugin = self._tree({
@@ -1162,6 +1180,8 @@ class WindowsSemanticsDriveTestCase(unittest.TestCase):
             "_bmad/scripts/r.py": "import os\n\ndef move(staging, destination):\n    os.rename(staging, destination)\n",
             "tools/t.py": 'import subprocess\nsubprocess.run(["git", "status"], text=True)\n',
             "plugins/tk-studio/lib/tests/test_j.py": 'def t(self):\n    self.assertTrue(str(Path(a) / b).endswith("x/y"))\n',
+            "plugins/tk-studio/skills/x/scripts/s.py": 'import subprocess\nsubprocess.run(["git"], text=True)\n',
+            ".bmad-loop/plugins/p/h.py": "import os\n\ndef move(staging, destination):\n    os.rename(staging, destination)\n",
         })
         proc = subprocess.run(
             [sys.executable, str(Path(e2e_windows_semantics.__file__)), "--plugin-root", str(plugin)],
@@ -1175,7 +1195,9 @@ class WindowsSemanticsDriveTestCase(unittest.TestCase):
                 ("apps/supervisor/test", "apps/supervisor/test/p.test.ts:1 class (b)", "backslashes on win32"),
                 ("_bmad/scripts", "_bmad/scripts/r.py:4 class (c)", "WinError 183"),
                 ("tools", "tools/t.py:2 class (d)", "cp1252"),
-                ("plugins/tk-studio/lib", "plugins/tk-studio/lib/tests/test_j.py:2 class (b)", "hole 110")):
+                ("plugins/tk-studio/lib", "plugins/tk-studio/lib/tests/test_j.py:2 class (b)", "hole 110"),
+                ("plugins/tk-studio/skills/*/scripts", "plugins/tk-studio/skills/x/scripts/s.py:2 class (d)", "cp1252"),
+                (".bmad-loop/plugins", ".bmad-loop/plugins/p/h.py:4 class (c)", "WinError 183")):
             with self.subTest(step=step):
                 self.assertFalse(steps[step]["ok"])
                 self.assertIn(site, steps[step]["detail"])
@@ -1207,13 +1229,17 @@ class WindowsSemanticsDriveTestCase(unittest.TestCase):
     def test_every_scope_is_scanned_when_it_exists(self):
         plugin = self._tree({"apps/supervisor/package.json": "{}",
                              "_bmad/scripts/a.py": 'subprocess.Popen(cmd, universal_newlines=True)\n',
-                             "tools/installer/cli/b.py": 'p.rename(q)\n'})
+                             "tools/installer/cli/b.py": 'p.rename(q)\n',
+                             "plugins/tk-studio/skills/y/scripts/c.py": 'subprocess.check_output(cmd, text=True)\n',
+                             ".bmad-loop/plugins/q/d.py": 'p.rename(q)\n'})
         report = e2e_windows_semantics.run(plugin)
         steps = {s["step"]: s for s in report["steps"]}
         self.assertFalse(report["ok"])
         self.assertTrue(steps["plugins/tk-studio/lib"]["ok"])
         self.assertIn("_bmad/scripts/a.py:1 class (d)", steps["_bmad/scripts"]["detail"])
         self.assertIn("tools/installer/cli/b.py:1 class (c)", steps["tools"]["detail"])
+        self.assertIn("plugins/tk-studio/skills/y/scripts/c.py:1 class (d)", steps["plugins/tk-studio/skills/*/scripts"]["detail"])
+        self.assertIn(".bmad-loop/plugins/q/d.py:1 class (c)", steps[".bmad-loop/plugins"]["detail"])
         self.assertIn("not_run", steps["apps/supervisor/src"])
         self.assertIn("not_run", steps["apps/supervisor/test"])
 
@@ -1226,6 +1252,74 @@ class WindowsSemanticsDriveTestCase(unittest.TestCase):
                 self.assertIn("not_run", steps[step])
         self.assertTrue(steps["plugins/tk-studio/lib"]["ok"])
         self.assertNotIn("not_run", steps["plugins/tk-studio/lib"])
+        self.assertTrue(steps["config verify commands"]["ok"])
+
+    def test_the_config_verify_commands_step_rejects_a_bare_bun_test(self):
+        """Story 38.6 (AC1): a bare `bun test` (or one under the host figure) in any `.tk-studio/config.yaml` verify
+        command is red naming `<rel>:<line>` and the figure; `win-ok`, comment lines, a `bun test` only in a trailing
+        comment, other commands and the pruned `node_modules`, `.git`, `.venv` and dot-folders are not."""
+        figure = e2e_windows_semantics._budget.HOST_TEST_TIMEOUT_MS
+        flagged = {
+            "a/.tk-studio/config.yaml": "verify:\n  host: bun test\n",
+            "b/.tk-studio/config.yaml": "verify:\n  host: '\"C:\\x\\bun.exe\" test'\n",
+            "c/.tk-studio/config.yaml": "engine:\n  verify_commands:\n    - bun test test/x.test.ts\n",
+            "d/.tk-studio/config.yaml": "verify:\n  host: bun test --timeout 5000\n",
+            "i/.tk-studio/config.yaml": f"verify:\n  host: bun test  # see --timeout {figure}\n",
+            "j/.tk-studio/config.yaml": f"verify:\n  host: bun test --timeout {figure} ./a.test.ts && bun test ./b.test.ts\n",
+
+            "l/.tk-studio/config.yaml": f'engine:\n  verify_commands: ["bun test --timeout {figure} a", "bun test b"]\n',
+            "m/.tk-studio/config.yaml": f"verify:\n  host: bun test --timeout {figure} a & bun test b\n",
+            "n/.tk-studio/config.yaml": "verify:\n  host: bun test a & other --timeout 99999\n",
+        }
+        exempt = {
+            "e/.tk-studio/config.yaml": f"verify:\n  host: bun test --timeout {figure}\n",
+            "f/.tk-studio/config.yaml": "verify:\n  host: bun test  # win-ok: a proven single-file suite\n",
+            "g/.tk-studio/config.yaml": "# e.g. host: bun test\nverify:\n  host: uv run python x.py\n",
+            "h/.tk-studio/config.yaml": "verify:\n  host: bun run verify\n",
+            "k/.tk-studio/config.yaml": "verify:\n  host: uv run x  # was bun test\n",
+            "o/.tk-studio/config.yaml": (f'engine:\n  verify_commands: ["bun test --timeout {figure} a", '
+                                         f'"bun test --timeout {figure} b"]\n'),
+        }
+        pruned = {f"{top}/.tk-studio/config.yaml": "verify:\n  host: bun test\n"
+                  for top in ("node_modules/pkg", ".git/x", ".venv/x", ".cache/x")}
+        plugin = self._tree({"apps/supervisor/package.json": "{}", **flagged, **exempt, **pruned})
+        step = next(s for s in e2e_windows_semantics.run(plugin)["steps"] if s["step"] == "config verify commands")
+        self.assertFalse(step["ok"])
+        for rel, line in (("a", 2), ("b", 2), ("c", 3), ("d", 2), ("i", 2), ("j", 2), ("l", 2), ("m", 2),
+                          ("n", 2)):
+            with self.subTest(flagged=rel):
+                self.assertIn(f"{rel}/.tk-studio/config.yaml:{line} config verify commands", step["detail"])
+        for rel in (*exempt, *pruned):
+            with self.subTest(exempt=rel):
+                self.assertNotIn(f"{rel}:", step["detail"])
+        self.assertIn("9 verify command(s)", step["detail"])
+        self.assertIn(e2e_windows_semantics.HOST_FIGURE, step["detail"])
+        self.assertIn("_budget.HOST_TEST_TIMEOUT_MS", step["detail"])
+        # the pure scan: a hit per flagged line, none per exempt one
+        for rel, text in flagged.items():
+            with self.subTest(scan=rel):
+                self.assertEqual(len(e2e_windows_semantics.verify_command_hits(text, rel)), 1)
+        for rel, text in exempt.items():
+            with self.subTest(scan=rel):
+                self.assertEqual(e2e_windows_semantics.verify_command_hits(text, rel), [])
+
+    def test_with_no_checkout_the_config_walk_is_the_plugin_root(self):
+        """Story 38.6: no `apps/supervisor/package.json` above the plugin: the walk covers the plugin root only."""
+        plugin = self._tree({"plugins/tk-studio/k/.tk-studio/config.yaml": "verify:\n  host: bun test\n",
+                             "z/.tk-studio/config.yaml": "verify:\n  host: bun test\n"})
+        self.assertIsNone(e2e_text_encoding._checkout(plugin))
+        step = next(s for s in e2e_windows_semantics.run(plugin)["steps"] if s["step"] == "config verify commands")
+        self.assertFalse(step["ok"])
+        self.assertIn("k/.tk-studio/config.yaml:2 config verify commands", step["detail"])
+        self.assertIn("1 verify command(s)", step["detail"])
+
+    def test_with_no_checkout_a_skills_hit_is_labelled_from_the_plugin_root(self):
+        plugin = self._tree({"plugins/tk-studio/skills/x/scripts/s.py": 'import subprocess\nsubprocess.run(["git"], text=True)\n'})
+        self.assertIsNone(e2e_text_encoding._checkout(plugin))
+        step = next(s for s in e2e_windows_semantics.run(plugin)["steps"] if s["step"] == "plugins/tk-studio/skills/*/scripts")
+        self.assertFalse(step["ok"])
+        self.assertNotIn("not_run", step)
+        self.assertIn(": skills/x/scripts/s.py:2 class (d)", step["detail"])
 
     def test_an_unparsable_python_file_is_a_red_hit(self):
         plugin = self._tree({"plugins/tk-studio/lib/bad.py": "def (:\n"})

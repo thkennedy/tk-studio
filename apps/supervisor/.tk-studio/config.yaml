@@ -54,5 +54,7 @@ planning:
 # A command whose first token is quoted (a path with spaces) is wrapped whole in YAML
 # quotes, e.g. host: '"C:\Program Files\x\bun.exe" test' — else the YAML does not
 # parse and the leg is skipped `config unreadable: …`.
+# Story 38.6: --timeout is the host figure, _budget.HOST_TEST_TIMEOUT_MS (30 000 ms a test;
+# YAML cannot import it: e2e_windows_semantics' `config verify commands` step holds it to the figure).
 verify:
-  host: bun test
+  host: bun test --timeout 30000

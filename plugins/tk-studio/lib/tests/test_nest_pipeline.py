@@ -32,8 +32,9 @@ TRANSCRIBE = "transcribe.py"
 RENDERED = FILES + (TRANSCRIBE,)
 SPINE = "_bmad-output/planning-artifacts/architecture/"
 CONTRACTS = "plugins/tk-studio/contracts/"
-# the lines the render may change (1-based), from the plan's code map
-EXPECTED_DIFF = {"task-planning.md": {18}, "consult.md": {3}, "gate.md": {5},
+# the lines the render may change (1-based), from the plan's code map; task-planning.md:137 is Story 38.6's host-figure
+# paragraph, whose `plugins/tk-studio/contracts/conformance/_budget.py` takes the contracts prefix rewrite
+EXPECTED_DIFF = {"task-planning.md": {18, 137}, "consult.md": {3}, "gate.md": {5},
                  "reconcile.md": {3, 46, 47}}
 
 
