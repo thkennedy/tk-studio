@@ -1,6 +1,6 @@
 # Deferred Work
 
-<!-- deferred-work counter: last minted DW-210; mint through plansync.py deferred mint -->
+<!-- deferred-work counter: last minted DW-211; mint through plansync.py deferred mint -->
 
 ### DW-124: Contract §4 `submit` admitted a full job definition but the CLI/skill surface was id-only
 origin: migrated from legacy ledger ("Deferred from: code review of feat/tk-studio-connector (2026-08-06)"), 2026-10-29
@@ -1788,4 +1788,12 @@ source_spec: `39-1-the-web-has-addresses-spec.md`
 location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261109-174858-6626; this entry preserves the lingering recommendation for a deliberate later review.
+status: open
+
+### DW-211: An epic's first run pays the whole SPEC distil in the launch worker, outside every budget band — 72.75 USD, 2.99 M tokens, 36 minutes for Epic 39's nine stories
+origin: Epic 39's first run `q-run-epic-39-20261109T171223Z-d1df17` (2026-11-09): the worker ran 17:13–17:49Z before any engine started and its `accounted` event reads 11 turns, 2,993,899 tokens, 72.75 USD — `tk-studio-launch` distilled `_bmad-output/specs/spec-epic-39` (SPEC.md, stories.yaml, plans/39-1 … 39-9) from plan PR #349 in that one session. Epic 38's first run paid 47.19 USD the same way (queue event 6527, 2026-11-07 21:03Z); every story run after an epic's first pays about 1 USD in the worker. The run's PR body names the 72.75 as the run's "Metered cost" while the story's own engine cost (27.03 USD) sits in the spec's Stage Log.
+source_spec: `handoff-phase1-loop-2026-10-09.md` 2026-11-09 day-9f update; `tk-studio-launch` (distil the epic's SPEC, bootstrap the first story's manifest, start the engine); plan PR #349 (Epic 39's nine stories); Story 38.7's `.tk-studio/budget-bands.yaml` (caps are per story stage, so the distil is capped by nothing but the worker's turn guard)
+location: plugins/tk-studio/lib/launch.py (the distil step runs the whole epic's plans in one planner-tier session); the supervisor's `run-epic` worker (the session that invokes the skill; `guard_s` 3600, `max_turns` 80 — a 36-minute, 3 M-token distil fits under both); apps/supervisor's PR body ("Metered cost" = the worker's figure only)
+severity: low
+reason: The distil is planning work billed at the first story's run, inside a session no band caps, and it grows with the epic: nine stories cost 72.75 USD and 2.99 M tokens — 2.7 × the story's engine cost — and held the first engine back 36 minutes. Fix to size: distil when the plan PR is approved (an attended `tk-studio-launch distil` whose `spec-epic-N` folder is committed with or right after the plan PR, so the first run finds it present and only bootstraps story 1's manifest), or distil one story's plan per run (plans/N-M.md at that story's run from a once-written SPEC.md), and in either case account the distil as its own figure in the run's PR body and the spec's Stage Log (`plan` row carries `—` for tokens and cost today) so the story's cost reads as the story's.
 status: open
