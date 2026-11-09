@@ -15,7 +15,7 @@ import { runBranch } from "../src/worktree";
 import {
   buildWorkerCommand, buildWorkerEnv, CONTINUATION_PROMPT, HostBypassRefused, invokeSkill, MISSING_STATUS_BLOCK, type Spawner, toVmPath,
 } from "../src/server";
-import { fakeBin, fakeGh, fakePlansync, fakeStudioRoot, gitInit, gitRepo, testGit } from "./fakes";
+import { fakeBin, fakeGh, fakePlansync, fakeStudioRoot, FIXTURE_POLICY, gitInit, gitRepo, testGit } from "./fakes";
 import { tempDir, track } from "./tmp";
 
 const REPO = resolve(import.meta.dir, "..");
@@ -391,6 +391,11 @@ describe("finishRun: model/effort per §5, tier forwarded, cost to finish (AC3/A
 
 // win32 too (DW-5, DW-10): the fakes are real executables there (`fakeBin`).
 const canRunE2E = !!process.env.TK_STUDIO_ROOT && spawnSync("uv", ["--version"]).status === 0;
+// Hole 121 (Story 38.6 put this suite under the host leg): the maintenance-conformance core runs the real shipped
+// conformance suite (~400 s on the Windows host under the gate's environment, the bun drives included), and the job's
+// own guard `max_wall_clock_seconds` 900 ends it in a terminal state past that, so the one real-core test is bounded by
+// the guard plus headroom, never by the fixture's 120 s default (a child killed at the bound leaves the core's tree running).
+const CORE_RUN_BOUND_MS = 960_000;
 
 function e2eFixture(workerResult: string, loggedIn = true, opts: { selfFinish?: boolean; env?: Record<string, string> } = {}) {
   const store = tempDir("tk-sup-e2e-store-");
@@ -405,6 +410,12 @@ function e2eFixture(workerResult: string, loggedIn = true, opts: { selfFinish?: 
   // folder is set, `gh` is the fake (a protected `main`), and `tk install`/`tk activate` are fakes
   // under a throwaway TK_STUDIO_ROOT (the real studio mirrored around them).
   const origin = gitInit(project);
+  // Story 38.5 (CAP-14): a run worktree whose checkout has no `.bmad-loop/policy.toml` is refused by name
+  // (`worktree policy: none in the checkout`), so the fixture checkout holds the untracked policy `gitRepo` gives
+  // every fixture (the worktree copies it) — hole 121: Story 38.6 (DW-167) made this suite run under the host leg,
+  // where 26 of its runs were refused at the worktree step, as the enginemcp fixture's were (hole 117).
+  mkdirSync(join(project, ".bmad-loop"), { recursive: true });
+  writeFileSync(join(project, ".bmad-loop", "policy.toml"), FIXTURE_POLICY);
   const gh = fakeGh(tempDir("tk-sup-e2e-gh-"));
   const studio = fakeStudioRoot(process.env.TK_STUDIO_ROOT!);
   const work = tempDir("tk-sup-e2e-work-");
@@ -516,10 +527,10 @@ process.exit(r.status ?? 1);
   // The queue lives outside every repo and outside the store.
   const queueDb = join(tempDir("tk-sup-e2e-queue-"), "queue.db");
   const extraEnv = { SBX_BIN: fakeSbx, CLAUDE_CONFIG_DIR: join(store, "claude-config"), FAKE_QUEUE_DB: queueDb, ...worktreeEnv, ...(opts.env ?? {}) };
-  const cli = (verb: string, jobId: string, dir: string, extra: string[] = []) => spawnSync("bun", [join(REPO, "src", "cli.ts"), verb, jobId, "--directory", dir, ...extra], {
-    env: { ...process.env, TK_STUDIO_HOME: store, TK_SUPERVISOR_DB: queueDb, CLAUDE_BIN: fake, ANTHROPIC_API_KEY: "sk-test-parent", ...extraEnv }, encoding: "utf-8", timeout: 120_000,
+  const cli = (verb: string, jobId: string, dir: string, extra: string[] = [], timeoutMs = 120_000) => spawnSync("bun", [join(REPO, "src", "cli.ts"), verb, jobId, "--directory", dir, ...extra], {
+    env: { ...process.env, TK_STUDIO_HOME: store, TK_SUPERVISOR_DB: queueDb, CLAUDE_BIN: fake, ANTHROPIC_API_KEY: "sk-test-parent", ...extraEnv }, encoding: "utf-8", timeout: timeoutMs,
   });
-  const run = (jobId = "studio-health", dir = project, extra: string[] = []) => cli("run", jobId, dir, extra);
+  const run = (jobId = "studio-health", dir = project, extra: string[] = [], timeoutMs?: number) => cli("run", jobId, dir, extra, timeoutMs);
   const submit = (jobId = "studio-health", dir = project, extra: string[] = []) => cli("submit", jobId, dir, extra);
   /** `recover` / `drain`: no job, no directory. */
   const bare = (verb: string) => spawnSync("bun", [join(REPO, "src", "cli.ts"), verb], {
@@ -758,7 +769,8 @@ describe.skipIf(!canRunE2E)("CLI end to end: studio-health (faked worker)", () =
 describe.skipIf(!canRunE2E)("CLI end to end: maintenance-conformance (core job)", () => {
   test("wake runs the core to a terminal state; no worker, no finish; outcome reported from status", () => {
     const fx = e2eFixture("unused");
-    const res = fx.run("maintenance-conformance");
+    // The real core: the shipped conformance suite to a terminal state (complete, or the job's guard past 900 s) — hole 121.
+    const res = fx.run("maintenance-conformance", undefined, [], CORE_RUN_BOUND_MS);
     const summary = JSON.parse(res.stdout);
     expect(summary.target).toBe("core");
     expect(summary.run_id).toStartWith("q-maintenance-conformance-");
@@ -787,7 +799,7 @@ describe.skipIf(!canRunE2E)("CLI end to end: maintenance-conformance (core job)"
 
     // The queue run mirrors the studio outcome.
     expect(fx.queue((q) => q.get(summary.run_id))).toMatchObject({ state: summary.state, studio_run_id: summary.studio_run_id, target: "core" });
-  }, 120_000);
+  }, CORE_RUN_BOUND_MS + 30_000);
 });
 
 describe.skipIf(!canRunE2E)("CLI end to end: the durable queue", () => {
