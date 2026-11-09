@@ -59,7 +59,8 @@ The sink. `ingest` runs in the sync-back tick right after `inbox.derive`
 (under its gate), once per `(issue, reason_comment.id)`, for each inbox item
 carrying `decision` in state `resolved`: the owner's comments after the newest
 agent `Blocked:` comment are parsed (`<id>: <letter>`, `all: <letter>`,
-`default`; an id's own line, then `all:`, then — only with a `default` line —
+`default`, each after any mentions the line starts with — Jira's Reply button
+puts one there; an id's own line, then `all:`, then — only with a `default` line —
 the id's default; a later line wins; a letter outside the options, a
 qualified answer and a `default` with no default leave the id open, named),
 each answered id gets its ledger `decision:` line through
@@ -111,6 +112,10 @@ ALL_LINE_RE = re.compile(r"^all\s*[:=]\s*([A-Z])\s*[.!]?$", re.IGNORECASE)
 DEFAULT_LINE_RE = re.compile(r"^default\s*[.!]?$", re.IGNORECASE)
 QUALIFIED_RE = re.compile(r"^(DW-\d+)\s*[:=]\s*([A-Z])(?:\s+|\s*[,;(—–-])\s*\S.*$",
                           re.IGNORECASE)
+# a line's leading mentions: Jira's Reply button starts the owner's comment
+# with a mention of the commenter replied to (`[~accountid:<agent>] DW-3: B`,
+# measured on the owner's site 2026-11-09), which is address, not answer
+LEADING_MENTIONS_RE = re.compile(r"^(?:\[~accountid:[^\]\s]+\][\s,:]*)+")
 # a hand-posted description's lettered option line (plan Risks)
 OPTION_LINE_RE = re.compile(r"^\s*[-*]?\s*\(?\*{0,2}([A-D])\*{0,2}[).:—–-]\s+(.+)$")
 DEFAULT_IN_TEXT_RE = re.compile(r"^\s*[-*]?\s*default\s*[:=]\s*\(?([A-D])\b", re.IGNORECASE)
@@ -394,6 +399,7 @@ def parse_answers(texts: list[str], decisions: dict[str, dict],
     for text in texts:
         for raw in str(text or "").splitlines():
             line = re.sub(r"^[-*]\s*", "", raw.strip())
+            line = LEADING_MENTIONS_RE.sub("", line)
             m = ID_LINE_RE.match(line)
             if m:
                 dw = m.group(1).upper()

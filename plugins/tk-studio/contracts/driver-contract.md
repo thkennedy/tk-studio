@@ -2883,7 +2883,9 @@ verb non-zero, as expected), judged by a second `--json` read; the engine commit
 sweep's PR. One `sweep-decisions-answered {engine_run_id, answered, left, ok, error?}` note per engine run; a failure never
 blocks the close-out; with no open sweep record the record's `answers` waits for the next sweep's close-out. **The ingest, the
 reply and the re-block:** right after `inbox.derive`, under its gate, `sweepdecisions.ingest` takes each `resolved` item
-carrying `decision`, once per `(issue, reason_comment.id)`: the parse, `ledger_decide` per answered id, the record's `answers`,
+carrying `decision`, once per `(issue, reason_comment.id)`: the parse (an answer line is read after any mentions it starts
+with: Jira's Reply button starts the owner's comment with `[~accountid:<the commenter replied to>]`), `ledger_decide` per
+answered id, the record's `answers`,
 one agent reply `Ingested: DW-87: B — <text>; …` / `Still open: DW-129 (no answer line), …` (`none` when complete), then a
 by-name move to `Done` (the entry `state: done`) or `_block_issue` with `[~accountid:<owner>] Blocked: <n> sweep decision(s)
 still need your answer: <missing ids>` (`repost_after_owner`); counts `decisions_ingested`, `decisions_reblocked`,
