@@ -124,6 +124,25 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(self.parse("DW-2: A with one change", "DW-2: A"),
                          ({"DW-2": "A"}, {"DW-1": "no answer line"}))
 
+    def test_a_lines_leading_mentions_are_address_not_answer(self):
+        # Jira's Reply button starts the owner's comment with a mention of the
+        # commenter replied to (measured 2026-11-09: `[~accountid:<agent>] DW-191:B`)
+        at = "[~accountid:712020:e8b8d8fe-31f1-4ec3-a412-373cf2b5110f]"
+        self.assertEqual(self.parse(f"{at} DW-1:B"), ({"DW-1": "B"}, {"DW-2": "no answer line"}))
+        self.assertEqual(self.parse(f"{at} DW-1: A\n- {at} {at}, dw-2 = b."),
+                         ({"DW-1": "A", "DW-2": "B"}, {}))
+        self.assertEqual(self.parse(f"{at} all: A"), ({"DW-1": "A", "DW-2": "A"}, {}))
+        self.assertEqual(self.parse(f"{at} default"), ({"DW-1": "B", "DW-2": "B"}, {}))
+        # a qualified answer stays qualified behind a mention
+        self.assertEqual(self.parse(f"{at} DW-1: A - let's plan it for the next epic", "all: B"),
+                         ({"DW-2": "B"}, {"DW-1": "qualified answer, not ingested"}))
+        # a mention anywhere else in the line is not skipped
+        self.assertEqual(self.parse(f"DW-1: A {at}"),
+                         ({}, {"DW-1": "qualified answer, not ingested", "DW-2": "no answer line"}))
+        # a mention alone, or before prose, answers nothing
+        self.assertEqual(self.parse(f"{at}\n{at} please explain this one"),
+                         ({}, {"DW-1": "no answer line", "DW-2": "no answer line"}))
+
     def test_unreadable_options_are_never_invented(self):
         self.assertEqual(self.parse("all: A", decisions={"DW-1": {"options": [], "default": None}},
                                     ids=("DW-1",)),
