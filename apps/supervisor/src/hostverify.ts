@@ -64,7 +64,9 @@
  *            read back from `<media>/judge.json`. DW-68: the default judge runs under a scoped deny-only profile
  *            written to `.bmad-loop/runs/<engine run id>/judge-deny.settings.json` (beside the media) and passed as
  *            `--settings`: `Edit`/`Read`/`Write` denied for `plugins`, `apps`, `_bmad-output` and every top-level
- *            entry but `.bmad-loop`; Bash stays open (best effort, not a seal). DW-69: handed the queue (`deps.queue`,
+ *            entry but `.bmad-loop`, and (DW-198/DW-199) every sibling at each level along the media chain
+ *            (`.bmad-loop/`, `runs/`, `<engine run id>/`: the run state beside the media) as listed when the profile
+ *            is written (a snapshot; entries created later stay open); Bash stays open (best effort, not a seal). DW-69: handed the queue (`deps.queue`,
  *            only `hostleg.ts runLeg` does) and a run id, the default judge pins through `pinWithRestart` (the pin
  *            record written, `pinned`/`pin-failed` noted on the run) and afterwards `releasePin`s it (best effort: a
  *            terminal run's sandbox stopped unless another run holds it, `pin-kept`; while another run on the same
@@ -777,21 +779,30 @@ async function rubricIds(
 export const JUDGE_DENY_PROFILE = "judge-deny.settings.json";
 /** DW-68: the folders the judge's profile always denies, present or not. */
 const JUDGE_DENY_FIXED = ["plugins", "apps", "_bmad-output"];
-/** DW-68: the media's ancestor under the served root, never denied (the judge reads its frames and writes its answer there). */
-const JUDGE_MEDIA_TOP = ".bmad-loop";
-
-/** DW-68: the judge's deny rules over the served root `root`: `Edit(t)`, `Read(t)` and `Write(t)` per target `t` — the
- * fixed folders and every top-level entry except `.bmad-loop` (a directory as `./<name>/**`, a file as `./<name>`),
- * sorted and deduped. POSIX rule strings (resolved by Claude Code against the session cwd), never `path.join`ed.
- * Never denies Bash, nor a bare `Edit`/`Read`/`Write` (a bare `Edit` deny also denies the Write tool, blocking the
- * judge's `answer.json`). Throws when the root cannot be listed. */
-export function judgeDenyRules(root: string): string[] {
+/** DW-68/DW-198/DW-199: the judge's deny rules over the served root `root`, `media` the media folder relative to
+ * `root` (split on `/` and `\`):`Edit(t)`, `Read(t)` and `Write(t)` per target `t`, level by level along the media
+ * path. Level 0 (the root): the fixed folders and every entry but the media's first component; each deeper level `L`
+ * (the media's first `k` components, down to the media folder's parent): every entry of `root/L` but component
+ * `k+1` — a directory as `./L/<name>/**`, a file (or dangling link) as `./L/<name>`. So the run state beside the media
+ * (`.bmad-loop/tasks`, the journal, other runs, the run's transcripts and tasks) is denied while the media chain itself
+ * is never covered (deny beats allow). The siblings are those listed at call time (a snapshot: `--settings` is read
+ * once at session start, so entries created later are not covered — best effort, like Bash). Sorted and deduped; POSIX rule strings (resolved by Claude Code against the
+ * session cwd), built by concatenation, never `path.join`ed. Never denies Bash, nor a bare `Edit`/`Read`/`Write` (a
+ * bare `Edit` deny also denies the Write tool, blocking the judge's `answer.json`). Throws when any level cannot be
+ * listed. */
+export function judgeDenyRules(root: string, media: string): string[] {
+  const parts = media.split(/[\\/]+/).filter((p) => p && p !== ".");
   const targets = new Set(JUDGE_DENY_FIXED.map((n) => `./${n}/**`));
-  for (const name of readdirSync(root)) {
-    if (name === JUDGE_MEDIA_TOP) continue;
-    let dir = false;
-    try { dir = statSync(join(root, name)).isDirectory(); } catch { /* a dangling link: denied as a file */ }
-    targets.add(dir ? `./${name}/**` : `./${name}`);
+  for (let k = 0; k < parts.length; k++) {
+    const level = parts.slice(0, k);
+    const prefix = level.length ? `./${level.join("/")}/` : "./";
+    const dir = join(root, ...level);
+    for (const name of readdirSync(dir)) {
+      if (name === parts[k]) continue;
+      let isDir = false;
+      try { isDir = statSync(join(dir, name)).isDirectory(); } catch { /* a dangling link: denied as a file */ }
+      targets.add(isDir ? `${prefix}${name}/**` : `${prefix}${name}`);
+    }
   }
   return [...targets].sort().flatMap((t) => [`Edit(${t})`, `Read(${t})`, `Write(${t})`]);
 }
@@ -800,7 +811,7 @@ export function judgeDenyRules(root: string): string[] {
  * `root`); answers its absolute path. Throws on any failure (the leg's judge `catch`: `inconclusive`, cause `sbx`). */
 function writeJudgeDenyProfile(root: string, media: string): string {
   const path = join(root, dirname(media), JUDGE_DENY_PROFILE);
-  const body = JSON.stringify({ permissions: { deny: judgeDenyRules(root) } }, null, 2) + "\n";
+  const body = JSON.stringify({ permissions: { deny: judgeDenyRules(root, media) } }, null, 2) + "\n";
   mkdirSync(dirname(path), { recursive: true });
   const tmp = `${path}.tk-studio-${process.pid}.tmp`;
   try {

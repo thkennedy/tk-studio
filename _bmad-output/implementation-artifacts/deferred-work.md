@@ -1687,7 +1687,8 @@ source_spec: `spec-dw-68-playable-judge-deny-profile.md`
 location: apps/supervisor/src/hostverify.ts judgeDenyRules
 severity: medium
 reason: Review pass 1 (blind hunter): `judgeDenyRules` skips `.bmad-loop` wholesale; only the media chain `.bmad-loop/runs/<engine>/playable/` must stay open. The bundle intent enumerates plugins/apps/_bmad-output and the project's code folders only, so denying run state siblings level by level along the media path is beyond this bundle. Deferral class (a): DW-68's read-only rule.
-status: open
+status: done 2026-11-09
+resolution: resolved by sweep bundle dw-judge-profile-run-state-deny
 
 ### DW-199: The judge profile also leaves `.bmad-loop/` writable by the Write/Edit tools, so the judge could overwrite the engine run's state (transcripts, tasks, journal) beside the media.
 origin: spec-deferred 0a806c96b78e
@@ -1695,7 +1696,8 @@ source_spec: `spec-dw-68-playable-judge-deny-profile.md`
 location: apps/supervisor/src/hostverify.ts judgeDenyRules
 severity: medium
 reason: Review pass 2 (blind hunter): `judgeDenyRules` skips `.bmad-loop` wholesale, so no `Edit(...)`/`Write(...)` rule covers the run folder's siblings of `playable/`. Same root as the read-side deferral; denying siblings level by level along the media path is beyond the bundle intent's enumerated folders. The half about rewriting the profile itself is moot: `--settings` is loaded at session start. Deferral class (a): DW-68's read-only rule.
-status: open
+status: done 2026-11-09
+resolution: resolved by sweep bundle dw-judge-profile-run-state-deny
 
 ### DW-200: Story 38.4's decision sink runs only inside the Atlassian sync-back tick, a shipped job tk-studio never declared, so an answered sweep decision is never ingested and every later triage skips it as "already asked" (hole 120)
 origin: operator session 2026-11-09 00:1xZ: the owner answered TKSTUDIO-257/258/259 at 20:27 to 20:31Z (`DW-185:A`, `DW-186: A`, `DW-188: A`, moved to Block Resolved); the fifth sweep's triage (20:32Z) and sink (00:05Z) skipped the ids as already asked; no `_bmad-output/tracking/inbox.json`, `answers` empty, no `q-sync…` run ever in the queue

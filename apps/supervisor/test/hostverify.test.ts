@@ -1141,6 +1141,13 @@ describe("Story 34.3: the playable-verify step runs after a green engine gate", 
     const fx = fixture(config);
     mkdirSync(join(fx.wt, "src"), { recursive: true });
     writeFileSync(join(fx.wt, "project.godot"), "[gd]\n", "utf-8");
+    // DW-198/DW-199: run state beside the media chain, at each level
+    const eng = join(fx.wt, ".bmad-loop", "runs", "20261027-eng");
+    mkdirSync(join(fx.wt, ".bmad-loop", "tasks"), { recursive: true });
+    writeFileSync(join(fx.wt, ".bmad-loop", "journal.jsonl"), "{}\n", "utf-8");
+    mkdirSync(join(fx.wt, ".bmad-loop", "runs", "other"), { recursive: true });
+    mkdirSync(join(eng, "transcripts"), { recursive: true });
+    writeFileSync(join(eng, "tasks.yaml"), "x: 1\n", "utf-8");
     const { calls, spawner } = judgeSpawner();
     const { run } = recorder(config, [0, 0]);
     await hostVerify(fx.run, 60, { env: legEnv().env, run: run as any, route, sbx: pinOk as any, spawner }) as HostVerifyRan;
@@ -1151,7 +1158,10 @@ describe("Story 34.3: the playable-verify step runs after a green engine gate", 
     const deny = validateDenyProfile(profile).deny;
     const all3 = (t: string) => [`Edit(${t})`, `Read(${t})`, `Write(${t})`];
     // the worktree's own top level: `.git` (a worktree's file), `.gitignore`, `.tk-studio/` (the config), `src/`, `project.godot`
-    const targets = ["./.git", "./.gitignore", "./.tk-studio/**", "./_bmad-output/**", "./apps/**", "./plugins/**", "./project.godot", "./src/**"].sort();
+    // plus (DW-198/DW-199) the siblings along the media chain
+    const targets = ["./.git", "./.gitignore", "./.tk-studio/**", "./_bmad-output/**", "./apps/**", "./plugins/**", "./project.godot", "./src/**",
+      "./.bmad-loop/tasks/**", "./.bmad-loop/journal.jsonl", "./.bmad-loop/runs/other/**",
+      "./.bmad-loop/runs/20261027-eng/transcripts/**", "./.bmad-loop/runs/20261027-eng/tasks.yaml"].sort();
     expect(deny).toEqual(targets.flatMap(all3));
     expect(existsSync(join(fx.wt, ".bmad-loop", "runs", "20261027-eng", "playable", JUDGE_DENY_PROFILE))).toBe(false); // beside, not inside
   }, 30_000);
@@ -1314,27 +1324,59 @@ describe("Story 34.3: the playable-verify step runs after a green engine gate", 
     expect(v.playable!.reason).toContain("worker exploded");
   }, 30_000);
 
+  /** DW-198/DW-199: does the rule `r` (`Tool(./x/**)` or `Tool(./x)`) cover the POSIX path `p` (`./…`)? */
+  function covers(r: string, p: string): boolean {
+    const t = r.slice(r.indexOf("(") + 1, -1);
+    return t.endsWith("/**") ? p === t.slice(0, -3) || p.startsWith(t.slice(0, -2)) : p === t;
+  }
+  const MEDIA_CHAIN = ["./.bmad-loop", "./.bmad-loop/runs", "./.bmad-loop/runs/e1", "./.bmad-loop/runs/e1/playable",
+    "./.bmad-loop/runs/e1/playable/report.json", "./.bmad-loop/runs/e1/playable/frames/tick-000000.png"];
+
   test("DW-68: the judge's own Bash, frame Reads and answer Write stay permitted: no Bash rule, no bare Edit/Write/Read, no rule over the media", () => {
     const wt = tempDir("tk-sup-dw68-");
     mkdirSync(join(wt, ".bmad-loop", "runs", "e1", "playable"), { recursive: true });
     mkdirSync(join(wt, "src"), { recursive: true });
-    const deny = judgeDenyRules(wt);
+    const deny = judgeDenyRules(wt, ".bmad-loop/runs/e1/playable");
     expect(deny.some((r) => r === "Bash" || r.startsWith("Bash("))).toBe(false);
     expect(deny).not.toContain("Edit");
     expect(deny).not.toContain("Write");
     expect(deny).not.toContain("Read");
-    expect(deny.every((r) => /^(Edit|Read|Write)\(\.\/[^/*]+(\/\*\*)?\)$/.test(r))).toBe(true); // every rule scoped to one top-level entry
-    expect(deny.filter((r) => r.includes(".bmad-loop") || r.includes("**/") || r.endsWith("(./**)"))).toEqual([]);
+    expect(deny.every((r) => /^(Edit|Read|Write)\(\.\/[^*]+(\/\*\*)?\)$/.test(r))).toBe(true); // every rule one scoped entry
+    expect(deny.filter((r) => r.includes("**/") || r.endsWith("(./**)"))).toEqual([]);
+    expect(deny.filter((r) => MEDIA_CHAIN.some((p) => covers(r, p)))).toEqual([]); // no rule covers the media chain
   });
 
   test("DW-68: judgeDenyRules covers a top-level dir (`./<d>/**`) and file (`./<f>`), always the fixed three, never `.bmad-loop`", () => {
     const wt = tempDir("tk-sup-dw68-");
-    mkdirSync(join(wt, ".bmad-loop"), { recursive: true });
+    mkdirSync(join(wt, ".bmad-loop", "runs", "e1", "playable"), { recursive: true });
     mkdirSync(join(wt, "game"), { recursive: true });
     mkdirSync(join(wt, "apps"), { recursive: true });
     writeFileSync(join(wt, "project.godot"), "", "utf-8");
-    expect(judgeDenyRules(wt)).toEqual(["./_bmad-output/**", "./apps/**", "./game/**", "./plugins/**", "./project.godot"]
+    expect(judgeDenyRules(wt, ".bmad-loop/runs/e1/playable")).toEqual(["./_bmad-output/**", "./apps/**", "./game/**", "./plugins/**", "./project.godot"]
       .flatMap((t) => [`Edit(${t})`, `Read(${t})`, `Write(${t})`]));
+  });
+
+  test("DW-198/DW-199: judgeDenyRules denies the run state beside the media, level by level (dir and file forms), never the media chain", () => {
+    const wt = tempDir("tk-sup-dw198-");
+    const bl = join(wt, ".bmad-loop");
+    mkdirSync(join(bl, "tasks"), { recursive: true });
+    writeFileSync(join(bl, "journal.jsonl"), "{}\n", "utf-8");
+    mkdirSync(join(bl, "runs", "other"), { recursive: true });
+    mkdirSync(join(bl, "runs", "e1", "transcripts"), { recursive: true });
+    writeFileSync(join(bl, "runs", "e1", "tasks.yaml"), "x: 1\n", "utf-8");
+    mkdirSync(join(bl, "runs", "e1", "playable", "frames"), { recursive: true });
+    writeFileSync(join(bl, "runs", "e1", "playable", "report.json"), "{}", "utf-8");
+    writeFileSync(join(wt, "project.godot"), "", "utf-8");
+    const expected = ["./.bmad-loop/journal.jsonl", "./.bmad-loop/runs/e1/tasks.yaml", "./.bmad-loop/runs/e1/transcripts/**",
+      "./.bmad-loop/runs/other/**", "./.bmad-loop/tasks/**", "./_bmad-output/**", "./apps/**", "./plugins/**", "./project.godot"]
+      .sort().flatMap((t) => [`Edit(${t})`, `Read(${t})`, `Write(${t})`]);
+    expect(judgeDenyRules(wt, ".bmad-loop/runs/e1/playable")).toEqual(expected);
+    expect(judgeDenyRules(wt, ".bmad-loop\\runs\\e1\\playable")).toEqual(expected); // a Windows-joined media path
+    const deny = judgeDenyRules(wt, ".bmad-loop/runs/e1/playable");
+    for (const r of deny) for (const p of MEDIA_CHAIN) expect([r, p, covers(r, p)]).toEqual([r, p, false]);
+    expect(deny.some((r) => r === "Bash" || r.startsWith("Bash(") || r === "Edit" || r === "Read" || r === "Write")).toBe(false);
+    // an unlistable level throws (the default judge's catch: `inconclusive`, `infrastructure: sbx: …`)
+    expect(() => judgeDenyRules(wt, ".bmad-loop/runs/missing/playable")).toThrow();
   });
 
   test("DW-68: a deny profile that cannot be written is the judge's infrastructure (`inconclusive`, `infrastructure: sbx: …`); the worker never starts", async () => {
