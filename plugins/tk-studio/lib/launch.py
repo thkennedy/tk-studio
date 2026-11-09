@@ -49,6 +49,16 @@ Guarantees:
     readiness check that found a mismatch carries the `budget` object too.
     A band whose compared field is not a number puts that limit under
     `not_compared`, never compared on the remaining bands.
+  - Story 38.7 (R5, DW-175): `max_followup_reviews` is compared per band:
+    each band carrying `followup_reviews_max` against its effective policy
+    figure, `[limits.by_band] <band> = { max_followup_reviews = N }`, else
+    the global `limits.max_followup_reviews` (each `compared[]` entry names
+    its `policy_key`). `start` writes the next story's band figure into
+    `[limits] max_followup_reviews` (the engine reads one global cap) only
+    in a linked run worktree whose run takes one story
+    (`stop.after_stories` 1); the result's `followup_cap {band, figure,
+    applied, reason}` says why it did or did not. A main checkout's policy
+    is never written.
   - `check` reports the engine sandbox (Story 33.3) as one advisory row,
     never a gap: a sandbox the supervisor config names that `sbx ls` lists
     as running with no live supervisor pin record
@@ -213,13 +223,18 @@ GATE_NO_GODOT_WARNING = ("warning: sandbox {sb} has no WITH_GODOT record; an "
 # Story 36.6 (hole 105): the advisory row naming the run-epic job's rhythm
 RHYTHM_CHECK = "run rhythm"
 # policy `[limits]` key -> the band field its largest band is compared with
+# (Story 38.7: the follow-up review cap per band instead, against its
+# effective figure: `[limits.by_band] <band>`, else the global limit)
 BUDGET_COMPARED = (("max_tokens_per_story", "weighted_tokens"),
-                   ("max_review_cycles", "review_cycles_max"))
+                   ("max_review_cycles", "review_cycles_max"),
+                   ("max_followup_reviews", "followup_reviews_max"))
 # policy limits the bands carry no field for (the wall-clock session
-# timeout, the per-session token guard, the follow-up review cap): listed,
-# never a mismatch
-BUDGET_NOT_COMPARED = ("session_timeout_min", "max_tokens_per_session",
-                       "max_followup_reviews")
+# timeout, the per-session token guard): listed, never a mismatch
+BUDGET_NOT_COMPARED = ("session_timeout_min", "max_tokens_per_session")
+# Story 38.7 (R5, TKSTUDIO-211, DW-175): the limit compared band by band, and
+# the policy table carrying its per-band override
+FOLLOWUP_LIMIT = "max_followup_reviews"
+BY_BAND_KEY = "by_band"
 
 
 class LaunchError(Exception):
@@ -413,6 +428,9 @@ def compare_budget(project_root: Path) -> tuple[dict, dict]:
         return not_compared_all(f"{BANDS_REL} has no bands map")
 
     for limit, field in BUDGET_COMPARED:
+        if limit == FOLLOWUP_LIMIT:
+            _compare_per_band(limits, bands, limit, field, budget)
+            continue
         policy_value = limits.get(limit)
         if not _number(policy_value):
             reason = "absent from policy" if limit not in limits else "not a number in policy"
@@ -824,6 +842,63 @@ def reconcile_verify_commands(root: Path) -> tuple[dict, dict]:
                        f"{POLICY_REL} reconciliation did not verify; the original is restored")
     return (_verify_key(source, tracked, "written", added=added, kept=kept),
             row(True, f"added {len(added)} from {source}; kept {len(kept)} operator commands"))
+
+
+def _compare_per_band(limits: dict, bands: dict, limit: str, field: str,
+                      budget: dict) -> None:
+    """Story 38.7: one `compared[]` entry per band carrying ``field``, its
+    policy figure the band's `[limits.by_band] <band>` entry, else the
+    global ``limit``; `policy_key` names which. A non-table `by_band`, a
+    non-int by-band entry, a non-numeric band field or an absent global
+    puts the limit under `not_compared` with the reason named, and then no
+    band is compared on it."""
+    by_band = limits.get(BY_BAND_KEY, {})
+    if not isinstance(by_band, dict):
+        budget["not_compared"].append(
+            {"limit": limit, "reason": f"limits.{BY_BAND_KEY} is not a table"})
+        return
+    typed = [(str(name), band[field]) for name, band in bands.items()
+             if isinstance(band, dict) and field in band]
+    if not typed:
+        budget["not_compared"].append({"limit": limit, "reason": "no band field"})
+        return
+    bad = [name for name, value in typed if not _number(value)]
+    if bad:
+        budget["not_compared"].append({
+            "limit": limit,
+            "reason": "; ".join(f"band {name} {field} not a number" for name in bad)})
+        return
+    problems: list[str] = []
+    entries: list[dict] = []
+    for band, band_value in typed:
+        if band in by_band:
+            key = f"limits.{BY_BAND_KEY}.{band}.{limit}"
+            override = by_band[band]
+            value = override.get(limit) if isinstance(override, dict) else None
+            if not _int(value):
+                problems.append(f"{key} not an int")
+                continue
+        else:
+            key = f"limits.{limit}"
+            value = limits.get(limit)
+            if not _number(value):
+                problem = "absent from policy" if limit not in limits else "not a number in policy"
+                if problem not in problems:
+                    problems.append(problem)
+                continue
+        entries.append({"limit": limit, "policy": value, "band": band, "band_field": field,
+                        "band_value": band_value, "policy_key": key})
+    if problems:
+        budget["not_compared"].append({"limit": limit, "reason": "; ".join(problems)})
+        return
+    for entry in entries:
+        budget["compared"].append(entry)
+        if entry["band_value"] > entry["policy"]:
+            budget["budget_mismatch"].append(entry)
+
+
+def _int(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
 def mismatch_text(entry: dict) -> str:
@@ -1488,6 +1563,143 @@ def runs_stories(defn) -> bool:
     return isinstance(payload, dict) and payload.get("verb") == "start"
 
 
+def _rhythm_instance(root: Path, spec_rel: str) -> tuple[int | None, dict | None]:
+    """(epic, definition): the story-running instance whose
+    ``target.payload.epic`` is the ``spec-epic-<N>`` folder's (epic None
+    for any other folder name; definition None when no instance names it)."""
+    m = re.fullmatch(r"spec-epic-(\d+)", Path(spec_rel).name)
+    if not m:
+        return None, None
+    epic = int(m.group(1))
+    try:
+        paths = sorted(joblib.instances_dir(root).glob("*.json"))
+    except OSError:
+        paths = []
+    for path in paths:
+        entry = joblib.load_instance(root, path.stem)
+        candidate = entry.get("definition")
+        if not runs_stories(candidate):
+            continue
+        target = candidate.get("target")
+        payload = target.get("payload") if isinstance(target, dict) else None
+        if isinstance(payload, dict) and payload.get("epic") == epic:
+            return epic, candidate
+    return epic, None
+
+
+def _plan_band(folder: Path, entry_id: str) -> str | None:
+    """The `band:` of the story's plan (`plans/<N>-<M>.md` frontmatter)."""
+    story = _story_of(entry_id)
+    if story is None:
+        return None
+    try:
+        lines = (folder / "plans" / f"{story}.md").read_text(encoding="utf-8-sig").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return None
+    if not lines or lines[0].strip() != "---":
+        return None
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        m = re.match(r"^band:\s*(.*?)\s*$", line)
+        if m:
+            return m.group(1).strip("'\"") or None
+    return None
+
+
+_LIMITS_HEADER = re.compile(r"^\s*\[\s*limits\s*\]\s*(#.*)?$")
+
+
+def _set_limits_key(text: str, key: str, value: int) -> str | None:
+    """``text`` with ``key = value`` inside the `[limits]` table: the key's
+    line rewritten in place (its comment kept), else a line added under the
+    header. None when there is no `[limits]` header to edit. The header is
+    matched as TOML writes it (inner whitespace, a trailing comment:
+    `[ limits ]  # engine limits`); a sub-table such as `[limits.by_band]`
+    is never the header, and the table ends at the next header line."""
+    lines = text.splitlines(keepends=True)
+    head = next((i for i, line in enumerate(lines) if _LIMITS_HEADER.match(line)), None)
+    if head is None:
+        return None
+    end = next((i for i in range(head + 1, len(lines))
+                if lines[i].lstrip().startswith("[")), len(lines))
+    newline = "\r\n" if lines[head].endswith("\r\n") else "\n"
+    for i in range(head + 1, end):
+        m = re.match(rf"^(\s*{re.escape(key)}\s*=\s*)([^#\r\n]*?)(\s*(#.*)?)(\r?\n)?$", lines[i])
+        if m:
+            lines[i] = f"{m.group(1)}{value}{m.group(3)}{m.group(5) or ''}"
+            return "".join(lines)
+    lines.insert(head + 1, f"{key} = {value}{newline}")
+    return "".join(lines)
+
+
+def apply_followup_cap(root: Path, spec_folder: str) -> dict:
+    """Story 38.7 (R5, DW-175): ``{band, figure, applied, reason}``. The
+    engine reads one global follow-up review cap and has no band notion, so
+    in a linked run worktree (`.git` a file) whose run takes one story
+    (`stop.after_stories` 1) the next story's band figure from
+    `[limits.by_band]` is written into `[limits] max_followup_reviews` of
+    that worktree's policy copy: an atomic line edit, re-read with tomllib,
+    the original restored on any mismatch. A main checkout's policy is
+    never written; every other case writes nothing and names why."""
+    folder, rel = _spec_paths(root, spec_folder)
+    nxt = next_story(folder, _manifest_ids(folder / "stories.yaml"))
+    band = _plan_band(folder, nxt) if nxt else None
+    out = {"band": band, "figure": None, "applied": False, "reason": None}
+
+    def done(reason: str, **kw) -> dict:
+        out.update(kw, reason=reason)
+        return out
+
+    policy_path = root / POLICY_REL
+    try:
+        original = policy_path.read_bytes()
+        text = original.decode("utf-8")
+        data = tomllib.loads(text)
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        return done(f"{POLICY_REL} unreadable ({type(exc).__name__}); the global stands")
+    limits = data.get("limits")
+    by_band = limits.get(BY_BAND_KEY) if isinstance(limits, dict) else None
+    entry = by_band.get(band) if isinstance(by_band, dict) and band else None
+    figure = entry.get(FOLLOWUP_LIMIT) if isinstance(entry, dict) else None
+    if not _int(figure):
+        figure = None
+    out["figure"] = figure
+    if not (root / ".git").is_file():
+        return done("main checkout: the global stands")
+    _, defn = _rhythm_instance(root, rel)
+    stop = defn.get("stop") if isinstance(defn, dict) else None
+    after = stop.get("after_stories") if isinstance(stop, dict) else None
+    if after != 1 or isinstance(after, bool):
+        return done(f"after_stories not 1 ({after}): the global stands")
+    if band is None:
+        return done(f"no band read for {nxt or 'the next story'}: the global stands")
+    if entry is None:
+        return done(f"no by-band entry for {band}: the global stands")
+    if figure is None:
+        return done(f"limits.{BY_BAND_KEY}.{band}.{FOLLOWUP_LIMIT} not an int: the global stands")
+    if limits.get(FOLLOWUP_LIMIT) == figure:
+        return done(f"already {figure} in [limits]", applied=True)
+    new_text = _set_limits_key(text, FOLLOWUP_LIMIT, figure)
+    if new_text is None:
+        return done(f"{POLICY_REL} [limits] cannot be located: the global stands")
+    expected = {**data, "limits": {**limits, FOLLOWUP_LIMIT: figure}}
+    try:
+        _write_atomic(policy_path, new_text.encode("utf-8"))
+        with open(policy_path, "rb") as fh:
+            ok = tomllib.load(fh) == expected
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        ok = False
+    if not ok:
+        try:
+            _write_atomic(policy_path, original)
+        except OSError as exc:
+            return done(f"the cap write did not verify and the original could not be restored: {exc}")
+        return done("the cap write did not verify; the original is restored")
+    return done(f"[limits] {FOLLOWUP_LIMIT} = {figure} for band {band} (run worktree)",
+                applied=True)
+
+
 def run_rhythm_row(root: Path, spec_rel: str) -> dict:
     """Story 36.6 (hole 105, AC5): the advisory ``run rhythm`` row: the
     resolved ``stop.after_stories`` of the project's story-running instance
@@ -1501,25 +1713,9 @@ def run_rhythm_row(root: Path, spec_rel: str) -> dict:
     def row(detail: str) -> dict:
         return {"check": RHYTHM_CHECK, "ok": True, "detail": detail}
 
-    m = re.fullmatch(r"spec-epic-(\d+)", Path(spec_rel).name)
-    if not m:
+    epic, defn = _rhythm_instance(root, spec_rel)
+    if epic is None:
         return row("not an epic spec folder; no rhythm read")
-    epic = int(m.group(1))
-    defn = None
-    try:
-        paths = sorted(joblib.instances_dir(root).glob("*.json"))
-    except OSError:
-        paths = []
-    for path in paths:
-        entry = joblib.load_instance(root, path.stem)
-        candidate = entry.get("definition")
-        if not runs_stories(candidate):
-            continue
-        target = candidate.get("target")
-        payload = target.get("payload") if isinstance(target, dict) else None
-        if isinstance(payload, dict) and payload.get("epic") == epic:
-            defn = candidate
-            break
     if defn is None:
         return row(f"no run-epic instance names epic {epic}; no rhythm read")
     stop = defn.get("stop")
@@ -1658,6 +1854,8 @@ def start(project_root: Path, spec_folder: str, *, run_id: str | None = None,
         raise LaunchError(f"run id already exists: {run_dir}")
     log_path = launches_dir(root) / f"{rid}.log"
     _, rel = _spec_paths(root, spec_folder)
+    # Story 38.7: the band's follow-up review cap, a run worktree only
+    followup_cap = apply_followup_cap(root, spec_folder)
     args = ["run", "--project", str(root), "--spec", rel, "--run-id", rid]
     pid = spawn_detached(args, cwd=root, log_path=log_path)
     state = run_dir / "state.json"
@@ -1679,6 +1877,7 @@ def start(project_root: Path, spec_folder: str, *, run_id: str | None = None,
         "state_seen": seen,
         "checks": readiness["checks"],
         "budget": readiness["budget"],
+        "followup_cap": followup_cap,
     }
     if not seen:
         result["error"] = (f"engine did not write {state} within {wait_s:g}s — it may still be "

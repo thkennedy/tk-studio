@@ -211,7 +211,9 @@ class DriverContractTestCase(unittest.TestCase):
                        "relaunch", "status, intent, artifacts, reason",
                        "budget_mismatch", "allow_budget_mismatch",
                        "max_tokens_per_story", "not_compared",
-                       "never edited", "status page"):
+                       "never edited", "status page",
+                       # Story 38.7: the follow-up cap compared per band
+                       "followup_reviews_max"):
             self.assertIn(phrase, row)
         self.assertNotIn("ClaudeOS", row)
         section = " ".join(self.text[self.text.index("## 8. Conformance"):].split())
@@ -3830,6 +3832,87 @@ class DriverContractTestCase(unittest.TestCase):
         stories = next(line for line in self.text.splitlines()
                        if line.startswith("| Story / rulings"))
         self.assertRegex(stories, r"Story 38\.1, Story 38\.2, Story 38\.3, Story 38\.4, Story 38\.5, Story 38\.6(, Story 38\.\d+)* \(Epic 38\)")
+
+    def test_story_38_7_the_order_note_and_the_deferred_mint_marker_failure(self):
+        flat = " ".join(self.text.split())
+        for phrase in ("Order note (Story 38.7", "burned", "naming the counter only", "DW-169"):
+            self.assertIn(phrase, flat)
+        self.assertEqual(flat.count("*Order note (Story 38.7, EP-37 RETROSPECTIVE A4):*"), 1)
+        self.assertLess(flat.index("Order note (Story 38.7"), flat.index("**0.1.33 (DW-170"))
+        self.assertLess(flat.index("**0.1.32 (Story 37.6, additive).**"), flat.index("Order note (Story 38.7"))
+        mint = flat[flat.index("**0.1.32 (Story 37.1, additive).**"):]
+        mint = mint[:mint.index("**0.1.32 (Story 37.2")]
+        for phrase in ("naming both files in `written[]` on success",
+                       "A marker write that fails after the counter write ends `blocked`, exit 2, `ok: false`",
+                       "naming the counter only (`.tk-studio/plan-counter.yaml`)",
+                       "`deferred mint: DW-a, DW-b burned: the counter moved to <next> but the ledger's marker "
+                       "write failed (<error>)`",
+                       "never re-minted, and the next mint starts at `next` (DW-169, Story 38.7)"):
+            self.assertIn(phrase, mint)
+
+    def test_0_1_34_story_38_7_the_records_and_the_policys_bands(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.34**", header)
+        self.assertNotIn("**0.1.35**", header)
+        self.assertEqual(header.count("0.1.34 (Story 38.7, additive)"), 1)
+        self.assertLess(header.index("0.1.34 (Story 38.6, additive)"),
+                        header.index("0.1.34 (Story 38.7, additive)"))
+        clause = " ".join(header[header.index("0.1.34 (Story 38.7, additive)"):].split())
+        for phrase in ("the band cap, the order note and the deferred-mint answer",
+                       "`[limits.by_band] <band> = { max_followup_reviews = N }`",
+                       "`followup_reviews_max`", "`policy_key`", "(`followup_cap`)",
+                       "`setup --verify-workflow --project-key <SCRATCH>`", "`expand=values.transitions`"):
+            self.assertIn(phrase, clause)
+        flat = " ".join(self.text.split())
+        title = "**0.1.34 (Story 38.7, additive).**"
+        self.assertEqual(flat.count(title), 1)
+        self.assertLess(flat.index("**0.1.34 (Story 38.6, additive).**"), flat.index(title))
+        note = flat[flat.index(title):]
+        note = note[:note.index("## 8. Conformance")]
+        subs = ("**The band cap (R5, DW-175):**", "**The cap write:**", "**The setup (DW-182):**",
+                "**The records:**")
+        self.assertEqual([note.index(sub) for sub in subs], sorted(note.index(sub) for sub in subs))
+        for phrase in ("`followup_reviews_max` per band (S 1, M 1, L 2)",
+                       "`{limit, policy, band, band_field, band_value, policy_key}`",
+                       "`limits.by_band.<band>.max_followup_reviews`", "`limits.max_followup_reviews`",
+                       "`max_followup_reviews 1 < band L followup_reviews_max 2`",
+                       "the root is a linked run worktree (`.git` a file)",
+                       "`stop.after_stories` is 1",
+                       "`followup_cap {band, figure, applied, reason}`",
+                       "except a run worktree's per-band cap (0.1.34)",
+                       "a main checkout's policy is never written",
+                       "`## followup-cap-by-band`",
+                       "`expand=values.transitions`",
+                       "`folder <Title> (recorded)`",
+                       "every unrecorded folder goes to the owner's numbered steps",
+                       "`update_workflow(..., replace=True)`",
+                       "`verify_workflow {project_key, transition, removed, restored, update_status}`",
+                       "before any call", "the transition's v3 body",
+                       "`setup --project-key <SCRATCH>` without `--verify-workflow` is refused "
+                       "`blocked`, exit 2, before any call or write, its reason naming the "
+                       "missing `--verify-workflow`",
+                       "`test_every_story_closure_names_its_pr_outside_a_run_branch`",
+                       "a detached HEAD reads as outside a run branch",
+                       "`*.py`, `*.ts` and `*.md` at `text eol=lf`",
+                       "Every other field, kind and route is unchanged."):
+            self.assertIn(phrase, note)
+        row = next(line for line in self.text.splitlines()
+                   if line.startswith("| `tk-studio-launch` |"))
+        for phrase in ("max_tokens_per_story", "not_compared", "never edited", "followup_reviews_max",
+                       "except a run worktree's per-band cap (0.1.34)", "`followup_cap`"):
+            self.assertIn(phrase, row)
+        # the follow-up cap is compared per band, never listed as not_compared
+        self.assertIn("limits with no band field (`session_timeout_min`, "
+                      "`max_tokens_per_session`) are `not_compared`", row)
+        unbanded = re.search(r"limits with no band field \(([^)]*)\)", row)
+        self.assertIsNotNone(unbanded)
+        self.assertNotIn("max_followup_reviews", unbanded.group(1))
+        self.assertIn("`max_followup_reviews` has a band field and is compared per band", row)
+        stories = next(line for line in self.text.splitlines()
+                       if line.startswith("| Story / rulings"))
+        self.assertRegex(stories, r"Story 38\.1, Story 38\.2, Story 38\.3, Story 38\.4, Story 38\.5, "
+                                  r"Story 38\.6, Story 38\.7(, Story 38\.\d+)* \(Epic 38\)")
 
     def test_0_1_34_dw_52_dw_53_closeout_retry_and_go_after_an_unstopped_end(self):
         header = next(line for line in self.text.splitlines()

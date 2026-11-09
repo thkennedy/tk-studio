@@ -15,6 +15,12 @@
 # `usd_estimate` uses the measured v2 means (kb/execution-pipeline-model-routing.md:
 # core-code story ~$4.4, feature story ~$8.6 all-in). weighted_tokens is kept
 # for continuity with the TUA baseline.
+#
+# `followup_reviews_max` (Story 38.7) is the follow-up review rounds a band's
+# story may take after a finalized round still recommends one: the owner's
+# R5 (TKSTUDIO-211, DW-175) is 2 for band L only. `launch.py check` compares
+# it per band with `.bmad-loop/policy.toml` `[limits.by_band] <band> =
+# { max_followup_reviews = N }`, else `[limits] max_followup_reviews`.
 bands_version: 1
 currency: usd
 bands:
@@ -22,11 +28,14 @@ bands:
     usd_estimate: 4.5
     weighted_tokens: 2000000
     review_cycles_max: 1
+    followup_reviews_max: 1
   M:
     usd_estimate: 8.5
     weighted_tokens: 3500000
     review_cycles_max: 2
+    followup_reviews_max: 1
   L:
     usd_estimate: 13
     weighted_tokens: 5000000
     review_cycles_max: 2
+    followup_reviews_max: 2

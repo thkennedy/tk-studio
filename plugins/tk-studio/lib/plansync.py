@@ -54,6 +54,8 @@ CLI:
                             [--note TEXT] [--caller NAME] [--dry-run]
   uv run plansync.py setup --directory ROOT [--dry-run]
                            [--owner-account-id ID | --owner-email EMAIL]
+  uv run plansync.py setup --directory ROOT --verify-workflow
+                           --project-key SCRATCH [--dry-run]
   uv run plansync.py publish --directory ROOT [--dry-run]
                              [--source CATEGORY=PATH ...]
                              [--attachment-max-bytes N]
@@ -1283,11 +1285,21 @@ def _space_steps(site: str, key: str, name: str) -> list[str]:
             f"space key to `{key}`."]
 
 
-def _folder_steps(site: str, key: str, titles: list[str]) -> list[str]:
+def _folder_steps(site: str, key: str, titles: list[str],
+                  record: bool = False) -> list[str]:
+    """``record`` (Story 38.7, DW-182): the folder listing was refused by
+    scope, so the rerun cannot adopt a folder made by hand from the site:
+    the step also says how to record each one, or to widen the key."""
+    tail = ("" if not record else
+            ", then record each folder's id (from its address bar) under "
+            "`planning.confluence.folders.<name>` in `.tk-studio/config.yaml`, "
+            "or add `read:custom-content:confluence` and "
+            "`read:hierarchical-content:confluence` to the Confluence key so "
+            "the rerun adopts them")
     return [f"Sign in to https://{site}/wiki as the owner seat, open space "
             f"`{key}` and, from the sidebar's + > Folder, create the "
             f"top-level folder{'s' if len(titles) > 1 else ''} "
-            f"{', '.join(f'`{t}`' for t in titles)}."]
+            f"{', '.join(f'`{t}`' for t in titles)}{tail}."]
 
 
 def _owner_id_steps(site: str) -> list[str]:
@@ -1328,6 +1340,145 @@ def setup_flag_refusal(project_root: Path, dry_run: bool = False) -> dict:
         _setup_result(configlib.project_key(root), dry_run), "blocked",
         "tracking setup refused: --owner-account-id and --owner-email are "
         "exclusive — pass one of them, not both")
+
+
+def setup_project_key_refusal(project_root: Path, dry_run: bool = False) -> dict:
+    """Story 38.7: `--project-key` names `--verify-workflow`'s scratch
+    project and nothing else, so without `--verify-workflow` it is a named
+    refusal before any call or write (never a live setup against the bound
+    project with the scratch key dropped)."""
+    root = Path(project_root).resolve()
+    return _finish_setup(
+        _setup_result(configlib.project_key(root), dry_run), "blocked",
+        "tracking setup refused: --project-key is only read with "
+        "--verify-workflow (missing) — add --verify-workflow for the scratch "
+        "check, or drop --project-key for the live setup")
+
+
+VERIFY_WORKFLOW_ENV = (jirabackend.AGENT_EMAIL_ENV, jirabackend.AGENT_TOKEN_ENV,
+                       jirabackend.CLOUD_ID_ENV)
+
+
+def verify_workflow(project_root: Path, project_key: str | None,
+                    dry_run: bool = False, transport=None) -> dict:
+    """Story 38.7 (DW-182 (1)): exercise `POST /workflows/update` for real
+    on a scratch project: the first present GLOBAL transition the template
+    needs (`workflow_transitions`' order) is removed (`update_workflow(...,
+    replace=True)`), re-read absent, then the original list restored and
+    re-read present. Refused (`blocked`, exit 2) before any call when
+    ``project_key`` is missing or is the bound `planning.jira.project_key`
+    (compared case- and whitespace-insensitively, as Jira resolves keys),
+    or the agent seat's env is incomplete, and before the removal posts when
+    the original list holds a transition the update would refuse
+    (`refused_transitions`, which the restore posts). ``dry_run`` names the transition
+    and posts nothing. A failed restore ends `blocked`, naming the
+    transition's v3 body for a hand restore, as does a Jira error once the
+    removal has posted (it may have applied). The answer's `verify_workflow`
+    is `{project_key, transition, removed, restored, update_status}`."""
+    root = Path(project_root).resolve()
+    result = _setup_result(configlib.project_key(root), dry_run)
+    result["project_key"] = project_key
+    answer = {"project_key": project_key, "transition": None,
+              "removed": False, "restored": False, "update_status": None}
+    result["verify_workflow"] = answer
+
+    def finish(status: str, reason: str | None) -> dict:
+        return _finish_setup(result, status, reason)
+
+    bound = _recorded(root, "planning.jira.project_key")
+    if not project_key:
+        return finish("blocked", "verify-workflow refused: --project-key <SCRATCH> "
+                                 "is required (a scratch project, never the bound one)")
+    if bound is not None and str(project_key).strip().upper() == str(bound).strip().upper():
+        return finish("blocked", f"verify-workflow refused: {project_key} is the bound "
+                                 f"planning.jira.project_key — name a scratch project")
+    missing = [n for n in VERIFY_WORKFLOW_ENV if not os.environ.get(n)]
+    site = _recorded(root, "planning.jira.site") or os.environ.get(jirabackend.SITE_ENV)
+    if not site:
+        missing.append(jirabackend.SITE_ENV)
+    if missing:
+        return finish("blocked", "verify-workflow refused: " + ", ".join(missing)
+                      + " not set")
+    site = re.sub(r"^https?://", "", site).strip("/")
+    jira = jirabackend.JiraClient.for_gateway(
+        os.environ[jirabackend.CLOUD_ID_ENV], os.environ[jirabackend.AGENT_EMAIL_ENV],
+        os.environ[jirabackend.AGENT_TOKEN_ENV], transport, site=site)
+    body = None
+    removal_posted = False
+    try:
+        proj = jirabackend.get_project(jira, project_key)
+        if proj is None:
+            return finish("blocked", f"verify-workflow: no Jira project {project_key}")
+        if jirabackend.is_team_managed(proj):
+            return finish("blocked", f"verify-workflow: {project_key} is team-managed "
+                                     "(no shared workflow to update)")
+        have = jirabackend.find_statuses(jira, str(proj.get("id")), project_key, False)
+        flow, why = jirabackend.find_workflow(jira, project_key)
+        if flow is None:
+            return finish("blocked", f"verify-workflow: workflow not selected: {why}")
+        present = [(label, tr) for label, tr, ok in jirabackend.workflow_transitions(flow, have)
+                   if ok and tr.get("type") == "GLOBAL"]
+        if not present:
+            return finish("blocked", f"verify-workflow: no GLOBAL transition the template "
+                                     f"needs is present on {project_key}'s workflow")
+        label, wanted = present[0]
+        answer["transition"] = label
+        target = wanted["toStatusReference"]
+        original = list(flow.get("transitions") or [])
+        actual = next(tr for tr in original if jirabackend._is_type(tr, "GLOBAL")
+                      and jirabackend._transition_target(tr) == target)
+        body = json.dumps(jirabackend._v3_transition(actual), ensure_ascii=False)
+        # the restore posts `original` whole: a transition the update would
+        # refuse there is refused here, before the removal posts anything
+        refused = jirabackend.refused_transitions(original)
+        if refused:
+            return finish("blocked", f"verify-workflow: the restore of {project_key}'s "
+                                     "transitions would be refused (fields the update does "
+                                     "not accept): " + ", ".join(refused)
+                                     + "; nothing posted")
+        if dry_run:
+            result["notes"].append("dry run: nothing posted")
+            return finish("complete", f"dry run: would remove and restore {label} "
+                                      f"on {project_key}")
+        version, why = jirabackend.find_workflow_version(jira, project_key)
+        if version is None:
+            return finish("blocked", f"verify-workflow: workflow not selected: {why}")
+        removal_posted = True
+        done, detail = jirabackend.update_workflow(
+            jira, flow, version, [], [tr for tr in original if tr is not actual],
+            replace=True)
+        answer["update_status"] = "accepted" if done else detail
+        if not done:
+            return finish("blocked", f"verify-workflow: the removal of {label} was "
+                                     f"refused, nothing changed: {detail}")
+        reread, why = jirabackend.find_workflow(jira, project_key)
+        answer["removed"] = (reread is not None
+                             and not jirabackend.has_global_transition(reread, target))
+        restored_flow = reread or flow
+        version, why = jirabackend.find_workflow_version(jira, project_key)
+        detail = why
+        if version is not None:
+            done, detail = jirabackend.update_workflow(
+                jira, restored_flow, version, [], original, replace=True)
+            answer["update_status"] = "accepted" if done else detail
+            if done:
+                after, _ = jirabackend.find_workflow(jira, project_key)
+                answer["restored"] = (after is not None
+                                      and jirabackend.has_global_transition(after, target))
+        if not answer["restored"]:
+            return finish("blocked", f"verify-workflow: {label} was not restored on "
+                                     f"{project_key} ({detail or 're-read absent'}); "
+                                     f"restore it by hand with this v3 body: {body}")
+        if not answer["removed"]:
+            return finish("blocked", f"verify-workflow: the update of {project_key} was "
+                                     f"accepted but {label} still read present; restored")
+    except jirabackend.JiraError as exc:
+        return finish("blocked", f"verify-workflow: {exc}"
+                      + (f"; if {answer['transition']} is gone, restore it by hand "
+                         f"with this v3 body: {body}"
+                         if removal_posted and not answer["restored"]
+                         else ""))
+    return finish("complete", None)
 
 
 def setup(project_root: Path, dry_run: bool = False,
@@ -1598,26 +1749,38 @@ def setup(project_root: Path, dry_run: bool = False,
                 conf_binding["space_key"] = key
         if space is not None:
             conf_binding["space_id"] = str(space.get("id"))
+            listing_refused = False
             try:
                 titles = confluence.find_folders(conf, str(space.get("id")))
             except confluence.ConfluenceError as exc:
                 # Confluence's space-children listing wants read:custom-content
-                # beside read:hierarchical-content (hole 91): without it the
-                # folders are still created, just never adopted from the site.
+                # beside read:hierarchical-content (hole 91). Story 38.7
+                # (DW-182 (3)): without it nothing is created — an unadopted
+                # folder could duplicate one made by hand — and every
+                # unrecorded folder goes to the owner's numbered steps.
                 # the client folds the 401 into its own message (the token, its email,
                 # the org toggle), so a 401 on this one listing counts as the scope gap
                 if "scope" not in str(exc).lower() and " 401 " not in str(exc):
                     raise
                 titles = {}
-                notes.append("folder listing refused by scope (the Confluence key "
-                             "lacks read:custom-content:confluence, which the space "
-                             "children endpoint requires): folders created without "
-                             "adoption; a folder made by hand is not recognised")
+                listing_refused = True
+                notes.append("folder listing refused by scope: the unrecorded "
+                             "folders are handed to the owner's numbered steps, "
+                             "none created (an unadopted folder could duplicate "
+                             "one made by hand)")
             refused = []
+            handed = []
             for name, title in confluence.FOLDERS:
+                recorded_folder = _recorded(root, f"planning.confluence.folders.{name}")
                 if title in titles:
                     conf_binding["folders"][name] = titles[title]
                     found.append(f"folder {title}")
+                elif recorded_folder:
+                    # Story 38.7: a recorded folder is found, never re-created
+                    conf_binding["folders"][name] = recorded_folder
+                    found.append(f"folder {title} (recorded)")
+                elif listing_refused:
+                    handed.append(title)
                 elif dry_run:
                     would.append(f"folder {title}")
                 else:
@@ -1631,6 +1794,8 @@ def setup(project_root: Path, dry_run: bool = False,
                         created.append(f"folder {title}")
             if refused:
                 groups.append(_folder_steps(site, key, refused))
+            if handed:
+                groups.append(_folder_steps(site, key, handed, record=True))
         elif dry_run:
             would.extend(f"folder {title}" for _, title in confluence.FOLDERS)
     except (jirabackend.JiraError, confluence.ConfluenceError,
@@ -2487,6 +2652,11 @@ def main(argv: list[str] | None = None) -> int:
     stp.add_argument("--dry-run", action="store_true")
     stp.add_argument("--owner-account-id", default=None)
     stp.add_argument("--owner-email", default=None)
+    stp.add_argument("--verify-workflow", action="store_true",
+                     help="Story 38.7: remove and restore one global transition "
+                          "on a scratch project (--project-key)")
+    stp.add_argument("--project-key", default=None,
+                     help="--verify-workflow: the scratch project's key")
     pub = sub.add_parser("publish")
     pub.add_argument("--directory", required=True, help="project root (walks up to the nearest)")
     pub.add_argument("--dry-run", action="store_true")
@@ -2577,6 +2747,12 @@ def main(argv: list[str] | None = None) -> int:
                        if args.backend else None)
             result = sync(Path(args.directory), dry_run=args.dry_run,
                           runtime=runtime)
+        elif args.command == "setup" and args.verify_workflow:
+            result = verify_workflow(Path(args.directory), args.project_key,
+                                     dry_run=args.dry_run)
+        elif args.command == "setup" and args.project_key is not None:
+            result = setup_project_key_refusal(Path(args.directory),
+                                               dry_run=args.dry_run)
         elif args.command == "setup" and args.owner_account_id \
                 and args.owner_email:
             result = setup_flag_refusal(Path(args.directory),

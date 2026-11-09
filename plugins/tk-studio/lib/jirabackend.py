@@ -1748,8 +1748,11 @@ def find_workflow_version(client: JiraClient,
     (DW-127: `update_workflow`) pending the operator's attended rerun.
     None and a note when none or several match exactly."""
     wanted = WORKFLOW_NAME.format(key=project_key)
+    # Story 38.7 (DW-182): the site answers 400 to any other expand
+    # ("supported parameters are: [usage, values.transitions]")
     values = _paged_values(client, "/workflows/search",
-                           {"queryString": project_key},
+                           {"queryString": project_key,
+                            "expand": "values.transitions"},
                            scope=SCOPE_CONFIGURATION)
     exact = [w for w in values if w.get("name") == wanted]
     if len(exact) == 1 and exact[0].get("version") is not None:
@@ -1877,7 +1880,7 @@ def _with_fresh_ids(transitions: list[dict]) -> list[dict]:
 
 def update_workflow(client: JiraClient, workflow: dict, version,
                     status_ids: list[str],
-                    transitions: list[dict]) -> tuple[bool, str]:
+                    transitions: list[dict], replace: bool = False) -> tuple[bool, str]:
     """The workflow update (DW-107, DW-127): `status_ids` on the workflow,
     the existing transitions plus `transitions`, every one v3-shaped with an
     id (`_v3_transition`, `_with_fresh_ids`), and the `version` from `GET
@@ -1887,8 +1890,11 @@ def update_workflow(client: JiraClient, workflow: dict, version,
     is empty (Story 37.4 carries `screen` and `rules`, so nothing is
     dropped); on a refusal it is the refusal. A transition holding a key the
     update cannot accept (`refused_transitions`) posts nothing for the
-    workflow and answers False with the names (Story 37.4, DW-160)."""
-    every = [*(workflow.get("transitions") or []), *transitions]
+    workflow and answers False with the names (Story 37.4, DW-160).
+    ``replace`` (Story 38.7, `setup --verify-workflow`) posts exactly
+    ``transitions``, the workflow's own not added."""
+    every = (list(transitions) if replace
+             else [*(workflow.get("transitions") or []), *transitions])
     refused = refused_transitions(every)
     if refused:
         return False, ("transitions with fields the update does not accept, "
