@@ -208,6 +208,11 @@ DRIFT: drain.test.ts:165 fake prints the sbx listing capture shape (22nd file) �
 | review | 1 | 2026-11-09T04:43:44Z | 2026-11-09T04:55:37Z | fefd3863-595c-4fc4-85e1-f59ba78e115b | claude-opus-5-5 | medium | 3848829 | 48028 | 3.9822 | completed |
 | review | 2 | 2026-11-09T04:55:37Z | 2026-11-09T05:10:02Z | ef11a6d6-5df7-480d-815d-601369a5a78e | claude-opus-5-5 | medium | 3305646 | 48413 | 3.4182 | completed |
 | gate | 1 | 2026-11-09T05:10:03Z | 2026-11-09T05:17:05Z | 1bc81298-6e13-47c5-8cd6-c0b2518b0084 | claude-opus-5-5 | medium | 4605628 | 32809 | 2.7753 | completed |
+| host-leg | 1 | 2026-11-09T05:17:58Z | 2026-11-09T06:20:43Z | — | — | — | — | — | — | red |
+| close-out | 1 | 2026-11-09T06:20:43Z | 2026-11-09T06:20:53Z | — | — | — | — | — | — | draft PR |
+| re-run | 1 | 2026-11-09T06:45:53Z | 2026-11-09T08:07:54Z | — | — | — | — | — | — | red |
+| re-run | 2 | 2026-11-09T08:21:55Z | 2026-11-09T09:43:06Z | — | — | — | — | — | — | green |
+| merge | — | 2026-11-09T09:44:10Z | 2026-11-09T09:44:10Z | — | — | — | — | — | — | merged |
 
 ## Auto Run Result
 
