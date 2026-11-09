@@ -366,7 +366,8 @@ async function runLeg(
     const g = legGuard(queue.definition(run));
     // Story 34.8: a slice run's re-run gets the assets step too (DW-117: decided at the cut, `rerunHostLeg`).
     const slice = at.slice;
-    verify = await hostVerify({ ...run, worktree: path }, g.seconds, deps, { slice, guardKey: g.key });
+    // DW-69: the queue rides along so the default judge records its pin and releases it.
+    verify = await hostVerify({ ...run, worktree: path }, g.seconds, { ...deps, queue }, { slice, guardKey: g.key });
     // Story 35.1: a slice run's placed art and proof committed and pushed, before the body edit.
     const committed = slice ? await sliceCommit(run, path, at.branch, at.head, verify, rerun, deps) : { ok: true };
     rerun.pr = await runPr(run, queue.events(run.run_id), at.branch, deps);

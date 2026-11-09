@@ -630,7 +630,8 @@ source_spec: `34-3-the-playable-verify-leg-spec.md`
 location: apps/supervisor/src/hostverify.ts defaultJudge pin; apps/supervisor/src/hostleg.ts runLeg
 severity: low
 reason: Consult ruling 2026-10-27 (high-severity-finding, option A), sandbox.ts:22-31. Deferral class (c): a safety/resource rule on the box.
-status: open
+status: done 2026-11-09
+resolution: resolved by sweep bundle dw-judge-pin-release
 
 ### DW-70: Headless conformance drives ignore a manifest `timeout` (runner.py _run_drive uses DEFAULT_TIMEOUT 60); 34.1's e2e_engine_gate.py declares 120 and its 50+40 s bounds overrun the real 60 s cap. Also me
 origin: spec-deferred d7abdbe1ec63

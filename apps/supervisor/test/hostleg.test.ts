@@ -785,6 +785,29 @@ describe("Story 35.1: a slice re-run commits and pushes its placed art and proof
     }
   }, 240_000);
 
+  test("DW-69: the leg hands `hostVerify` the queue — the default judge's pin lands as `pinned` on the run and is released (`sbx stop`, `pin-released`)", async () => {
+    const fx = await sliceFixture();
+    delete fx.deps.judge; // the default judge: `invokeSkill` with its pin
+    const sbxLog: string[] = [];
+    fx.deps.sbx = { run: async (_bin: string, args: string[]) => { sbxLog.push(args.join(" ")); return { exit: 0, stdout: "", stderr: "" }; } } as any;
+    // The judge's `invokeSkill` spawner (preflight and worker): `hostVerify`'s own seam, carried through the leg's deps.
+    const spawned: string[][] = [];
+    Object.assign(fx.deps, { spawner: async (_bin: string, args: string[]) => {
+      spawned.push(args);
+      return args.includes("auth") && args.includes("status")
+        ? { exit: 0, stdout: JSON.stringify({ loggedIn: true, authMethod: "claude.ai" }), stderr: "" }
+        : { exit: 0, stdout: "", stderr: "" };
+    } });
+    const before = fx.queue.events(fx.id).length;
+    await (await rerunHostLeg(fx.queue, fx.id, { by: "api" }, fx.deps)).done;
+    expect(spawned.some((a) => a.includes("-p"))).toBe(true); // the default judge ran
+    const kinds = fx.queue.events(fx.id).slice(before).map((e) => e.kind);
+    expect(kinds).toContain("pinned"); // only a judge handed the queue notes its pin
+    expect(kinds.indexOf("pin-released")).toBeGreaterThan(kinds.indexOf("pinned"));
+    expect(sbxLog).toContain("run -d --name tk-sbx");
+    expect(sbxLog.at(-1)).toBe("stop tk-sbx");
+  }, 120_000);
+
   test("Story 35.3: the widened condition on the re-run: `skipped: no manifest` commits the proof; a red assets step commits nothing", async () => {
     const fx = await sliceFixture({ manifest: false });
     const r = await (await rerunHostLeg(fx.queue, fx.id, { by: "api" }, fx.deps)).done;

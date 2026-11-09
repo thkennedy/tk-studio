@@ -743,6 +743,26 @@ describe("release: `sbx stop <sb>` at the deferred `ended`, never on paused, nev
     expect(q.events(run.run_id).find((e) => e.kind === "pin-kept")?.detail).toEqual({ sandbox: SB, held_by: [other.run.run_id] });
   });
 
+  test("DW-69: a new pin episode on an ended run (a host-leg re-run's judge) reports its own `pin-kept`; a repeat release after the same pin adds none", async () => {
+    sbx.answer({});
+    const q = newQueue();
+    const { run } = await sbxRun(q);
+    q.end(run.run_id, "complete", null);
+    expect((await during(() => releasePin(q, run.run_id, deps))).out).toBe("released"); // the first episode: stopped
+    const other = await sbxRun(q, { job: "other-job", pinned: false }); // now running on the sandbox
+    const pinKept = () => q.events(run.run_id).filter((e) => e.kind === "pin-kept");
+    for (const episode of [1, 2]) {
+      q.note(run.run_id, "pinned", { sandbox: SB }); // the re-run's judge pins again
+      const { out, calls } = await during(() => releasePin(q, run.run_id, deps));
+      expect(out).toBe("kept");
+      expect(calls).toEqual([]);
+      expect(pinKept()).toHaveLength(episode);
+      expect(pinKept().at(-1)!.detail).toEqual({ sandbox: SB, held_by: [other.run.run_id] });
+      expect((await during(() => releasePin(q, run.run_id, deps))).out).toBe("kept"); // a repeat: no new `pinned`
+      expect(pinKept()).toHaveLength(episode);
+    }
+  });
+
   test("Release, second holder: external — a hand-started studio run on the sandbox, recorded by `detectExternal` with its job's placement → no `sbx stop`", async () => {
     sbx.answer({});
     const q = newQueue();

@@ -1774,6 +1774,19 @@ export class Queue {
     }).immediate();
   }
 
+  /** DW-69: is an ended run's host-leg re-run live — its latest `host-verify-leg` lease held by a live owner, with no
+   * `host-verify` nor later `host-verify-leg` after it (`takeVerifyLeg`'s refusal test)? Read-only; false for an
+   * unknown run. */
+  verifyLegLive(runId: string, self: Owner = selfOwner()): boolean {
+    if (!this.get(runId)) return false;
+    const evs = this.events(runId);
+    const at = evs.findLastIndex((e) => e.kind === "host-verify-leg");
+    if (at < 0) return false;
+    const lease = evs[at]!.detail?.owner as Owner | null | undefined;
+    const closed = evs.slice(at + 1).some((e) => e.kind === "host-verify" || e.kind === "host-verify-leg");
+    return !!lease && !closed && this.ownerLive(lease, self);
+  }
+
   /** Story 33.8: a re-run's lease let go of without a `host-verify` (its cut or materialise failed): an appended
    * `host-verify-leg {owner: null, released}`, only while the latest lease is `self`'s and no `host-verify` follows it. */
   releaseVerifyLeg(runId: string, self: Owner = selfOwner()): void {
