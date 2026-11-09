@@ -83,6 +83,7 @@ class FakeAtlassian(FakeJira):
         self.folders: dict[str, list[dict]] = {}
         self.force: dict[tuple[str, str], tuple[int, object]] = {}
         self.urls: list[str] = []
+        self.v3_queries: list[dict] = []   # every GET /workflows/search query
         self._ids = 0
 
     def _id(self, base: int) -> str:
@@ -218,6 +219,11 @@ class FakeAtlassian(FakeJira):
                       if q.get("queryString", "") in w["id"]["name"]]
             return 200, self._page(legacy, q)
         if method == "GET" and path == "/workflows/search":
+            # Story 38.7 (DW-182): the live site refuses any other expand
+            self.v3_queries.append(q)
+            if "expand" in q and q["expand"] != "values.transitions":
+                return 400, {"errorMessages": [
+                    "supported parameters are: [usage, values.transitions]"]}
             return 200, self._page([
                 {"id": w["id"]["entityId"], "name": w["id"]["name"],
                  "version": w["version"]} for w in self.workflows
@@ -538,6 +544,287 @@ class PartialTests(SetupTestCase):
         self._assert_numbered(again)
         self.assertIn("`Brief`, `GDD`, `Scope of Work`, `Decisions`, `Records`",
                       " ".join(again["owner_steps"]))
+
+
+class Story387SetupTests(SetupTestCase):
+    """Story 38.7 (DW-182): the v3 read's spelling, the folder hand-off when
+    the children read is refused by scope, the recorded folders, and
+    `setup --verify-workflow` on a scratch project key."""
+
+    def _children(self):
+        space = self.fake.spaces["TKSTUDIO"]
+        return ("GET", f"confluence:/spaces/{space['id']}/direct-children")
+
+    def test_the_version_read_spells_expand_values_transitions(self):
+        # the full setup's update reads the version with the site's spelling
+        result = self._setup(owner_account_id="acc-owner")
+        self.assert_block_last(result, "complete")
+        self.assertTrue(self.fake.v3_queries)
+        self.assertTrue(all(q.get("expand") == "values.transitions"
+                            for q in self.fake.v3_queries))
+        version, note = jirabackend.find_workflow_version(
+            jirabackend.JiraClient.for_gateway(CLOUD, "agent@example.com", "t",
+                                               self.fake, site=SITE), "TKSTUDIO")
+        self.assertEqual(note, "")
+        self.assertEqual(version["versionNumber"], 2)
+        self.assertEqual(self.fake.v3_queries[-1]["expand"], "values.transitions")
+
+    def test_a_refused_folder_listing_hands_the_folders_to_the_owner(self):
+        self._setup(owner_account_id="acc-owner")
+        space = self.fake.spaces["TKSTUDIO"]
+        self.fake.folders[space["id"]] = []
+        # the binding loses two folders; the listing is refused by scope
+        text = self.config.read_text(encoding="utf-8")
+        kept = [line for line in text.splitlines(keepends=True)
+                if not re.match(r"^\s+(gdd|records):", line)]
+        self.config.write_text("".join(kept), encoding="utf-8", newline="")
+        for dry_run in (True, False):
+            with self.subTest(dry_run=dry_run):
+                self.fake.force[self._children()] = (401, {"message": "Unauthorized"})
+                calls = len(self.fake.calls)
+                result = self._setup(dry_run=dry_run)
+                self.assert_block_last(result, "partial")
+                self.assertEqual([c for c in self.fake.calls[calls:] if c[0] in ("POST", "PUT")], [])
+                for title in ("Brief", "Scope of Work", "Decisions"):
+                    self.assertIn(f"folder {title} (recorded)", result["found"])
+                self.assertFalse([w for w in result["would_create"] if w.startswith("folder")])
+                steps = " ".join(result["owner_steps"])
+                self.assertIn("create the top-level folders `GDD`, `Records`", steps)
+                self.assertIn("record each folder's id (from its address bar) under "
+                              "`planning.confluence.folders.<name>`", steps)
+                self.assertIn("`read:custom-content:confluence` and "
+                              "`read:hierarchical-content:confluence`", steps)
+                self.assertIn("folder listing refused by scope: the unrecorded folders are "
+                              "handed to the owner's numbered steps, none created "
+                              "(an unadopted folder could duplicate one made by hand)",
+                              result["notes"])
+
+    def test_every_folder_recorded_is_found_and_nothing_is_created(self):
+        self._setup(owner_account_id="acc-owner")
+        self.fake.force[self._children()] = (401, {"message": "Unauthorized"})
+        writes = len(self.fake.writes())
+        result = self._setup()
+        self.assert_block_last(result, "complete")
+        self.assertEqual(len(self.fake.writes()), writes)
+        for title in FOLDER_TITLES:
+            self.assertIn(f"folder {title} (recorded)", result["found"])
+
+    # ---- --verify-workflow
+
+    def _scratch(self):
+        """A complete workflow on TKSTUDIO, bound as another key so TKSTUDIO
+        reads as a scratch project."""
+        self._setup(owner_account_id="acc-owner")
+        text = self.config.read_text(encoding="utf-8")
+        self.assertIn('project_key: "TKSTUDIO"', text)
+        self.config.write_text(text.replace('project_key: "TKSTUDIO"', 'project_key: "BOUND"'),
+                               encoding="utf-8", newline="")
+        self.fake.update_bodies.clear()
+
+    def _verify(self, key="TKSTUDIO", **kw):
+        return plansync.verify_workflow(self.root, key, transport=self.fake, **kw)
+
+    def _global_targets(self):
+        return [str(t.get("toStatusReference")) for t in self.fake.workflow["transitions"]
+                if str(t.get("type")).upper() == "GLOBAL"]
+
+    def test_verify_workflow_removes_and_restores_one_global_transition(self):
+        self._scratch()
+        before = list(self._global_targets())
+        todo = self.fake.status("To Do")["id"]
+        result = self._verify()
+        self.assert_block_last(result, "complete")
+        self.assertEqual(result["verify_workflow"], {
+            "project_key": "TKSTUDIO", "transition": "global transition -> To Do",
+            "removed": True, "restored": True, "update_status": "accepted"})
+        self.assertEqual(len(self.fake.update_bodies), 2)
+        removed = [t["toStatusReference"] for t in
+                   self.fake.update_bodies[0]["workflows"][0]["transitions"]
+                   if t["type"] == "GLOBAL"]
+        self.assertNotIn(todo, removed)
+        self.assertEqual(sorted(self._global_targets()), sorted(before))
+        self.assertTrue(all(q.get("expand") == "values.transitions"
+                            for q in self.fake.v3_queries))
+
+    def test_verify_workflow_dry_run_names_the_transition_and_posts_nothing(self):
+        self._scratch()
+        writes = len(self.fake.writes())
+        result = self._verify(dry_run=True)
+        self.assert_block_last(result, "complete")
+        self.assertEqual(result["verify_workflow"]["transition"], "global transition -> To Do")
+        self.assertFalse(result["verify_workflow"]["removed"])
+        self.assertEqual(len(self.fake.writes()), writes)
+
+    def test_verify_workflow_refusals_come_before_any_call(self):
+        self._setup(owner_account_id="acc-owner")
+        for key, phrase in ((None, "--project-key <SCRATCH> is required"),
+                            ("TKSTUDIO", "is the bound planning.jira.project_key")):
+            with self.subTest(key=key):
+                calls = len(self.fake.calls)
+                result = self._verify(key)
+                self.assert_block_last(result, "blocked")
+                self.assertIn(phrase, result["reason"])
+                self.assertEqual(len(self.fake.calls), calls)
+        code, out = self._cli(["setup", "--directory", str(self.root), "--verify-workflow",
+                               "--project-key", "TKSTUDIO"])
+        self.assertEqual(code, 2)
+        self.assertEqual(out["status"], "blocked")
+
+    def test_verify_workflow_a_case_variant_of_the_bound_key_is_refused(self):
+        # Jira resolves project keys case-insensitively: a lowercase or
+        # padded variant of the bound key is the bound project
+        self._setup(owner_account_id="acc-owner")
+        for key in ("tkstudio", " TkStudio "):
+            with self.subTest(key=key):
+                calls = len(self.fake.calls)
+                result = self._verify(key)
+                self.assert_block_last(result, "blocked")
+                self.assertIn("is the bound planning.jira.project_key", result["reason"])
+                self.assertEqual(len(self.fake.calls), calls)
+        calls = len(self.fake.calls)
+        code, out = self._cli(["setup", "--directory", str(self.root), "--verify-workflow",
+                               "--project-key", "tkstudio"])
+        self.assertEqual(code, 2)
+        self.assertEqual(out["status"], "blocked")
+        self.assertEqual(len(self.fake.calls), calls)
+
+    def test_project_key_without_verify_workflow_is_refused_before_any_call(self):
+        # a forgotten --verify-workflow must never fall through to the live
+        # setup against the bound project with the scratch key dropped
+        self._setup(owner_account_id="acc-owner")
+        config_before = self.config.read_bytes()
+        calls = len(self.fake.calls)
+        fake = self.fake
+
+        def transport(client, method, url, body=None, *a, **kw):
+            return fake(method, url, body)
+        for extra in ([], ["--dry-run"], ["--owner-account-id", "acc-owner"]):
+            with self.subTest(extra=extra), \
+                    mock.patch.object(jirabackend.JiraClient, "_http", transport), \
+                    mock.patch.object(confluence.ConfluenceClient, "_http", transport):
+                code, out = self._cli(["setup", "--directory", str(self.root),
+                                       "--project-key", "SCRATCH", *extra])
+                self.assertEqual(code, 2)
+                self.assert_block_last(out, "blocked")
+                self.assertFalse(out["ok"])
+                self.assertIn("--verify-workflow", out["reason"])
+                self.assertIn("missing", out["reason"])
+                self.assertEqual(out["written"], [])
+                self.assertEqual(len(self.fake.calls), calls)
+                self.assertEqual(self.config.read_bytes(), config_before)
+
+    def test_verify_workflow_with_no_global_transition_is_blocked(self):
+        self._scratch()
+        flow = self.fake.workflow
+        flow["transitions"] = [t for t in flow["transitions"]
+                               if str(t.get("type")).upper() != "GLOBAL"]
+        result = self._verify()
+        self.assert_block_last(result, "blocked")
+        self.assertIn("no GLOBAL transition", result["reason"])
+        self.assertEqual(self.fake.update_bodies, [])
+
+    def test_verify_workflow_a_restore_that_would_be_refused_posts_nothing(self):
+        # the chosen GLOBAL transition carries a field the update refuses:
+        # the restore would fail after the removal, so nothing is posted
+        self._scratch()
+        todo = self.fake.status("To Do")["id"]
+        chosen = next(t for t in self.fake.workflow["transitions"]
+                      if str(t.get("type")).upper() == "GLOBAL"
+                      and str(t.get("toStatusReference") or t.get("to")) == todo)
+        chosen["triggers"] = [{"ruleKey": "t"}]
+        calls = len(self.fake.calls)
+        result = self._verify()
+        self.assert_block_last(result, "blocked")
+        self.assertIn("would be refused", result["reason"])
+        self.assertIn(str(chosen.get("name") or chosen.get("id")), result["reason"])
+        self.assertIn("nothing posted", result["reason"])
+        self.assertEqual(self.fake.update_bodies, [])
+        self.assertNotIn(("POST", "/workflows/update"), self.fake.calls[calls:])
+        self.assertFalse(result["verify_workflow"]["removed"])
+        self.assertIsNone(result["verify_workflow"]["update_status"])
+
+    def test_verify_workflow_dry_run_with_a_refused_restore_is_blocked(self):
+        # the pre-flight runs before the dry-run return: a dry run on a
+        # transition the update would refuse ends blocked, not complete
+        self._scratch()
+        todo = self.fake.status("To Do")["id"]
+        chosen = next(t for t in self.fake.workflow["transitions"]
+                      if str(t.get("type")).upper() == "GLOBAL"
+                      and str(t.get("toStatusReference") or t.get("to")) == todo)
+        chosen["triggers"] = [{"ruleKey": "t"}]
+        calls = len(self.fake.calls)
+        result = self._verify(dry_run=True)
+        self.assert_block_last(result, "blocked")
+        self.assertIn("would be refused", result["reason"])
+        self.assertIn(str(chosen.get("name") or chosen.get("id")), result["reason"])
+        self.assertIn("nothing posted", result["reason"])
+        self.assertEqual(self.fake.update_bodies, [])
+        self.assertNotIn(("POST", "/workflows/update"), self.fake.calls[calls:])
+        self.assertFalse(result["verify_workflow"]["removed"])
+
+    def test_a_failed_restore_names_the_v3_body(self):
+        self._scratch()
+        real = self.fake._jira
+        posts = []
+
+        def second_update_refused(method, path, query, body):
+            if method == "POST" and path == "/workflows/update":
+                posts.append(body)
+                if len(posts) == 2:
+                    return 400, {"errorMessages": ["refused"]}
+            return real(method, path, query, body)
+        self.fake._jira = second_update_refused
+        result = self._verify()
+        self.assert_block_last(result, "blocked")
+        answer = result["verify_workflow"]
+        self.assertTrue(answer["removed"])
+        self.assertFalse(answer["restored"])
+        self.assertIn("restore it by hand with this v3 body:", result["reason"])
+        self.assertIn('"type": "GLOBAL"', result["reason"])
+        self.assertIn(self.fake.status("To Do")["id"], result["reason"])
+
+    def test_a_jira_error_after_the_removal_posted_names_the_v3_body(self):
+        # the removal is applied on the server, then the client's read times
+        # out (a POST is never retried: `_http` raises it as a JiraError)
+        self._scratch()
+        real = self.fake._jira
+        posts = []
+
+        def removal_applied_then_unreachable(method, path, query, body):
+            if method == "POST" and path == "/workflows/update":
+                posts.append(body)
+                real(method, path, query, body)
+                raise jirabackend.JiraError(f"cannot reach {SITE}: timed out")
+            return real(method, path, query, body)
+        self.fake._jira = removal_applied_then_unreachable
+        result = self._verify()
+        self.assert_block_last(result, "blocked")
+        self.assertEqual(len(posts), 1)
+        answer = result["verify_workflow"]
+        self.assertIsNone(answer["update_status"])
+        self.assertFalse(answer["restored"])
+        self.assertIn("timed out", result["reason"])
+        self.assertIn("if global transition -> To Do is gone, restore it by hand "
+                      "with this v3 body:", result["reason"])
+        self.assertIn('"type": "GLOBAL"', result["reason"])
+        self.assertIn(self.fake.status("To Do")["id"], result["reason"])
+
+    def test_a_jira_error_before_the_removal_posts_names_no_v3_body(self):
+        self._scratch()
+        unreachable = jirabackend.JiraError(f"cannot reach {SITE}: timed out")
+        with mock.patch.object(jirabackend, "find_workflow_version",
+                               side_effect=unreachable):
+            result = self._verify()
+        self.assert_block_last(result, "blocked")
+        self.assertIn("timed out", result["reason"])
+        self.assertNotIn("v3 body", result["reason"])
+        self.assertEqual(self.fake.update_bodies, [])
+
+    def _cli(self, argv):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = plansync.main(argv)
+        return code, json.loads(out.getvalue())
 
 
 class OwnerIdTests(SetupTestCase):

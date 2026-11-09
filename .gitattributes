@@ -11,3 +11,10 @@ tools/installer/install.* text eol=lf
 # the committed export bytes (Story 30.7).
 apps/studio-web/public/sprites/office.json text eol=lf
 apps/studio-web/public/sprites/office.png binary
+
+# Source and docs are LF in the index and on every checkout (Story 38.7, EP-37
+# RETROSPECTIVE A4): the fc1e2aa/e0512c4 round trip flipped a test file to CRLF
+# and back inside a feature commit, with no content change.
+*.py text eol=lf
+*.ts text eol=lf
+*.md text eol=lf

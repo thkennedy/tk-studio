@@ -1,6 +1,6 @@
 # Deferred Work
 
-<!-- deferred-work counter: last minted DW-206; mint through plansync.py deferred mint -->
+<!-- deferred-work counter: last minted DW-209; mint through plansync.py deferred mint -->
 
 ### DW-124: Contract §4 `submit` admitted a full job definition but the CLI/skill surface was id-only
 origin: migrated from legacy ledger ("Deferred from: code review of feat/tk-studio-connector (2026-08-06)"), 2026-10-29
@@ -206,7 +206,7 @@ source_spec: `28-1-the-rehearsal-is-a-script-with-a-report-spec.md`
 location: tools/restructure/rehearse.py (Step 2, Step 3)
 severity: medium
 reason: The first rehearsal on the agent PC (2026-10-16) failed at Step 2 "tags present": the supervisor carries `supervisor--v0.1.0` since the Epic 25 release of 2026-10-15, and 11 of its 58 commits are GitHub-signed web merges, so the next check would have failed too. Both AC premises came from the ADR section 5 text written before either existed. Attended fix on loop/epic-28: release tags (`supervisor--vX.Y.Z`) are carried (filter-repo rewrites them, Step 3 fetches `--tags`, a check asserts they resolve in the merged clone and names the push for the real merge); any other tag still fails; signatures are recorded as an `info` check, never a failure. ADR section 5 step 2 and the Story 28.1 AC amended with the date. Tests: test_release_tag_is_carried, test_unsigned_history_is_a_plain_pass; test_signed_commit and test_mergetag_commit now expect the informational pass.
-status: resolved
+status: resolved 2026-10-16 by thkennedy/tk-studio#116 (attended close-out on loop/epic-28, 01e7ac9b)
 
 ### DW-24: the nearest-root rule took the default per-user store for a project root on Windows (host gate red, engine green)
 origin: attended-closeout
@@ -214,7 +214,7 @@ source_spec: `28-2-a-nested-studio-project-is-a-first-class-root-spec.md`
 location: plugins/tk-studio/lib/config.py (_holds_config)
 severity: high
 reason: Only the configured store ($TK_STUDIO_HOME) was excluded from `_holds_config`; with that variable set the default `~/.tk-studio/config.yaml` still counted, and on Windows every temp folder and every project under the profile resolved to the profile folder itself (17 failures and 2 errors in the lib suite, one conformance drive red on the agent PC; the Linux engine never sees it because /tmp is outside $HOME). Attended fix on loop/epic-28: `_is_store` marks a `.tk-studio/` holding a store-only folder (`registry/`, `measurements/`, `projects/`) or matching a configured or default store root; `test_the_default_home_store_never_marks_a_project_root_either` reproduces it on every OS. Also fixed attended: the rehearsal test module was skipped whole on Windows (symlink shim; now a copy-or-folder fallback) and three host-only fixture assumptions (core.longpaths in the isolated gitconfig, shlex-quoted paths in a report assertion, an existing live file used as a never-written probe).
-status: resolved
+status: resolved 2026-10-16 by thkennedy/tk-studio#116 (attended close-out on loop/epic-28, 01e7ac9b)
 
 ### DW-25: A supervisor-queued run of the nested project apps/supervisor serves the outer tk-studio root, not apps/supervisor, so AC3's live clause ("the project served is the nested root and its verify.host is
 origin: spec-deferred 09bb86a90ae3
@@ -981,7 +981,7 @@ source_spec: `kb/agent-pc-setup-runbook.md` fixes row "hole 95"; `handoff-phase1
 location: the BMad base's `render_skill.py` (the `_bmad/render/<skill>/<slug>/.staging-* -> <generation>` rename across the sbx mount; a studio-managed base patch); apps/supervisor/src (the hole-65 auto-resume's snapshot rule)
 severity: medium
 reason: The dev session writes a `blocked` spec and bmad-loop pauses the run on a CRITICAL escalation before any work runs, the graceful stop discarded with it. Hole 65's second flavour: a failed first render, not a stale view of a complete one, so the auto-resume does not fire (the reason names two folders, the staging and the generation, and the snapshot is empty). The operator path worked (remove the empty snapshot folder and the untracked `blocked` draft spec, `POST /runs/{id}/resume`, re-arm the stop). The retro's C6 counts hole 95 as filed under DW-95; DW-95 is the `DNI` status, so this is the hole's first entry. Fix: `render_skill.py` retries the rename on EACCES/EPERM a few times (a studio-managed base patch, as d044471), and the auto-resume treats a failed first render (an empty or absent generation named beside its staging folder) as the one snapshot and resumes once.
-status: narrowed: patch registration owed the upstream issue URL (36.3: the failed first render auto-resumes once and the staging-rename retry ships in both `render_skill.py` copies; the `base-patches/patches.json` entry waits for a filed BMAD-METHOD issue, so `tk install` does not re-apply the retry yet)
+status: open (narrowed: patch registration owed the upstream issue URL (36.3: the failed first render auto-resumes once and the staging-rename retry ships in both `render_skill.py` copies; the `base-patches/patches.json` entry waits for a filed BMAD-METHOD issue, so `tk install` does not re-apply the retry yet))
 
 ### DW-111: A host-suite test pinned the exact state of a planning artifact under `_bmad-output` (the live epic-35 SPEC's design-note set), so the loop's own planner turned the host leg red (hole 96).
 origin: operator ledger, hole 96 (2026-10-29T06:53Z, 35.3's first leg); retro-epic-35 C1, C6, AI-8
@@ -1147,7 +1147,7 @@ source_spec: `36-1-one-verdict-for-every-consumer-spec.md`
 location: apps/supervisor/src/cli.ts:2658, :2667; plugins/tk-studio/contracts/driver-contract.md:396
 severity: low
 reason: `cli.ts` derives `green` from the leg and returns `green ? 0 : 1`, so an inconclusive leg exits 1, and no contract note states this. The contract's re-run exit list (`driver-contract.md:396`, in the 0.1.28 note) still reads "1 red or skipped"; that note is history and stays as written, so the statement belongs in a current version's note.
-status: resolved 2026-11-06 by Story 37.6
+status: resolved 2026-11-06 by Story 37.6 (thkennedy/tk-studio#340)
 
 ### DW-134: The 0.1.31 note says an inconclusive leg ends a sweep `partial` unconditionally, while `sweepEndState`'s `blocked` rules (no triage, no bundle landed) apply first.
 origin: spec-deferred 6a5dfd428d7c
@@ -1163,7 +1163,7 @@ source_spec: `36-1-one-verdict-for-every-consumer-spec.md`
 location: apps/supervisor/src/cli.ts:2667
 severity: low
 reason: `apps/supervisor/src/cli.ts:2658, :2667`; `driver-contract.md:396` reads "1 red or skipped" and is 0.1.28 history. Meets deferral rule (b).
-status: resolved 2026-11-02 by Story 37.1 (duplicate of DW-133)
+status: resolved 2026-11-02 by Story 37.1 (thkennedy/tk-studio#326; duplicate of DW-133)
 
 ### DW-136: A sweep's engine cost leaves out the engine's own `sweep-triage` session: `engine_cost_usd` and `(engine)` total the bundles only, so they understate the engine's full spend.
 origin: consult ruling 2026-10-30 (deviation-gt-0) on story 36-2
@@ -1171,7 +1171,7 @@ source_spec: `36-2-the-sweeps-records-are-whole-spec.md`
 location: plugins/tk-studio/lib/meter.py price-run (keys: triaged bundles, then other `dw*-` tasks and transcripts); apps/supervisor/src/sweep.ts `BUNDLE_KEY_RE`, `withEngineCost`
 severity: medium
 reason: Both pinned texts say per bundle, and the triage session is no bundle, so `price-run` never names it and the body, the `job-run` total and `ended.engine_cost_usd` omit its spend. The consult ruled against a triage line and against widening `BUNDLE_KEY_RE` in 36.2; the 36.2 contract paragraph states the exclusion. Fix: price the triage session under its own line and add it to the engine total.
-status: resolved 2026-11-06 by Story 37.5
+status: resolved 2026-11-06 by Story 37.5 (thkennedy/tk-studio#337)
 resolution: Story 37.5 priced the engine's own triage sessions (`sweep-triage`, `sweep-triage-<N>`, `sweep-migrate`) into `price-run`'s `triage` member and `usd_total`, so `engine_cost_usd`, `(engine)` and `total_cost_usd` include it; the record's `triage_cost_usd` and a `- triage:` line.
 
 ### DW-137: `emitTriage` appends the ledger's `sweep-triage` line before patching the note, so a failed patch re-emits on the next tick, against the contract's "once per engine run".
@@ -1180,7 +1180,7 @@ source_spec: `36-2-the-sweeps-records-are-whole-spec.md`
 location: apps/supervisor/src/sweep.ts emitTriage
 severity: low
 reason: `ledgerEmit` runs, then `queue.patchEventDetail(note.seq, {ledger: …})`; a busy queue throws at the patch, `emitTriage` swallows it, and the note still has no `ledger`, so the next tick emits a second line. Deferred from this story by the review's order.
-status: resolved 2026-11-06 by Story 37.5
+status: resolved 2026-11-06 by Story 37.5 (thkennedy/tk-studio#337)
 resolution: Story 37.5: `emitTriage` patches `ledger: "emitting"` before the emit, then `emitted` or `error: …`; a crash between the two is retried (one possible duplicate line, never a lost one).
 
 ### DW-138: `judgeJobRun` derives `n` from recorded `host-verify` events but emits before that event is noted, so a failed note reuses a `run_id` on the next re-run and last-line-wins readers drop the earlier judge's cost.
@@ -1189,7 +1189,7 @@ source_spec: `36-2-the-sweeps-records-are-whole-spec.md`
 location: apps/supervisor/src/hostleg.ts judgeJobRun, runLeg
 severity: low
 reason: `runLeg` emits `<id>:verify-<n>` and then notes the leg; when that note throws, the count does not move, the next re-run emits the same `<id>:verify-<n>`, and `jobRunCosts` and `runCost` keep only the last line, so the earlier judge's cost is lost to them. Deferred from this story by the review's order.
-status: resolved 2026-11-06 by Story 37.5
+status: resolved 2026-11-06 by Story 37.5 (thkennedy/tk-studio#337)
 resolution: Story 37.5: `runLeg` notes the `host-verify` first, then `judgeJobRun` derives `n` including it and emits; `rerun` is patched onto the event whole; a failed note emits no line.
 
 ### DW-139: On a late-closed sweep, `runCost` and the `jobRunCosts` readers keyed by the bare run id return the worker-only own line, so the API and delivery `cost_usd` read less than the PR body.
@@ -1198,7 +1198,7 @@ source_spec: `36-2-the-sweeps-records-are-whole-spec.md`
 location: apps/supervisor/src/inbox.ts runCost; apps/supervisor/src/board.ts jobRunCosts; apps/supervisor/src/api.ts:1263; apps/supervisor/src/delivery.ts:247
 severity: medium
 reason: A late close-out emits the priced engine as its own `job-run` line under `<run_id>:engine`, leaving the run's own line at the worker's cost, while these readers match `run_id` exactly, so they miss the engine line that the PR body's total includes. The consult left the readers and `spendByEpic` unchanged in 36.2; the 36.2 contract paragraph states the gap. Deferred from this story.
-status: resolved 2026-11-06 by Story 37.5
+status: resolved 2026-11-06 by Story 37.5 (thkennedy/tk-studio#337)
 resolution: Story 37.5: `runCost` and `jobRunCosts` by the bare run id answer the run's own line plus its `:engine` line (`jobRunCosts` folds it in, so a sum still counts each dollar once); `:verify-<n>` lines stay their own.
 
 ### DW-140: The engine's own `sweep-triage` session is not priced, so `engine_cost_usd` and `total_cost_usd` understate a sweep's full engine spend. Filed as DW-136.
@@ -1207,7 +1207,7 @@ source_spec: `36-2-the-sweeps-records-are-whole-spec.md`
 location: plugins/tk-studio/lib/meter.py:95
 severity: medium
 reason: `meter.py` `BUNDLE_KEY_RE`; ordered by the first consult. Meets deferral rule (b): the contract paragraph states the exclusion, and the open question is the operator's.
-status: resolved 2026-11-02 by Story 37.1 (duplicate of DW-136)
+status: resolved 2026-11-02 by Story 37.1 (thkennedy/tk-studio#326; duplicate of DW-136)
 
 ### DW-141: `emitTriage` appends the ledger line before patching the note, so a failed patch re-emits on the next tick. Filed as DW-137.
 origin: spec-deferred cd694828ef9c
@@ -1215,7 +1215,7 @@ source_spec: `36-2-the-sweeps-records-are-whole-spec.md`
 location: apps/supervisor/src/sweep.ts emitTriage
 severity: low
 reason: Both review layers. Meets deferral rule (b): the contract says once per engine run.
-status: resolved 2026-11-02 by Story 37.1 (duplicate of DW-137)
+status: resolved 2026-11-02 by Story 37.1 (thkennedy/tk-studio#326; duplicate of DW-137)
 
 ### DW-142: `judgeJobRun` derives `n` from `host-verify` events but emits before that event is noted, so a failed note reuses a `run_id` and last-line-wins readers drop the earlier judge's cost. Filed as DW-138.
 origin: spec-deferred 82b6a7cd8e20
@@ -1223,7 +1223,7 @@ source_spec: `36-2-the-sweeps-records-are-whole-spec.md`
 location: apps/supervisor/src/hostleg.ts judgeJobRun
 severity: low
 reason: Both review layers. Meets deferral rule (a): AC1 names the re-run judge's own line.
-status: resolved 2026-11-02 by Story 37.1 (duplicate of DW-138)
+status: resolved 2026-11-02 by Story 37.1 (thkennedy/tk-studio#326; duplicate of DW-138)
 
 ### DW-143: On a late-closed sweep, `runCost` and the bare-id `jobRunCosts` readers return the worker-only own line, so API and delivery `cost_usd` read less than the PR body. Filed as DW-139.
 origin: spec-deferred 783a1b339cea
@@ -1231,7 +1231,7 @@ source_spec: `36-2-the-sweeps-records-are-whole-spec.md`
 location: apps/supervisor/src/inbox.ts runCost
 severity: medium
 reason: Ordered by the second consult, with one sentence in the contract paragraph. Meets deferral rule (a): AC1 names the job-run cost.
-status: resolved 2026-11-02 by Story 37.1 (duplicate of DW-139)
+status: resolved 2026-11-02 by Story 37.1 (thkennedy/tk-studio#326; duplicate of DW-139)
 
 ### DW-144: A failed host `sweep-triage` emit is never retried: `emitTriage` notes `ledger: "error: …"`, and every later tick answers `seen`, so one transient failure keeps the event out of the host's ledger.
 origin: spec-deferred 5b3442e01081
@@ -1239,7 +1239,7 @@ source_spec: `36-2-the-sweeps-records-are-whole-spec.md`
 location: apps/supervisor/src/sweep.ts emitTriage
 severity: medium
 reason: Blind Hunter, confirmed at `sweep.ts emitTriage`. The failure is recorded as the matrix asks, and the queue note still holds the payload, but no later pass delivers it. Meets deferral rule (a): AC2 names the host's event.
-status: resolved 2026-11-06 by Story 37.5
+status: resolved 2026-11-06 by Story 37.5 (thkennedy/tk-studio#337)
 resolution: Story 37.5: the ledger pass retries an `emitting` or `error` triage note on a terminal sweep run each tick until it lands, bounded by `PLAN_RETRY_LIMIT` errors (`ledger_errors`).
 
 ### DW-145: Follow-up review still recommended for 36-2-the-sweeps-records-are-whole after the damping cap was spent
@@ -1272,7 +1272,7 @@ source_spec: `kb/agent-pc-setup-runbook.md` (the hole-106 row); the engine journ
 location: .bmad-loop/policy.toml (`session_timeout_min = 90`, `max_dev_attempts = 2`, `[scm] rollback_on_failure = false`, whose comment warns about a main checkout the run's own worktree never is); apps/supervisor/src/closeout.ts (the pause close-out: a draft PR, the worktree kept, no host leg for the landed commits, the stop request not re-armed); apps/supervisor/src/queue.ts (`cancel` on a paused sbx run calls the launch core's stop on the host, refused `bmad-loop is not on PATH`, DW-120); the planner (a band-L story planned over the dev clock)
 severity: medium
 reason: The pause cost the operator the sanctioned path: the engine asked for a hand `git reset --hard` in its worktree, the stop request it was holding was discarded, the two stories already built sat in a draft PR with no gate for an hour, and the story's issue was blocked with the owner tagged (hole 101). The operator cancelled the run, removed the kept worktree by hand, re-ran the host leg over `POST /runs/{id}/verify` and re-queued the story. Fix to make: `rollback_on_failure true` for a run's own worktree (nothing pre-existing to protect there; the auto-rollback keeps a resolved escalation's re-drive path), or the pause close-out runs the host leg for the landed commits and keeps the stop request so the resume stops where it was told; the planner splits a story whose plan exceeds the dev clock (the band-L stories 36.3 and 36.6 are the first candidates); the paused run's issue block says `no owner action` when the pause is an engine clock.
-status: resolved 2026-11-06 by Story 37.3
+status: resolved 2026-11-06 by Story 37.3 (thkennedy/tk-studio#333)
 resolution: Story 37.3 built the run worktree's rollback, the kept stop, the paused close-out's host leg (ready on green, a dirty tree a draft), the backfilled `timeout` Stage Log row and the planner's split rule; the remainder, the paused run's issue block saying `no owner action` when the pause is an engine clock, is DW-176.
 
 ### DW-149: Deferred-work ids are minted from the ledger's highest heading on whichever branch writes, so an engine run harvesting deferrals on its branch and an operator docs pass filing on `main` mint the same ids and collide at the merge (hole 107).
@@ -1281,7 +1281,7 @@ source_spec: `kb/agent-pc-setup-runbook.md` (the hole-107 row); the merge commit
 location: .bmad-loop's spec-deferrals harvest (`spec-deferrals-harvested`, ids from the ledger's maximum at the run's base); the operator's hand-filed entries (the docs pass reads the same maximum from `main`); `_bmad-output/implementation-artifacts/deferred-work.md` (no duplicate-heading check at parse); plugins/tk-studio/lib (no ledger tool that renumbers an entry and rewrites its references)
 severity: medium
 reason: Two writers, one counter, two branches: every run that harvests while the operator files guarantees a collision, and the resolution is a hand renumbering across epics.md, the plan entries, the runbook, the handoff and the Jira descriptions, with the story specs on the branch already citing the engine's ids. Fix to make: one id source for both writers (a counter file like `.tk-studio/plan-counter.yaml` bumped through a ledger verb both the harvest and the operator call), or ids reserved per writer (the engine mints from the base commit's maximum plus a run-local offset; the merge renumbers through a ledger tool that rewrites references); the ledger's parse refuses a duplicate heading so the collision fails the gate, never the merge.
-status: resolved 2026-11-02 by Story 37.1 (one counter and `plansync.py deferred mint` for both writers, and the duplicate-heading refusal; the remainder stays open: a hand mint on `main` while a run is live can still collide with the run's harvest, as a branch cannot see `main`'s live counter, so no hand-filed entry while a run is live without a renumber at the merge, until a reservation on `main` exists; `LedgerDuplicateId` in the host leg and the engine's gate is the catch, after the merge)
+status: resolved 2026-11-02 by Story 37.1 (thkennedy/tk-studio#326; one counter and `plansync.py deferred mint` for both writers, and the duplicate-heading refusal; the remainder stays open: a hand mint on `main` while a run is live can still collide with the run's harvest, as a branch cannot see `main`'s live counter, so no hand-filed entry while a run is live without a renumber at the merge, until a reservation on `main` exists; `LedgerDuplicateId` in the host leg and the engine's gate is the catch, after the merge)
 
 ### DW-150: Time bounds sized on the Linux gate fail on the Windows host leg, whose git is slower: a supervisor test with several git-backed fixtures past bun's 5 s default, and the run-sweep conformance drive's 60 s suite bound once 36.2 widened its filter to three stories (hole 108, hole 103's sibling).
 origin: hole 108 (PR 302's re-run host legs, 2026-10-31 01:58Z and 02:41Z: `sweep.test.ts` "the late close-out: `finished` is no cap …" at 5001 ms; then `e2e_run_sweep.py` "bun test test/sweep.test.ts hung past 60s", which also failed the two lib tests that run the real conformance suite)
@@ -1289,7 +1289,7 @@ source_spec: `kb/agent-pc-setup-runbook.md` (the hole-108 row); the fix commits 
 location: apps/supervisor/test/sweep.test.ts (the four-fixture test, now `30_000`); apps/supervisor/test/worktree.test.ts:1055 (the precedent, 2026-10-16); apps/supervisor/test/preload.ts (bunfig.toml's `[test] preload`; bunfig has no timeout key); tools/verify_host.py (`bun test ./<file>` per file with no `--timeout`); plugins/tk-studio/contracts/conformance/e2e_run_sweep.py (`BOUND_S`, now 240) and `e2e_engine_gate.py` (50 s), `e2e_playable_verify.py` (75 s), manifest.json's entry timeouts; the planner's test guidance (no win32 figure)
 severity: medium
 reason: Each recurrence costs a 40-minute host leg and a hand fix on the run branch, and the sandbox gate will never catch it because its git is fast enough; the second case cost two legs because the first leg's tail showed only the supervisor failure. Fix: a suite-wide default for the supervisor tests (`setDefaultTimeout(30_000)` in the preload, which every runner that loads it honours; bunfig has no timeout key) with the per-test `30_000` lines kept; the conformance drives' bounds sized from the host's measured figure with headroom (a drive that bounds a `bun test` names the host figure beside the bound) and the manifest entries following; the host leg's event keeping every suite's own verdict line, not only the last twenty lines; the planner's test guidance naming the host figure so fixture-heavy tests and widened drive filters are written with it.
-status: resolved 2026-11-05 by Story 37.2 (`_budget.HOST_TEST_TIMEOUT_MS`, 30 000 ms, on every drive's and `verify_host.py`'s `bun test` as `--timeout`, each bun drive's `BOUND_S` line naming it and the `e2e_windows_semantics` bounds step holding each derived suite bound to it plus `HEADROOM_S`; the red leg's `verdicts`; remainder: the planner's test guidance naming the host figure, DW-172)
+status: resolved 2026-11-05 by Story 37.2 (thkennedy/tk-studio#331; `_budget.HOST_TEST_TIMEOUT_MS`, 30 000 ms, on every drive's and `verify_host.py`'s `bun test` as `--timeout`, each bun drive's `BOUND_S` line naming it and the `e2e_windows_semantics` bounds step holding each derived suite bound to it plus `HEADROOM_S`; the red leg's `verdicts`; remainder: the planner's test guidance naming the host figure, DW-172)
 
 ### DW-151: After a successful unblock the issue reads `Block Resolved`, canonical `blocked`, so a later `done` can still hold an AD-5 conflict for a block already closed.
 origin: spec-deferred 7ccf327dfa9d
@@ -1297,7 +1297,7 @@ source_spec: `36-3-a-paused-or-resumed-run-is-never-parked-spec.md`
 location: plugins/tk-studio/lib/jirabackend.py:609
 severity: medium
 reason: `jirabackend.canonical_status` maps both template statuses to `blocked`; `pull_back` conflicts when the backend status moved since the snapshot and canonical `done` differs. The hand repair of hole 101 moved the issue to `Done` and re-synced; DW-130's fix as written does not. Meets deferral (a): behaviour AC1 names; AC1 pins the target status and AD-5 keeps the side-pick human.
-status: resolved 2026-11-06 by Story 37.4
+status: resolved 2026-11-06 by Story 37.4 (thkennedy/tk-studio#335)
 
 ### DW-152: Follow-up review still recommended for 36-3-a-paused-or-resumed-run-is-never-parked after the damping cap was spent
 origin: review-budget-followup
@@ -1321,7 +1321,7 @@ source_spec: `kb/agent-pc-setup-runbook.md` (the hole-110 row); `kb/bmad-base-pa
 location: apps/supervisor/src/sweep.ts `stopEngineAt` (now `toVmPath(studioRoot(env))` + the POSIX tail, as sandbox.ts:119); `_bmad/scripts/render_skill.py` and `apps/supervisor/_bmad/scripts/render_skill.py` `_publish` (the retry clears an empty destination before the next try; a Windows rename refuses an existing directory, WinError 183, a POSIX rename replaces an empty one); apps/supervisor/test/sweep.test.ts (the test's `/studio` root is POSIX by design); plugins/tk-studio/lib/tests/test_basepatch.py
 severity: medium
 reason: The engine's gate runs on Linux and the host leg on Windows; every class of difference so far (encoding, hole 103; time bounds, hole 108; path joins and rename semantics, hole 110) costs a 40-minute red leg and a hand fix on the run branch, and the leg's 20-line tail hides earlier suites' failures behind the last one. Both were fixed by hand on the run branch at `bcfa691` (#307), and the class recurred at `6d0a0cc` (#313: a POSIX-suffix assertion the host's backslash join failed). Fix to make (Story 37.2): the engine's gate runs a Windows-semantics check for the known classes (a `path.join`/`resolve` whose result reaches `toVmPath` or an `sbx exec` argv; `os.rename`/`Path.rename` onto a path that may exist; text-mode opens without an encoding; `bun test` bounds under the host figure), or the planner's test guidance names them with the host figures; the leg's event keeps every suite's own verdict line.
-status: resolved 2026-11-05 by Story 37.2
+status: resolved 2026-11-05 by Story 37.2 (thkennedy/tk-studio#331)
 
 ### DW-155: A bare multi-file `bun test` reads bun's 5 s past its first file on bun 1.4.3: the preload's `setDefaultTimeout` reaches only the first file, and a bunfig `[test] timeout` does not help.
 origin: spec-deferred, consult ruling 2026-10-31T09:48:21Z (deviation-gt-0) on Story 36.4's preload default
@@ -1329,7 +1329,7 @@ source_spec: `36-4-the-host-leg-goes-red-for-code-only-spec.md`
 location: apps/supervisor/test/preload.ts (`setDefaultTimeout(30_000)`); apps/supervisor (any bare multi-file `bun test`); plugins/tk-studio/contracts/conformance/e2e_paused_exits.py and e2e_vertical_slice.py (the two multi-file drives, which pass `--timeout 30000`)
 severity: medium
 reason: Measured on bun 1.4.3 outside the repo: 3 files of 6 s tests under the preload, the first file passes and the next two time out at 5000 ms; `[test] timeout = 30000` in a throwaway `bunfig.toml` still failed all three at 5000 ms. So a git- or uv-spawning test past a run's first file reads bun's 5 s unless the run passes `--timeout`. May affect 36-5 and 36-7, whose plans run the whole suite. Fix to make: run the whole suite with an explicit `--timeout`, or per file, or re-measure on a later bun.
-status: resolved 2026-11-05 by Story 37.2
+status: resolved 2026-11-05 by Story 37.2 (thkennedy/tk-studio#331)
 
 ### DW-156: Follow-up review still recommended for 36-4-the-host-leg-goes-red-for-code-only after the damping cap was spent
 origin: review-budget-followup
@@ -1345,7 +1345,7 @@ source_spec: `36-5-the-supervisors-own-faults-spec.md`
 location: plugins/tk-studio/lib/jobrun.py evaluate_stop
 severity: medium
 reason: evaluate_stop's new filter applies only to on_status; counted still includes own-marked runs. AC1 names on_status, so whether max_runs should change is outside this story; deferral rule (a), the criterion's "next submission is woken".
-status: resolved 2026-11-06 by Story 37.3
+status: resolved 2026-11-06 by Story 37.3 (thkennedy/tk-studio#333)
 
 ### DW-158: Follow-up review still recommended for 36-5-the-supervisors-own-faults after the damping cap was spent
 origin: review-budget-followup
@@ -1361,7 +1361,7 @@ source_spec: `36-6-setup-and-the-launch-check-by-evidence-spec.md`
 location: apps/supervisor/src/closeout.ts `isRunEpic`
 severity: medium
 reason: `isRunEpic` is true only when a run's resolved definition has `type` or `id` `run-epic`, so a `run-vertical-slice` run on a game project takes neither the `in-progress` plan call nor the `stop.after_stories` rhythm. The story's M24 keeps the field off that job, so the gap is outside 36.6.
-status: resolved 2026-11-06 by Story 37.4
+status: resolved 2026-11-06 by Story 37.4 (thkennedy/tk-studio#335)
 
 ### DW-160: `plansync setup` posts copied transitions without their `screen` and `rules`, which can erase a site's configuration, and the v3 update schema may have spellings that would carry them.
 origin: spec-deferred d598570a16ed
@@ -1369,7 +1369,7 @@ source_spec: `36-6-setup-and-the-launch-check-by-evidence-spec.md`
 location: plugins/tk-studio/lib/jirabackend.py:1638
 severity: medium
 reason: Deferral class (a), AC1. `_v3_transition` sends a whitelist, so `POST /workflows/update` omits them, and the loss is named only afterwards in `notes` with the setup still `complete`. From a reviewer's and this session's memory, not verified (Atlassian's docs page answered 403 here), the v3 schema has `conditions`, `validators`, `actions`, `triggers` and `transitionScreen`. The consult of 2026-10-31T17:47:31Z ruled that a loss or a v3 spelling found by the operator's live call becomes a follow-up. The legacy rule shapes do not map one to one, so a mapping needs the site's real read.
-status: resolved 2026-11-06 by Story 37.4
+status: resolved 2026-11-06 by Story 37.4 (thkennedy/tk-studio#335)
 
 ### DW-161: A figure 1 run whose arming was refused still relaunches at close-out, so one queue run can build a second story.
 origin: spec-deferred 9e39164515b6
@@ -1377,7 +1377,7 @@ source_spec: `36-6-setup-and-the-launch-check-by-evidence-spec.md`
 location: apps/supervisor/src/closeout.ts:577
 severity: medium
 reason: Deferral class (a), AC5's "never builds two stories in one run". `closeOutLanded` reads only `gracefulStopInForce` and `storyBoundaryRecorded`, never the job's rhythm. It needs a double fault: a refused stop, which already sends one notifier line, and then a pause that lands the story. The fix means ending at a boundary with no stop in force, and the `story-boundary` event's `graceful_stop` and `StopInForce.source` have no value for that today.
-status: resolved 2026-11-06 by Story 37.3
+status: resolved 2026-11-06 by Story 37.3 (thkennedy/tk-studio#333)
 
 ### DW-162: `rearmFailedLine` still prints a `launch.py stop` command with no `--directory`, which fails argument parsing.
 origin: spec-deferred 37db24c63664
@@ -1385,7 +1385,7 @@ source_spec: `36-6-setup-and-the-launch-check-by-evidence-spec.md`
 location: apps/supervisor/src/closeout.ts:1068
 severity: low
 reason: Deferral class (a), filed by the consult of 2026-10-31T19:40:00Z. `launch.py stop` declares `--directory` as required, and on the sbx tier the host has no `bmad-loop`. The line predates this story; `armRefusedLine` was fixed here and `gracefulStopCommand` is the form to reuse.
-status: resolved 2026-11-06 by Story 37.6
+status: resolved 2026-11-06 by Story 37.6 (thkennedy/tk-studio#340)
 
 ### DW-163: Follow-up review still recommended for 36-6-setup-and-the-launch-check-by-evidence after the damping cap was spent
 origin: review-budget-followup
@@ -1401,7 +1401,7 @@ source_spec: `36-7-the-cycles-cut-and-the-docs-caught-up-spec.md`
 location: apps/supervisor/src/cli.ts:626
 severity: low
 reason: Category (b), a contract line left partly unpinned: "the run's engine MCP stops at its release". The patch's `releaseWiringFaults` covers the callers, so removing the injection from `withMcpStop`'s body fails no test.
-status: resolved 2026-11-06 by Story 37.6
+status: resolved 2026-11-06 by Story 37.6 (thkennedy/tk-studio#340)
 
 ### DW-165: DW-131's Jira stage-log half has no entry: a sweep bundle has no Jira story, so its engine passes post no stage-log row.
 origin: retrospective C8 (`_bmad-output/specs/spec-epic-36/RETROSPECTIVE.md`:77)
@@ -1409,7 +1409,7 @@ source_spec: `36-2-the-sweeps-records-are-whole-spec.md` (:187, :365)
 location: plugins/tk-studio/lib/plansync.py stage-post; apps/supervisor/src/sweep.ts
 severity: low
 reason: DW-131 closed on the priced close-out (the runbook's hole-102 row: "A bundle still has no Jira story, so the stage log posts no row for it"), and its stage-log half was left with no open entry because 36.2's AC1 did not name it. A bundle's spend reaches `## Metered cost` and the `job-run` line, but no Stage Log row or Jira worklog.
-status: resolved 2026-11-08 by Story 38.3 (a sweep bundle's engine passes are Stage Log rows in the sweep PR body's ## Stage Log; the Jira half not owed: a bundle has no issue)
+status: resolved 2026-11-08 by Story 38.3 (thkennedy/tk-studio#357; a sweep bundle's engine passes are Stage Log rows in the sweep PR body's ## Stage Log; the Jira half not owed: a bundle has no issue)
 
 ### DW-166: DW-64's remainder has no entry: the late terminal close-out, `closeOutNow` and `cancel`.
 origin: retrospective C8 (`_bmad-output/specs/spec-epic-36/RETROSPECTIVE.md`:77)
@@ -1417,7 +1417,7 @@ source_spec: `36-3-a-paused-or-resumed-run-is-never-parked-spec.md` (:304)
 location: apps/supervisor/src/closeout.ts (the late terminal close-out); apps/supervisor/src/cli.ts `closeOutNow`; the `cancel` path
 severity: low
 reason: 36.3 closed DW-64 for the paths its criteria named; its status line records the remainder, and the spec says it has no open entry of its own.
-status: resolved 2026-11-08 by Story 38.5 (the late terminal close-out, `closeOutNow` and the cancel open or mark a PR ready only on a `complete` end a recorded green or skipped leg vouches for, or a run that launched no engine; else a draft, with `closeout.result "draft PR"`, the `pr` and one job-run line)
+status: resolved 2026-11-08 by Story 38.5 (thkennedy/tk-studio#363; the late terminal close-out, `closeOutNow` and the cancel open or mark a PR ready only on a `complete` end a recorded green or skipped leg vouches for, or a run that launched no engine; else a draft, with `closeout.result "draft PR"`, the `pr` and one job-run line)
 
 ### DW-167: No gate runs `command-line.test.ts`: `tools/verify_host.py` excludes it and the spec's Verification command leaves `TK_STUDIO_ROOT` unset, so the e2e suite goes unrun.
 origin: retrospective C8 (`_bmad-output/specs/spec-epic-36/RETROSPECTIVE.md`:77)
@@ -1425,7 +1425,7 @@ source_spec: `36-5-the-supervisors-own-faults-spec.md` (:323)
 location: tools/verify_host.py `SUPERVISOR_E2E`; apps/supervisor/test/command-line.test.ts
 severity: medium
 reason: The host leg excludes the file, and the engine's gate does not run it, so a fault it would catch reaches no gate. The `api.test.ts` store test also skips without `TK_STUDIO_ROOT`.
-status: resolved 2026-11-09 by Story 38.6 (the e2e suite runs under the host leg in its own step, `bun test --timeout 30000 ./test/command-line.test.ts` under `SUPERVISOR_E2E_TIMEOUT` 1800 s with the per-file env, its absence one named skip line; the `api.test.ts` store test defaults `TK_STUDIO_ROOT` to its checkout and skips only without `uv`)
+status: resolved 2026-11-09 by Story 38.6 (thkennedy/tk-studio#368; the e2e suite runs under the host leg in its own step, `bun test --timeout 30000 ./test/command-line.test.ts` under `SUPERVISOR_E2E_TIMEOUT` 1800 s with the per-file env, its absence one named skip line; the `api.test.ts` store test defaults `TK_STUDIO_ROOT` to its checkout and skips only without `uv`)
 
 ### DW-168: The four operator proofs Epic 36 owes are unrecorded: the nt `kill_tree` run on the host, the live `plansync setup`, an `sbx skills ls` capture and CAP-14's hold count on a live run.
 origin: retrospective C8 (`_bmad-output/specs/spec-epic-36/RETROSPECTIVE.md`:77), A5 (:49)
@@ -1433,7 +1433,7 @@ source_spec: `36-4-the-host-leg-goes-red-for-code-only-spec.md` (:83, :141, :260
 location: plugins/tk-studio/lib (`kill_tree`, `plansync.py setup`); the `sbx skills ls` parser; `queue.db` `hold` events
 severity: medium
 reason: Each needs the host or a live site, so the engine cannot prove it: the specs record them asked or `unverifiable-here`. Owned by Story 37.7, which asks through the consult log; the live `plansync setup` waits for Story 37.4 on `main`. Answered 2026-11-06 on the box in the owning specs' Consult Logs: CAP-11 proven (117 tests OK, both nt tests ran, 36-4 spec), CAP-13 captured (`sbx skills ls` exit 0; the listing names the store's entries, not skills: DW-183; 36-5 spec), CAP-14 (a) read (one `hold` per run on all ten runs since 36.5; 36-5 spec). Still owed: CAP-14 (b) and (c) on the next live sandbox run, and CAP-16's live update, which this site cannot exercise as it stands (the dry run found every transition; the live call was not made for its side effects alone: DW-182; 36-6 spec).
-status: open
+status: resolved 2026-11-09 by Story 38.7 (CAP-14 (b)/(c) recorded in the 36-5 spec's Consult Log 2026-11-07T21:07Z; CAP-16's live update carried by DW-182)
 
 ### DW-169: The contract's 0.1.32 paragraph does not describe the `deferred mint` answer when the marker write fails after the counter write.
 origin: spec-deferred fa7d6963a6e0
@@ -1441,7 +1441,7 @@ source_spec: `37-1-one-id-source-for-the-ledger-spec.md`
 location: plugins/tk-studio/contracts/driver-contract.md
 severity: low
 reason: Meets (b), a contract surface left unpinned. mint_deferred answers blocked, exit 2, with written naming only the counter and a reason saying the ids are burned; the contract says the verb names both files in written[].
-status: open
+status: resolved 2026-11-09 by Story 38.7 (the contract's 0.1.32 Story 37.1 paragraph states the marker-failure answer: `blocked`, exit 2, `written` naming the counter only, the ids burned; pinned by `test_story_38_7_the_order_note_and_the_deferred_mint_marker_failure`)
 
 ### DW-170: The engine sandbox's Docker sign-in expires and nothing re-signs it: a queued sbx run sits on `pin-failed` ("not signed in to Docker") until an operator runs `sbx login` by hand (hole 111).
 origin: hole 111 (Story 37.2's run q-run-epic-37-20261105T204854Z-4f20f3, queued 2026-11-05 20:48Z; `pin-failed` 20:49Z; the browser-session sign-in from 2026-09-27 had lapsed some time after 2026-11-02; the daemon ran, only the sign-in was gone)
@@ -1459,7 +1459,7 @@ location: plugins/tk-studio/lib/track.py `block` (no `--source sweep`); plugins/
 severity: medium
 reason: The triage names each decision as a bare question, the engine skips it, the PR lists it, and nothing asks the owner anywhere he answers; the October sweeps left 68 unanswered and the fourth sweep is gated on them. On 2026-11-05 the 71 ids were re-verified against `main` (47 live, 24 resolved since; three subagents, evidence per entry), grouped into 19 related decisions, each with lettered options and a recommended default, and posted as Tasks TKSTUDIO-206 to 224 (label `tk-studio-decision`, assignee the owner, `Blocked - Awaiting User`, the mention comment) by a scratch script. Fix to make (beside Story 37.5, before the fourth sweep): the triage carries `options[]` and `default` per decision; `track.py block --source sweep` posts one issue per related group from the run's `triage.json` in the engagement-questions shape; the inbox tick ingests a decision item at `Block Resolved` (`<id>: <letter>` lines, `all:`, `default`), writes `decision:` onto the ledger entry and answers `bmad-loop decisions` in the sandbox, replies naming what is still open and re-blocks when a line is missing; the studio web's inbox shows the same items. The nineteen hand-posted issues are ingested by hand on their answers until the verb exists.
 resolution: Story 38.4 (contract 0.1.34): triage decisions lettered with a default (`sweepdecisions`, `triage_summary`, `parseTriage`); `track.py block --source sweep` from the sweep's close-out on a bound project (one `tk-studio-decision` Task per related group, the record `_bmad-output/tracking/decisions-jira.json`, the PR body listing the keys); the sync-back ingest (`decision:` lines through `plansync.py ledger-decide`, the reply, Done or a re-block); the engine answered at the close-out; the inbox `decision` item and the web rows; the promote's block edge (a)
-status: resolved 2026-11-08 by Story 38.4 (the owner's decisions have a source and a sink: `track.py block --source sweep`, the tick's ingest, `ledger-decide`, the engine answer at the close-out, the inbox decision rows; TKSTUDIO-220..224 ingested by the verb when they return)
+status: resolved 2026-11-08 by Story 38.4 (thkennedy/tk-studio#359; the owner's decisions have a source and a sink: `track.py block --source sweep`, the tick's ingest, `ledger-decide`, the engine answer at the close-out, the inbox decision rows; TKSTUDIO-220..224 ingested by the verb when they return)
 
 ### DW-172: DW-150's remainder: the planner's test guidance does not name the 30 000 ms host figure, so fixture-heavy tests and widened drive filters are still planned on the Linux gate's timings.
 origin: DW-150's resolution (Story 37.2 review pass 1, 2026-11-05)
@@ -1467,7 +1467,7 @@ source_spec: `37-2-the-windows-classes-out-of-the-host-leg-spec.md`
 location: the planner's test guidance (the plan template the planner tier writes from; Story 37.3 changes the same guidance for its split rule); plugins/tk-studio/contracts/conformance/_budget.py `HOST_TEST_TIMEOUT_MS` (the figure to name)
 severity: low
 reason: Story 37.2 put the host figure on every `bun test` command and every drive's bound, and its `bounds` step catches a bound under it, so the gate now trips; what is left is the planning half: a plan that adds git-backed fixtures or widens a drive's filter is not told the host's figure before it is written, so the first sign is still a red step. Fix to make: the planner's test guidance names `_budget.HOST_TEST_TIMEOUT_MS` (30 000 ms per test on the Windows host) and the derived suite bound beside it, pinned by the guidance's test.
-status: resolved 2026-11-09 by Story 38.6 (`task-planning.md` section 3 names `_budget.HOST_TEST_TIMEOUT_MS` (30 000 ms a test on the host) and the derived suite bound (the figure plus `_budget.HEADROOM_S`, 45 s), pinned by `test_planner_rules.py`)
+status: resolved 2026-11-09 by Story 38.6 (thkennedy/tk-studio#368; `task-planning.md` section 3 names `_budget.HOST_TEST_TIMEOUT_MS` (30 000 ms a test on the host) and the derived suite bound (the figure plus `_budget.HEADROOM_S`, 45 s), pinned by `test_planner_rules.py`)
 
 ### DW-173: `apps/supervisor/test/guards.test.ts` fails 2 tests when the box has `TK_ATLASSIAN_*` set: the sbx argv cases assert fixed positions that the env's `-e NAME` passthrough shifts (retrospective C7, the class `tier.test.ts` now pins).
 origin: Story 37.2 pass 1 deviation, consult ruling 2026-11-05T22:38Z (accept-deviation score 1: file the guards.test.ts env failures as a ledger entry, never skipped by name)
@@ -1475,7 +1475,7 @@ source_spec: `37-2-the-windows-classes-out-of-the-host-leg-spec.md`
 location: apps/supervisor/test/guards.test.ts "sbx: the in-VM wall-clock guard rides the argv (no shell)" ("buildSbxCommand puts `timeout -k <s> <guardS>` before `env`; the prompt stays one argv item" and "invokeSkill passes its timeout (the guard) to the in-VM `timeout`"); apps/supervisor/src/server.ts `sbxEnvPassthrough`; apps/supervisor/test/tier.test.ts (the pin to copy: save and delete `TK_*ATLASSIAN*` in `beforeAll`, restore in `afterAll`)
 severity: low
 reason: Reproduced on the agent PC 2026-11-05: `bun test --timeout 30000 test/guards.test.ts` is 55 pass, 2 fail with the box's `TK_ATLASSIAN_*` variables set and 57 pass, 0 fail with them unset. `tools/verify_host.py` strips those variables, so the host leg stays green, but a hand run on the box reads two false reds. Fix to make: pin the env in the file as `tier.test.ts` does (restored after, so a multi-file run is unchanged), or assert the argv around the passthrough pairs; never skip the tests by name.
-status: resolved 2026-11-09 by Story 38.6 (`guards.test.ts` pins the env as `tier.test.ts` does: every `TK_*ATLASSIAN*` variable saved and removed in `beforeAll`, restored in `afterAll`; no case skipped by name)
+status: resolved 2026-11-09 by Story 38.6 (thkennedy/tk-studio#368; `guards.test.ts` pins the env as `tier.test.ts` does: every `TK_*ATLASSIAN*` variable saved and removed in `beforeAll`, restored in `afterAll`; no case skipped by name)
 
 ### DW-174: The host verify leg runs under the run's worker guard (3600 s), not a guard sized to the host gate, and the gate on the agent PC now outlasts it: Story 37.2's close-out leg timed out inside the supervisor suites while the operator's own gate ran on the same box (hole 113).
 origin: hole 113 (Story 37.2's close-out, run q-run-epic-37-20261105T204854Z-4f20f3, 2026-11-06 00:40Z: `host-verify` `exit: null`, `duration_ms: 3600518`, `guard: max_wall_clock_seconds (3600s)`, the stdout tail at `test/web.test.ts` with the lib suite not yet started; the run ended `partial`, draft PR 331)
@@ -1485,7 +1485,7 @@ severity: high
 reason: The worker guard bounds the engine's session (a story's dev or review clock), and the close-out reused it for the host leg because both are "the run's guard". The gate has grown with every epic: on 2026-11-05 the operator's own run of it took 522 s conformance + 1499 s supervisor (38 files) + 2271 s lib suite (2860 tests) = 72 min, and the green first legs of Epic 36 already ran 43 to 52 min. Two gates on one box halve each other's speed (the engine's leg started at 23:40Z while the operator's gate for DW-170 ran 23:00 to 00:12Z: the leg spent its 60 min on conformance and the supervisor files alone), and nothing serialises them: the leg takes a `host-verify-leg` lease against a second leg, never against an operator's `verify_host.py`. A leg that times out is red for a reason the code did not cause (hole 108's class: a time bound, not a fault), costs the whole hour, and the re-run route (`POST /runs/{id}/verify`) inherits the same figure, so an uncontended re-run is the only recovery and a coin flip at the current size. Fix to make: (1) the leg gets its own guard — a job `guards.host_verify_seconds` (default sized from the gate's own history: the last green leg's duration plus headroom, floor 3600; or a flat 7200) read by closeout.ts and hostleg.ts in place of `worker_guard_s`, the `host-verify` event naming `guard: host_verify_seconds (Ns)`; (2) `verify_host.py` prints a per-suite duration line and the leg records `suite_durations`, so the figure is measurable; (3) the operator rule (runbook): never run `verify_host.py` on the box while a leg is live (a `host-verify-leg` lease held, or a run in its close-out) — the leg's duration doubles; a candidate serialisation: `verify_host.py` refuses to start, or warns, when the queue holds a live `host-verify-leg` lease; (4) a leg that ends on the guard with every suite verdict so far green is reported `inconclusive (guard)` rather than red (Story 35.3's shape), so the PR body says "timed out", not "failed". No owner input needed: the figure and the rule are the loop's.
 interim: 2026-11-06 (day-8n): Story 37.3's green leg took 3417 s of the 3600 with nothing else on the box (the rule held), 183 s from a second hole-113 red, so `.tk-studio/jobs/run-epic-37.json` now carries guards of its own (`max_turns` 80, `max_wall_clock_seconds` 7200) in place of the shipped run-epic type's 3600 (a job's `guards` key replaces the type's wholesale: lib/job.py `resolve_instance`); the figure bounds the launch worker session (about a minute) and the leg; the engine runs detached under its own clock. Story 37.4's leg then ran 3384 s and Story 37.5's 3752 s (2026-11-06, both alone on the box, both green): the second is the first leg over the old 3600, so the interim has already prevented a red. The leg's own guard, the per-suite durations and the `inconclusive (guard)` verdict stay the fix to make.
 resolution: Story 38.1 (contract 0.1.34): the key `guards.host_verify_seconds` (7200 on run-epic, run-vertical-slice and run-sweep; guards merged key-wise, so run-epic-38 dropped its interim and resolves 3600 for the engine) read by all three leg callers through `legGuard` in place of `worker_guard_s`, the trip named `guard: host_verify_seconds (Ns)`; `verify_host.py`'s `== durations:` line recorded as `suite_durations`; the verdict `inconclusive (guard)` for a guard trip with every suite verdict so far green (`partial`, the PR body "timed out"); the refusal: `verify_host.py` exits 2 beside a live `host-verify-leg` lease (the close-out now notes one too), `--beside-leg` overriding with a warning.
-status: resolved 2026-11-07 by Story 38.1
+status: resolved 2026-11-07 by Story 38.1 (thkennedy/tk-studio#350)
 
 ### DW-175: The loop's follow-up review cap is one global figure (`[limits] max_followup_reviews = 1` in `.bmad-loop/policy.toml`) and the bands carry no field for it, so the owner's decision R5 — the cap raised to 2 for band-L stories only — cannot be expressed in the policy as it stands.
 origin: owner decision R5 (TKSTUDIO-211, Tim 2026-11-05: option B, "raise the cap to 2 for band-L stories only"), ingested 2026-11-06 (hole 112's first ingestion)
@@ -1493,7 +1493,7 @@ source_spec: `.bmad-loop/policy.toml` (`[limits]`, the `max_followup_reviews` co
 location: .bmad-loop/policy.toml `[limits] max_followup_reviews`; .bmad-loop/routing.toml (the band table: no follow-up field); the engine's cap check (bmad-loop, in the sandbox; patched through basepatch if needed); plugins/tk-studio/lib/launch.py `BUDGET_NOT_COMPARED`
 severity: low
 reason: Every follow-up review the three sweeps asked about (30 ids, R1 to R4) was closed as accepted on the same day, and the policy question behind them got answer B: pay for a second follow-up round only where the story is large (band L), not everywhere. The policy file has one figure for every band; raising it to 2 would also pay on band-S and band-M stories (about 7.5 USD a round, Epic 36's average), and leaving it at 1 ignores the decision. Fix to make: a per-band override (`[limits.by_band] L = { max_followup_reviews = 2 }` or a `max_followup_reviews` column in routing.toml's band table) read by the engine's cap check, `launch.py` comparing it like the other band figures (`BUDGET_COMPARED`), the loop's README naming the policy; until then the global figure stays 1 and the decision is recorded here.
-status: open
+status: resolved 2026-11-09 by Story 38.7 (`.tk-studio/budget-bands.yaml` carries `followup_reviews_max` (S 1, M 1, L 2); `launch.py` compares it per band against `[limits.by_band] <band> = { max_followup_reviews = N }`, else the global figure, and `start` writes the band's figure into a run worktree's policy copy when the run takes one story; the operator adds `[limits.by_band] L = { max_followup_reviews = 2 }` to the machine-local policy)
 
 ### DW-176: DW-148's remainder: a run paused by the engine's clock still blocks the story's issue with the owner @mentioned, never `no owner action`, though the pause asks nothing of the owner.
 origin: DW-148's resolution (Story 37.3 review, 2026-11-06: the one part of DW-148's "Fix to make" the story did not build)
@@ -1501,7 +1501,7 @@ source_spec: `37-3-a-timed-out-session-keeps-its-stop-and-its-records-spec.md`; 
 location: apps/supervisor/src/closeout.ts (the paused-run pass's `track.py block` call for a landing left `paused`: `--reason <the landing's reason> --resolves "a ruling in the spec (<spec path>)"`); plugins/tk-studio/lib/track.py `block` (the comment always @mentions `planning.jira.owner_account_id`)
 severity: low
 reason: Story 37.3 turns the engine's rollback on in a run worktree, so a timed-out dev session is retried or deferred rather than paused, and the pause close-out now runs the host leg; but a pause that does reach the paused-run pass for an engine reason (an engine clock, a budget, a rollback the engine refused) still goes through the same block as an escalation: the issue moves to `Blocked - Awaiting User` with the owner tagged (hole 101's class), though nothing is the owner's to answer. Fix to make: the paused-run pass tells an engine-clock pause from a ruling (the journal's `session-end status timeout` / `paused_reason`), and blocks it with a comment that says `no owner action` and carries no mention (a `track.py block --kind engine` or a `--no-mention` form), or skips the block and sends only the notifier line; the contract names the rule.
-status: resolved 2026-11-08 by Story 38.5 (an engine-clock pause, by `paused_reason` or the journal's `session-end status timeout`, is blocked with `track.py block --kind engine`: `Blocked (engine): … — no owner action`, no mention, `track-block` kind engine, cleared by the resume's unblock)
+status: resolved 2026-11-08 by Story 38.5 (thkennedy/tk-studio#363; an engine-clock pause, by `paused_reason` or the journal's `session-end status timeout`, is blocked with `track.py block --kind engine`: `Blocked (engine): … — no owner action`, no mention, `track-block` kind engine, cleared by the resume's unblock)
 
 ### DW-177: A split story's `<key>-s2` spec matches the first half's `<key>-*.md` prefix glob once both specs exist, so a spec lookup by the first half's key is ambiguous.
 origin: spec-deferred 256a8ba5f54a
@@ -1509,7 +1509,7 @@ source_spec: `37-3-a-timed-out-session-keeps-its-stop-and-its-records-spec.md`
 location: .bmad-loop/plugins/studio-pipeline/task-planning.md section 3; plugins/tk-studio/lib/plansync.py _stage_target; apps/supervisor/src/closeout.ts findSpec
 severity: medium
 reason: task-planning.md section 3 (both copies) mints `<key>-s2` entries (plan Settled shape 3); `plansync._stage_target` globs `<sid>-*.md` and raises "several specs match"; `closeout.findSpec` matches `${key}-` and returns undefined on two hits; the engine resolves a spec by the glob `<id>-*.md` (story 21-6). The `<key>-r<n>` remediation ids share the collision (no such spec exists on disk yet). The engine's glob is outside this repo.
-status: resolved 2026-11-08 by Story 38.5 (the exact `<key>-spec.md` first, else the prefix glob with the `-s<n>`/`-r<n>` names excluded and only when one file matches, in `plansync._stage_target`, `closeout.findSpec` and task-planning.md section 3; the engine's own glob stays outside this repo)
+status: resolved 2026-11-08 by Story 38.5 (thkennedy/tk-studio#363; the exact `<key>-spec.md` first, else the prefix glob with the `-s<n>`/`-r<n>` names excluded and only when one file matches, in `plansync._stage_target`, `closeout.findSpec` and task-planning.md section 3; the engine's own glob stays outside this repo)
 
 ### DW-178: The `ask` autonomy's check-in model is wrong by the owner's ruling: a finished story is not a check-in point, Jira is not where the owner says continue, and `no` has no visible shutdown — the check-in points are agreed at approval and answered from the inbox message's link into the web UI.
 origin: owner decision TKSTUDIO-215 (Tim 2026-11-05, on DW-48: "this entire premise needs to be re-evaluated"), ingested 2026-11-06 (day-8n)
@@ -1533,7 +1533,7 @@ source_spec: `kb/agent-pc-setup-runbook.md` fixes rows "hole 65" and "hole 114";
 location: apps/supervisor/src/closeout.ts (the "no changes" end: `no_changes: true`, result "no changes", the run `complete`); apps/supervisor/src/hostleg.ts (the leg runs on a close-out whose tree equals the base); apps/supervisor/src/resume.ts and the paused-run pass (the hole-65 auto-resume keyed on a `blocked` spec and a CRITICAL escalation); apps/supervisor/src/planstatus.ts (no edge from `in-progress` back when a run ends without a PR); the BMad base's `_bmad/scripts/render_skill.py` (`_publish`: staging then `os.rename` across the sbx mount)
 severity: medium
 reason: The engine rendered `bmad-build-auto` into the fresh worktree at 10:25:16Z and nine seconds later the dev session's `ls -la` of `_bmad/render/bmad-build-auto/q-run-epic-37-20261106t102330z-04109a-ac68fc677deb/f1a1d5587ffb3976eb54/` showed five of its ten files as `-????????? ? ? ? ? ?` (`manifest.json`, `compile-epic-context.md`, `spec-template.md`, `step-01-clarify-and-route.md`, `step-04-review.md`; `workflow.md`, `step-02`, `step-03` readable) — hole 65's stale view after the staging rename, and still so 22 minutes later, so not a cache that clears. The session followed the skill's HALT rule, wrote `status: 'halted'` into the story spec and stopped; the engine re-drove the story once itself (`refs/attempt-preserve-dirty/20261106-102516-76a4-30591ecc-1` and `-2` in the checkout's `.git`), hit the same folder, then stopped on the armed `after_stories` stop. Because the word was `halted`, not `blocked`, there was no CRITICAL escalation, no pause and no auto-resume (Story 33.6 keys on the `blocked` draft). The close-out found the worktree equal to `main` (both attempts' records left with the removed worktree; the sessions' transcripts remain in the sandbox under `/home/agent/.claude/projects/-c-agent-work-worktrees-tk-studio-q-run-epic-37-20261106T102330Z-04109a/`), reported `no_changes: true`, deleted the branch — and ran the host leg anyway: 2134 s (10:57:47 to 11:33:22Z, the supervisor and studio-web suites skipped as unchanged since 30591ec) over a tree identical to `main`. The run ended `complete`, the notifier said `complete`, ST-166 stayed `in-progress` in the served checkout, and nothing said that Story 37.6 had not started; 1.22 USD of worker and the engine's two sessions were the cost. Fix to make: (1) a run whose engine ends with no story landed (no commits and the story's spec not `done`) ends `partial` (or a named `halted`) with the engine's last record as the reason, never `complete`, and the close-out skips the host leg when the tree equals the base; (2) the hole-65 auto-resume keys on the render-failure signature (the HALT text, a generation folder with unreadable entries), whatever status word the session wrote, removes the snapshot and resumes once; (3) the plan-status pass returns the story to `draft` (or marks it `in-progress` with the halt note) when the run ends without a PR; (4) `render_skill.py` (the base patch beside DW-110's retry) verifies every output by reading it after the rename and, on a stat failure, removes the generation and writes the outputs straight into a fresh destination — the stale view follows the rename across the sbx mount. Operator path meanwhile: queue the job again (a fresh worktree renders anew; hole 65 has hit twice in 30 runs); a recurrence makes (4) the hand fix. The second 37.6 run (`q-run-epic-37-20261106T114252Z-88d9f5`, queued 11:42Z) rendered cleanly — all ten files of its generation readable from inside the sandbox two minutes after the launch — and the story landed (#340, 2026-11-06 13:40Z): the operator path held; the four fixes stay to make.
-status: resolved 2026-11-07 by Story 38.2
+status: resolved 2026-11-07 by Story 38.2 (thkennedy/tk-studio#352)
 
 ### DW-181: Follow-up review still recommended for 37-7-the-records-reconciled-and-the-proofs-captured after the damping cap was spent
 origin: review-budget-followup
@@ -1551,7 +1551,7 @@ severity: low
 reason: The dry run on 2026-11-06 found every Jira item (the six statuses, the Blocked -> Block Resolved transition, the three global transitions, the filter, the space), so a live `setup` would post nothing for the workflow and could not answer what DW-107/DW-127 left open (whether the site takes `statusReference` as the status id and the v3 transition shape); its only live effect would be five Confluence folders (Brief, GDD, Scope of Work, Decisions, Records) created without adoption, since the children read is refused by scope (DW-106) and existing folders cannot be seen — so the operator did not make the call. The ask's v3 read, `GET /workflows/search?expand=statuses,transitions`, is a 400 on this site ("supported parameters are: [usage, values.transitions]"); `expand=values.transitions` answers (version 2, 9 transitions, 5 with `properties`). Fix to make: (1) a way to exercise the update for real — a `setup --verify-workflow` that removes and restores one global transition on a scratch project key, or the owner's say that the dry run's "found" list is proof enough, which closes DW-107/127's unverified clause; (2) the 36-6 ask's v3 read corrected to `expand=values.transitions` wherever it is quoted (36-6 spec `:263`, 37-7's CAP-16 ask); (3) the folder step: with the children read refused by scope, hand the five folders to the owner's numbered steps instead of creating unadopted (possibly duplicate) folders, or add `read:custom-content:confluence` and `read:hierarchical-content:confluence` to the Confluence key (DW-106).
 decision: owner 2026-11-08 (TKSTUDIO-236): not a letter — "confirm needed scopes against confluence documentation and provide all scopes needed for the api key … Also look for a way to do this in an automated or programmatic fashion via CLI with owner's login or API key or some other route … I want a better way." The studio's research (the endpoint inventory mapped to Atlassian's scope lists; acli, the admin API's token endpoints, OAuth 2.0 3LO with refresh tokens, Forge) answers on TKSTUDIO-236 with the complete scope checklist and the recommended route; the live `setup` runs once the key carries the scopes.
 research: 2026-11-08 (comment 10524 on TKSTUDIO-236, a read-only pass over the Jira v2 / Confluence v1 and v2 OpenAPI specs, the scope pages, the admin API, `acli`, OAuth 2.0 3LO, Forge): the complete scope checklist for the three tokens is on the issue and in `kb/atlassian-free-tier.md` item 5 (the agent's Jira token needs `manage:jira-configuration` and `manage:jira-project` beside the three read/write scopes; the Confluence token the ten granular scopes plus `read:content-details:confluence` for the v1 upload); no API or CLI creates or rotates an API token (the admin API lists and revokes, `acli` signs in with an existing one, Guard sets expiry), so the recommended route is a private OAuth 2.0 3LO app with `offline_access` (rotating refresh tokens the studio renews; one consent per seat) — the candidate Story "The Atlassian Login Has a Clock" in Epic 39, sibling of 39.2. Options offered: A (default) tokens now + the OAuth story, B tokens only, C the story only; three of the studio's own 403 labels were wrong (DW-189).
-status: open (answered on TKSTUDIO-236; awaiting `DW-182: <letter>` and `tokens: set`, then the live `plansync setup` and its report; on A the OAuth story is drafted into Epic 39 by a plan revision PR)
+status: open (narrowed: parts (2)/(3) fixed by Story 38.7; answered on TKSTUDIO-236, awaiting `DW-182: <letter>` and `tokens: set`, then the live `plansync setup` and its report; on A the OAuth story is drafted into Epic 39 by a plan revision PR; the live --verify-workflow is Tim's)
 
 ### DW-183: `sbx skills ls` names the store's top-level entries (the plugin folder `tk-studio` and `synced`), not skills: `skillInStore`'s listing check never matches a job's target skill and the host folder walk does all the work; the parser is unpinned against the real format.
 origin: operator session 2026-11-06 (CAP-13's capture through 37-7's Consult Log ask; the 36-5 consult of 2026-10-31T13:09:40Z: "if the listing names plugins and not skills, say so, since the ruling re-pins the check then")
@@ -1559,7 +1559,7 @@ source_spec: `36-5-the-supervisors-own-faults-spec.md` § Consult Log (the 2026-
 location: apps/supervisor/src/sandbox.ts `skillInStore` :354 (`listed?.includes(skill)`), `parseSkillsList` (first token per line: the header's `SKILL` lands in the list), `skillsLsArgv`; apps/supervisor/test (the parser's fixture)
 severity: low
 reason: The real output on 2026-11-06 is three lines — `SKILL       STORE`, then `synced <store path>` and `tk-studio <store path>` — the store folder's entries, where `tk-studio` is the plugin folder whose `skills/` holds `tk-studio-launch` and the rest. So the listing can never contain a target skill's name; `in_store: true` comes from the walk of `<store>/tk-studio/skills/` on the host, and the listing check is dead weight that would also accept a plugin named like a skill. Fix to make: pin `parseSkillsList` to this capture (skip the header line; the first token is a store entry, not a skill); make the listing check a plugin-folder check (`tk-studio` present) and keep the `skills/` walk as the skill check, or drop the listing from the decision and keep it as evidence in the refusal text; one fixture from the capture.
-status: resolved 2026-11-09 by Story 38.6 (`parseSkillsList` is pinned to the 2026-11-06 capture (the header skipped, each first token a store entry); the listing is the plugin-folder check (`tk-studio` present), the store folder walk the skill check, and the listing never answers `true` alone)
+status: resolved 2026-11-09 by Story 38.6 (thkennedy/tk-studio#368; `parseSkillsList` is pinned to the 2026-11-06 capture (the header skipped, each first token a store entry); the listing is the plugin-folder check (`tk-studio` present), the store folder walk the skill check, and the listing never answers `true` alone)
 
 ### DW-184: A stale host-verify-leg lease (serve died mid-leg, or a crash between noteCloseOutLease and host-verify with no later leg) makes every operator verify_host.py refuse with exit 2 until --beside-leg, an
 origin: spec-deferred c0b0d948903d
@@ -1756,4 +1756,28 @@ source_spec: `handoff-phase1-loop-2026-10-09.md` 2026-11-09 day-9d update; Story
 location: plugins/tk-studio/lib/sweepdecisions.py (`load_record`, `RECORD_REL` = `_bmad-output/tracking/decisions-jira.json`; the `asked_on`/`open_on` dedupe reads it from the run's `root`); apps/supervisor/src/worktree.ts (`COPIED_RUNTIME`: `.bmad-loop/policy.toml`, `.bmad-loop/routing.current.json`, `.tk-studio/config.local.yaml` — no tracking record); apps/supervisor/src/sweep.ts (the close-out's `sweep-decisions-posted` call with `cwd` the worktree); plugins/tk-studio/lib/inbox.py (the inbox already lists every open `tk-studio-decision` issue by id)
 severity: medium
 reason: Every sweep's close-out asks the owner the same open questions again as new Tasks (two of five this time; all five next time if none are answered), splitting his answers across issues the sink's record cannot reconcile, and the duplicates cannot be closed from an unattended session (the Jira transition was refused). Fix to make: (a) the worktree materialise copies `_bmad-output/tracking/decisions-jira.json` (or the tracking folder) with the other runtime files when the served checkout has it, so the sink's record is the served one; (b) the sink's dedupe also consults the open `tk-studio-decision` issues on Jira (the inbox's pull: an open issue whose `{ids}` lists the id counts as `asked_on`), so a worktree without the record never re-asks; (c) a repeated ask of an id already open is a loud `skipped: already asked on <key>` note in `sweep-decisions-posted`, and the test `test_sweepdecisions.py` pins a fresh root against a Jira fake holding an open issue for the id. Until then: close TKSTUDIO-263/264 as duplicates of 260/261 by hand.
+status: open
+
+### DW-207: A detached host-leg re-run reads every in-loop `by Story N.M` closure red (hostleg.ts:15 vs SPEC CAP-19)
+origin: Story 38.7's consult 2026-11-09T14:30Z (trigger halt, ruling apply: shape 1's detached-HEAD rule implemented as pinned)
+source_spec: `38-7-the-records-reconciled-and-the-policys-bands-spec.md` § Consult Log and § Design Notes; `_bmad-output/specs/spec-epic-38/plans/38-7.md` Settled shape 1
+location: plugins/tk-studio/lib/tests/test_plansync.py (`RealLedgerContentTests.test_every_story_closure_names_its_pr_outside_a_run_branch`: a detached HEAD is strict); apps/supervisor/src/hostleg.ts:15 (a non-slice re-run leg cuts detached at origin's tip)
+severity: low
+reason: The PR rule allows a PR-less `by Story N.M` only on a run branch naming epic N; a detached HEAD reads as outside a run branch and needs every reference, so when a story's first host leg goes red, its detached re-run leg is also red on the story's own in-loop closures until the PR is filled or the leg re-runs on the run branch (never waived). Fix to make, for a planner: let the re-run leg name its epic (e.g. the leg passes the run branch or epic to the gate) so the test reads a detached re-run as that epic's run. Rule candidate: any ledger or gate rule that keys on the git branch also states how it treats a detached host-leg re-run (hostleg.ts:15), settled by the planner in the SPEC's design notes before dispatch.
+status: open
+
+### DW-208: `launch.py check` compares band L against `[limits.by_band] L` even when `start` will not apply it (main checkout, or a run-epic instance without `stop.after_stories` 1), so no `budget_mismatch` shows
+origin: spec-deferred 2fb2fa85a7f2
+source_spec: `38-7-the-records-reconciled-and-the-policys-bands-spec.md`
+location: plugins/tk-studio/lib/launch.py (_compare_per_band / apply_followup_cap)
+severity: medium
+reason: `_compare_per_band` uses the by-band figure whenever the entry exists; `apply_followup_cap` writes it only in a linked worktree with after_stories 1 (blind-hunter and edge-case-hunter, review pass 1). Deferral class (a): a defect in behaviour AC3 names (the cap compared like the other band figures and read by the engine's cap check).
+status: open
+
+### DW-209: Follow-up review still recommended for 38-7-the-records-reconciled-and-the-policys-bands after the damping cap was spent
+origin: review-budget-followup
+source_spec: `38-7-the-records-reconciled-and-the-policys-bands-spec.md`
+location: n/a
+severity: low
+reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261109-142842-1357; this entry preserves the lingering recommendation for a deliberate later review.
 status: open

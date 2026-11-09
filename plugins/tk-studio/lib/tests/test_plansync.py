@@ -5,7 +5,9 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -1391,12 +1393,61 @@ class DeferredMintTests(PlanSyncTestCase):
         self.assertEqual(path.read_bytes(), before)
 
 
+
+# CAP-19 (Story 38.7): the PR rule for `resolved … by Story N.M` closures, factored out of
+# RealLedgerContentTests so the branch decision and the scan run on synthetic input too.
+# lazy `.*?`: the first `by Story N.M` after `resolved` is the closing story
+_STORY_CLOSURE_RE = re.compile(r"^resolved\b.*?\bby Story (\d+)\.\d+\b")
+_PR_REF_RE = re.compile(r"\b[\w.-]+/[\w.-]+#\d+\b")
+_RUN_BRANCH_RE = re.compile(r"^(supervisor/run-|loop/epic-)")
+
+
+def _read_branch(repo_root):
+    """(branch, None), or (None, reason) when git is unavailable or `rev-parse` fails."""
+    try:
+        proc = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_root,
+                              capture_output=True, text=True, encoding="utf-8", timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, f"git unavailable, the branch cannot be read: {type(exc).__name__}: {exc}"
+    if proc.returncode != 0:
+        return None, f"git rev-parse failed (exit {proc.returncode}): {proc.stderr.strip()}"
+    return proc.stdout.strip(), None
+
+
+def _inloop_form_allowed(branch, story_epic):
+    """A PR-less `by Story N.M` is allowed on a run branch for that branch's epic only;
+    a run branch naming no `epic-N` allows any story; any other branch (detached `HEAD`) none."""
+    if _RUN_BRANCH_RE.match(branch) is None:
+        return False
+    epic = re.search(r"epic-(\d+)", branch)
+    return epic is None or epic.group(1) == story_epic
+
+
+def _closures_missing_pr(text, branch):
+    """Ids of `resolved … by Story N.M` statuses naming no `owner/repo#N` the branch does not excuse."""
+    missing = []
+    for entry in dwledger.parse_ledger(text):
+        m = _STORY_CLOSURE_RE.match(entry.status or "")
+        if not m or _PR_REF_RE.search(entry.status):
+            continue
+        if _inloop_form_allowed(branch, m.group(1)):
+            continue  # the in-loop form, filled by the close-out at merge
+        missing.append(entry.id)
+    return missing
+
+
+def _missing_pr_message(branch, missing):
+    return (f"on {branch!r} these closures name no PR: {', '.join(missing)}; "
+            "write `by Story N.M (owner/repo#N)`")
+
+
 class RealLedgerContentTests(unittest.TestCase):
     """The tracked ledger is whole: the host leg's suite holds this, the engine's gate does not."""
 
     @classmethod
     def setUpClass(cls):
         repo_root = Path(__file__).resolve().parents[4]
+        cls.repo_root = repo_root
         ledger = repo_root / "_bmad-output" / "implementation-artifacts" / "deferred-work.md"
         cls.text = ledger.read_text(encoding="utf-8")
 
@@ -1407,6 +1458,115 @@ class RealLedgerContentTests(unittest.TestCase):
     def test_no_placeholder_pr_number_remains(self):
         self.assertNotIn("by this story's PR", self.text,
                          "an entry closed from inside a run has no PR number yet: write `by Story N.M`")
+
+    def test_every_story_closure_names_its_pr_outside_a_run_branch(self):
+        """CAP-19 (Story 38.7): a `resolved … by Story N.M` status names its PR (`owner/repo#N`).
+
+        On a run branch (`supervisor/run-…`, `loop/epic-…`) the in-loop form `by Story N.M`
+        is allowed for that branch's epic only, until the close-out fills it at merge; any
+        other branch, a detached HEAD included, needs every reference.
+        """
+        branch, skip_reason = _read_branch(self.repo_root)
+        if skip_reason is not None:
+            self.skipTest(skip_reason)
+        missing = _closures_missing_pr(self.text, branch)
+        self.assertFalse(missing, _missing_pr_message(branch, missing))
+
+
+def _ledger(*statuses):
+    """A synthetic ledger: one entry per status, DW-1 upward."""
+    parts = ["# Deferred work\n"]
+    for n, status in enumerate(statuses, start=1):
+        parts.append(f"\n### DW-{n}: item {n}\norigin: test\nlocation: x\nreason: y\nstatus: {status}\n")
+    return "".join(parts)
+
+
+class StoryClosurePrRuleTests(unittest.TestCase):
+    """CAP-19 (Story 38.7) matrix rows "PR rule on run branch" / "PR rule elsewhere", on synthetic input."""
+
+    PR_LESS_38 = "resolved 2026-11-09 by Story 38.7"
+    PR_LESS_37 = "resolved 2026-11-08 by Story 37.4"
+    WITH_PR = "resolved 2026-11-08 by Story 37.4 (thkennedy/tk-studio#368)"
+    REAL_TEST = "test_every_story_closure_names_its_pr_outside_a_run_branch"
+
+    def test_off_run_branch_a_pr_less_closure_is_missing_and_a_named_pr_passes(self):
+        text = _ledger(self.PR_LESS_38, self.WITH_PR, self.PR_LESS_37, "done 2026-08-07", "open")
+        for branch in ("main", "docs/x", "HEAD"):
+            with self.subTest(branch=branch):
+                self.assertEqual(_closures_missing_pr(text, branch), ["DW-1", "DW-3"])
+                self.assertEqual(_closures_missing_pr(_ledger(self.WITH_PR), branch), [])
+
+    def test_the_first_by_story_after_resolved_is_the_closing_story(self):
+        text = _ledger("resolved 2026-11-09 by Story 38.7 "
+                       "(narrows what was resolved by Story 37.4)")
+        self.assertEqual(_closures_missing_pr(
+            text, "supervisor/run-q-run-epic-38-20261109T142653Z-e4c3e2"), [])
+        self.assertEqual(_closures_missing_pr(
+            text, "supervisor/run-q-run-epic-37-20261108T090000Z-abc123"), ["DW-1"])
+
+    def test_on_run_branch_its_own_epic_passes_pr_less_and_another_epic_is_missing(self):
+        text = _ledger(self.PR_LESS_38, self.PR_LESS_37, self.WITH_PR)
+        for branch in ("supervisor/run-q-run-epic-38-20261109T142653Z-e4c3e2", "loop/epic-38"):
+            with self.subTest(branch=branch):
+                self.assertEqual(_closures_missing_pr(text, branch), ["DW-2"])
+
+    def test_run_branch_naming_no_epic_allows_any_story(self):
+        text = _ledger(self.PR_LESS_38, self.PR_LESS_37)
+        self.assertEqual(_closures_missing_pr(text, "supervisor/run-q-run-sweep-20261109T095041Z-480ca3"), [])
+
+    def test_failure_message_names_each_id_and_the_pr_form(self):
+        msg = _missing_pr_message("main", ["DW-1", "DW-3"])
+        self.assertIn("DW-1, DW-3", msg)
+        self.assertIn("'main'", msg)
+        self.assertIn("by Story N.M (owner/repo#N)", msg)
+
+    def test_git_unavailable_is_a_skip_reason_naming_the_cause(self):
+        for exc in (FileNotFoundError(2, "No such file or directory", "git"),
+                    subprocess.TimeoutExpired(["git"], 30)):
+            with self.subTest(exc=type(exc).__name__), \
+                    mock.patch.object(subprocess, "run", side_effect=exc):
+                branch, reason = _read_branch(Path("."))
+                self.assertIsNone(branch)
+                self.assertIn("git unavailable", reason)
+                self.assertIn(type(exc).__name__, reason)
+
+    def test_rev_parse_non_zero_is_a_skip_reason_naming_exit_and_stderr(self):
+        failed = subprocess.CompletedProcess(["git"], 128, stdout="", stderr="fatal: not a git repository\n")
+        with mock.patch.object(subprocess, "run", return_value=failed) as run:
+            branch, reason = _read_branch(Path("."))
+        self.assertIsNone(branch)
+        self.assertIn("exit 128", reason)
+        self.assertIn("fatal: not a git repository", reason)
+        self.assertEqual(run.call_args.kwargs.get("encoding"), "utf-8")
+
+    def _real_case(self, text):
+        case = RealLedgerContentTests(self.REAL_TEST)
+        case.repo_root, case.text = Path("."), text
+        return getattr(case, self.REAL_TEST)
+
+    def test_real_test_skips_never_passes_when_git_is_unavailable_or_fails(self):
+        failed = subprocess.CompletedProcess(["git"], 1, stdout="", stderr="boom")
+        for patch, cause in ((dict(side_effect=OSError("no git")), "git unavailable"),
+                             (dict(side_effect=subprocess.SubprocessError("x")), "SubprocessError"),
+                             (dict(return_value=failed), "exit 1")):
+            with self.subTest(cause=cause), mock.patch.object(subprocess, "run", **patch):
+                with self.assertRaises(unittest.SkipTest) as cm:
+                    self._real_case(_ledger(self.PR_LESS_37))()
+                self.assertIn(cause, str(cm.exception))
+
+    def test_real_test_fails_off_run_branch_and_passes_on_its_run_branch(self):
+        text = _ledger(self.PR_LESS_38, self.WITH_PR)
+        for branch, fails in (("main", True), ("HEAD", True), ("loop/epic-38", False),
+                              ("loop/epic-37", True)):
+            done = subprocess.CompletedProcess(["git"], 0, stdout=branch + "\n", stderr="")
+            with self.subTest(branch=branch), mock.patch.object(subprocess, "run", return_value=done):
+                if fails:
+                    with self.assertRaises(AssertionError) as cm:
+                        self._real_case(text)()
+                    self.assertIn("DW-1", str(cm.exception))
+                    self.assertIn("by Story N.M (owner/repo#N)", str(cm.exception))
+                else:
+                    self._real_case(text)()
 
 
 if __name__ == "__main__":

@@ -66,14 +66,17 @@ bands:
     usd_estimate: 4.5
     weighted_tokens: 2000000
     review_cycles_max: 1
+    followup_reviews_max: 1
   M:
     usd_estimate: 8.5
     weighted_tokens: 3500000
     review_cycles_max: 2
+    followup_reviews_max: 1
   L:
     usd_estimate: 13
     weighted_tokens: 5000000
     review_cycles_max: 2
+    followup_reviews_max: 2
 """
 
 
@@ -607,9 +610,10 @@ class LaunchTestCase(unittest.TestCase):
         self._wire(_FakeSubstrate())
         budget = launch.check(root, spec)["budget"]
         not_compared = {n["limit"]: n["reason"] for n in budget["not_compared"]}
+        # Story 38.7: the follow-up cap has a band field now; this policy omits it
         self.assertEqual(not_compared, {"session_timeout_min": "no band field",
                                         "max_tokens_per_session": "no band field",
-                                        "max_followup_reviews": "no band field"})
+                                        "max_followup_reviews": "absent from policy"})
         limits = {m["limit"] for m in budget["budget_mismatch"]}
         self.assertNotIn("session_timeout_min", limits)
         self.assertNotIn("max_tokens_per_session", limits)
@@ -1411,6 +1415,147 @@ class LaunchTestCase(unittest.TestCase):
         self.assertIn("no stop.after_stories declared; the run goes to the epic's end", row["detail"])
         self.assertIn("an engagement's autonomy can still stop the run at a story boundary", row["detail"])
         self.assertTrue(result["ok"], result["gaps"])
+
+    # ---- Story 38.7 (R5, DW-175): the follow-up review cap per band
+
+    FOLLOWUP_POLICY = ("[gates]\nmode = \"per-epic\"\n\n[limits]\n"
+                       "max_review_cycles = 3\n"
+                       "max_followup_reviews = 1     # the engine's one global cap\n"
+                       "session_timeout_min = 90\n"
+                       "max_tokens_per_story = 6000000\n"
+                       "max_tokens_per_session = 4000000\n")
+    BY_BAND_L = "\n[limits.by_band]\nL = { max_followup_reviews = 2 }\n"
+
+    def _budget(self, policy: str, bands: str = BANDS_YAML) -> dict:
+        root, spec = _project(Path(tempfile.mkdtemp(dir=self.tmp)))
+        _budget_files(root, policy=policy, bands=bands)
+        self._wire(_FakeSubstrate())
+        return launch.check(root, spec)["budget"]
+
+    def test_story_38_7_the_followup_cap_is_compared_per_band_with_its_policy_key(self):
+        budget = self._budget(self.FOLLOWUP_POLICY)
+        rows = {c["band"]: c for c in budget["compared"] if c["limit"] == "max_followup_reviews"}
+        self.assertEqual(set(rows), {"S", "M", "L"})
+        self.assertEqual({b: r["policy_key"] for b, r in rows.items()},
+                         {b: "limits.max_followup_reviews" for b in "SML"})
+        self.assertEqual(budget["budget_mismatch"], [{
+            "limit": "max_followup_reviews", "policy": 1, "band": "L",
+            "band_field": "followup_reviews_max", "band_value": 2,
+            "policy_key": "limits.max_followup_reviews"}])
+        self.assertEqual(launch.mismatch_text(budget["budget_mismatch"][0]),
+                         "max_followup_reviews 1 < band L followup_reviews_max 2")
+        self.assertNotIn("max_followup_reviews", {n["limit"] for n in budget["not_compared"]})
+        # the operator's [limits.by_band] closes the mismatch for L only
+        budget = self._budget(self.FOLLOWUP_POLICY + self.BY_BAND_L)
+        rows = {c["band"]: c for c in budget["compared"] if c["limit"] == "max_followup_reviews"}
+        self.assertEqual(rows["L"]["policy_key"], "limits.by_band.L.max_followup_reviews")
+        self.assertEqual(rows["L"]["policy"], 2)
+        self.assertEqual(rows["M"]["policy_key"], "limits.max_followup_reviews")
+        self.assertEqual(budget["budget_mismatch"], [])
+
+    def test_story_38_7_a_bad_by_band_is_not_compared_never_a_crash(self):
+        cases = {
+            "by_band = 3\n": "limits.by_band is not a table",
+            "\n[limits.by_band]\nL = { max_followup_reviews = \"two\" }\n":
+                "limits.by_band.L.max_followup_reviews not an int",
+            "\n[limits.by_band]\nL = 2\n": "limits.by_band.L.max_followup_reviews not an int",
+        }
+        for extra, reason in cases.items():
+            with self.subTest(extra):
+                policy = (self.FOLLOWUP_POLICY.replace("session_timeout_min = 90\n",
+                                                       "session_timeout_min = 90\n" + extra)
+                          if extra.startswith("by_band") else self.FOLLOWUP_POLICY + extra)
+                budget = self._budget(policy)
+                not_compared = {n["limit"]: n["reason"] for n in budget["not_compared"]}
+                self.assertEqual(not_compared["max_followup_reviews"], reason)
+                self._assert_no_band_compared(budget)
+        # an absent global with an override on L alone: S and M have no
+        # figure, so no band (L included) is compared on the limit
+        absent = (self.FOLLOWUP_POLICY.replace(
+            "max_followup_reviews = 1     # the engine's one global cap\n", "")
+            + "\n[limits.by_band]\nL = { max_followup_reviews = 1 }\n")
+        self.assertNotIn("max_followup_reviews = 1     #", absent)
+        budget = self._budget(absent)
+        not_compared = {n["limit"]: n["reason"] for n in budget["not_compared"]}
+        self.assertEqual(not_compared["max_followup_reviews"], "absent from policy")
+        self._assert_no_band_compared(budget)
+        bands = BANDS_YAML.replace("followup_reviews_max: 2", 'followup_reviews_max: "two"')
+        budget = self._budget(self.FOLLOWUP_POLICY, bands=bands)
+        not_compared = {n["limit"]: n["reason"] for n in budget["not_compared"]}
+        self.assertEqual(not_compared["max_followup_reviews"], "band L followup_reviews_max not a number")
+
+    def _assert_no_band_compared(self, budget):
+        for key in ("compared", "budget_mismatch"):
+            self.assertEqual([c for c in budget[key] if c["limit"] == "max_followup_reviews"],
+                             [], key)
+
+    def _cap_project(self, *, linked=True, band="L", after_stories=1, policy=None):
+        root, spec = _project(Path(tempfile.mkdtemp(dir=self.tmp)), ids=["2-1-the-story"])
+        plans = root / spec / "plans"
+        plans.mkdir()
+        (plans / "2-1.md").write_text(f"---\nstory: \"2-1\"\nband: {band}\n---\n\n# plan\n",
+                                      encoding="utf-8")
+        if linked:
+            (root / ".git").write_text("gitdir: /elsewhere/.git/worktrees/run\n", encoding="utf-8")
+        jobs = root / ".tk-studio" / "jobs"
+        jobs.mkdir(parents=True, exist_ok=True)
+        instance = {**self._rhythm_instance(spec), "stop": {"max_runs": 2, "after_stories": after_stories}}
+        (jobs / "run-epic-7.json").write_text(json.dumps(instance), encoding="utf-8")
+        policy_path = _budget_files(root, policy=policy or (self.FOLLOWUP_POLICY + self.BY_BAND_L))
+        return root, spec, policy_path
+
+    def test_story_38_7_start_writes_the_band_cap_in_a_run_worktree(self):
+        root, spec, policy_path = self._cap_project()
+        fake = self._wire(_FakeSubstrate())
+        result = launch.start(root, spec, wait_s=2)
+        self.assertTrue(result["ok"])
+        self.assertEqual(len(fake.spawned), 1)
+        cap = result["followup_cap"]
+        self.assertEqual({k: cap[k] for k in ("band", "figure", "applied")},
+                         {"band": "L", "figure": 2, "applied": True})
+        text = policy_path.read_text(encoding="utf-8")
+        self.assertIn("max_followup_reviews = 2     # the engine's one global cap\n", text)
+        self.assertEqual(launch.tomllib.loads(text)["limits"]["max_followup_reviews"], 2)
+        self.assertIn("L = { max_followup_reviews = 2 }", text)
+
+    def test_story_38_7_a_limits_header_with_a_comment_or_inner_spaces_gets_the_cap(self):
+        for header in ("[limits]  # engine limits\n", "[ limits ]\n"):
+            with self.subTest(header):
+                policy = self.FOLLOWUP_POLICY.replace("[limits]\n", header) + self.BY_BAND_L
+                self.assertIn(header, policy)
+                root, spec, policy_path = self._cap_project(policy=policy)
+                cap = launch.apply_followup_cap(root, spec)
+                self.assertTrue(cap["applied"], cap["reason"])
+                text = policy_path.read_text(encoding="utf-8")
+                self.assertIn(header, text)
+                self.assertIn("max_followup_reviews = 2     # the engine's one global cap\n", text)
+                limits = launch.tomllib.loads(text)["limits"]
+                self.assertEqual(limits["max_followup_reviews"], 2)
+                self.assertEqual(limits["by_band"], {"L": {"max_followup_reviews": 2}})
+
+    def test_story_38_7_no_cap_write_names_why(self):
+        cases = {
+            "main checkout": (dict(linked=False), "main checkout: the global stands"),
+            "after_stories 3": (dict(after_stories=3), "after_stories not 1"),
+            "no by-band entry": (dict(band="M"), "no by-band entry for M"),
+        }
+        for label, (kw, reason) in cases.items():
+            with self.subTest(label):
+                root, spec, policy_path = self._cap_project(**kw)
+                before = policy_path.read_bytes()
+                cap = launch.apply_followup_cap(root, spec)
+                self.assertFalse(cap["applied"])
+                self.assertIn(reason, cap["reason"])
+                self.assertEqual(policy_path.read_bytes(), before)
+
+    def test_story_38_7_a_cap_write_that_does_not_verify_restores_the_original(self):
+        root, spec, policy_path = self._cap_project()
+        before = policy_path.read_bytes()
+        with mock.patch.object(launch, "_set_limits_key", return_value="[limits\nbroken = = 1\n"):
+            cap = launch.apply_followup_cap(root, spec)
+        self.assertFalse(cap["applied"])
+        self.assertIn("did not verify; the original is restored", cap["reason"])
+        self.assertEqual(policy_path.read_bytes(), before)
 
     # ---- the engine sandbox row (Story 33.3)
 
