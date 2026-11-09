@@ -1,6 +1,6 @@
 # Deferred Work
 
-<!-- deferred-work counter: last minted DW-205; mint through plansync.py deferred mint -->
+<!-- deferred-work counter: last minted DW-206; mint through plansync.py deferred mint -->
 
 ### DW-124: Contract §4 `submit` admitted a full job definition but the CLI/skill surface was id-only
 origin: migrated from legacy ledger ("Deferred from: code review of feat/tk-studio-connector (2026-08-06)"), 2026-10-29
@@ -630,7 +630,7 @@ source_spec: `34-3-the-playable-verify-leg-spec.md`
 location: apps/supervisor/src/hostverify.ts defaultJudge pin; apps/supervisor/src/hostleg.ts runLeg
 severity: low
 reason: Consult ruling 2026-10-27 (high-severity-finding, option A), sandbox.ts:22-31. Deferral class (c): a safety/resource rule on the box.
-status: done 2026-11-09
+status: resolved 2026-11-09 by thkennedy/tk-studio#370 (sweep bundle dw-judge-pin-release)
 resolution: resolved by sweep bundle dw-judge-pin-release
 
 ### DW-70: Headless conformance drives ignore a manifest `timeout` (runner.py _run_drive uses DEFAULT_TIMEOUT 60); 34.1's e2e_engine_gate.py declares 120 and its 50+40 s bounds overrun the real 60 s cap. Also me
@@ -783,7 +783,7 @@ location: plugins/tk-studio/lib/assets.py; apps/supervisor/src/enginemcp.ts:345-
 severity: low
 reason: `assets.py` holds a YAML-subset reader beside the imported `miniyaml`, the validator, a PNG codec, a GLB parser, two Blender runners, the kit indexer, the matcher, two gates, the manifest rewriter, a Meshy client and the CLI. Fix: split `assets.py` by section before the next ladder story. Epic 35 (retro-epic-35 A3): `plansync.py` 2,138 → 3,508 lines (126 defs/classes, 12 sections), 99 % of the growth the stage log (`:2116-3202`, 35.8) and `ledger-resolve` (`:3205-3301`, 35.7) — two products inside the plan-sync module, consumed as a sub-API by report.py, measurepush.py, `planstatus.ts` and the engine hook, the `# ---- stage log` marker the natural seam; `planstatus.ts` 369 → 631, the stage pass 42 % of the file and the one supervisor pass not in its own module (the shape 35.7 chose for `ledgerPass`); `hostverify.ts` 735 → 943 with five step kinds, the judge-process layer and the PR renderer and no section markers; `report.py` test-to-code ≈ 0.4. Fix, added: `lib/stagelog.py` (the stage log and `ledger-resolve` out of plansync.py, which also closes DW-85's private reach) and `src/stagepass.ts` beside `sweep.ts`; section markers in `hostverify.ts`; a `test_report.py`. Lands before Epic 36 adds surface on `sweep.ts`/`planstatus.ts` (AI-10).
 decision: owner 2026-11-07 (TKSTUDIO-220): A — one split story: the stage log and `ledger-resolve` out of `plansync.py` into `lib/stagelog.py` (which also removes `report.py`'s reach into `plansync._stage_target`) and the stage pass out of `planstatus.ts` into `src/stagepass.ts`; the rest of the list (the asset generator/index/mirror split, `hostverify.ts` markers, a `test_report.py`, the `enginemcp.ts` entry) closed as accepted; stays open for that split story (the next sweep bundle or the next hygiene epic)
-status: done 2026-11-09
+status: resolved 2026-11-09 by thkennedy/tk-studio#370 (sweep bundle dw-stagelog-stagepass-split)
 resolution: resolved by sweep bundle dw-stagelog-stagepass-split
 
 ### DW-88: The judge's rubric ids live three times with no cross-pin.
@@ -1585,7 +1585,7 @@ source_spec: `38-2-a-run-that-does-no-work-says-so-spec.md`
 location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261107-231024-c5ae; this entry preserves the lingering recommendation for a deliberate later review.
-status: done 2026-11-09
+status: resolved 2026-11-09 by thkennedy/tk-studio#370 (sweep; already resolved: Owner decision ingested on the ledger entry (_bmad-output/implementation-artifacts/deferred-work.md DW-186 `decision: A — Close as accepted —…)
 resolution: already resolved: Owner decision ingested on the ledger entry (_bmad-output/implementation-artifacts/deferred-work.md DW-186 `decision: A — Close as accepted — Later stories and gates reviewed the same surfaces (TKSTUDIO-258, 2026-11-09)`), committed by 5cfc1280 (day-9b docs PR #367, the hand sync-back tick that moved TKSTUDIO-258 to Done); nothing is owed in code — the entry is a lingering follow-up-review recommendation the owner closed, the DW-8 precedent (resolved by #332 on an owner close).
 decision: A — Close as accepted — Later stories and gates reviewed the same surfaces (TKSTUDIO-235 precedent). (TKSTUDIO-258, 2026-11-09)
 
@@ -1622,7 +1622,7 @@ source_spec: `spec-approve-concurrency-and-reapproval.md`
 location: apps/supervisor/src/approve.ts approveStep (the DW-49 wait check)
 severity: medium
 reason: approveStep takes only takeLock(<worktree>.lock) per engagement; serialised() covers one process. Serve and run/drain processes can each run approvePass concurrently. Meets DEFERRAL DISCIPLINE (b): AD-4 id uniqueness.
-status: done 2026-11-09
+status: resolved 2026-11-09 by thkennedy/tk-studio#370 (sweep bundle dw-approve-cross-process-hardening)
 resolution: resolved by sweep bundle dw-approve-cross-process-hardening
 
 ### DW-191: Two engagements of one project that each still have an earlier approve PR open, both revised and re-approved before either new cycle appends, hold each other through the cross-cycle hold: a mutual Wai
@@ -1639,7 +1639,7 @@ source_spec: `spec-approve-concurrency-and-reapproval.md`
 location: apps/supervisor/src/approve.ts the fresh re-approval path (removeWorktree before the cut)
 severity: medium
 reason: dropSuperseded runs only on the onBranch read-tree cut (the path DW-51 names); the fresh path's removeWorktree drops the only copy of the keys. Pre-existing path not changed by this bundle. Meets DEFERRAL DISCIPLINE (a): AC1's promote to Jira.
-status: done 2026-11-09
+status: resolved 2026-11-09 by thkennedy/tk-studio#370 (sweep bundle dw-approve-cross-process-hardening)
 resolution: resolved by sweep bundle dw-approve-cross-process-hardening
 
 ### DW-193: A paused sweep bundle's `wip:` spec commit stays on the sweep's PR branch; the operator must drop it by hand before a host-leg re-run can mark the PR ready
@@ -1648,7 +1648,7 @@ source_spec: `handoff-phase1-loop-2026-10-09.md` 2026-11-08 day-8z update; Story
 location: apps/supervisor/src/sweep.ts (the paused sweep's close-out: the WIP commit, the leg skipped, the PR left draft); apps/supervisor/src/hostleg.ts (`POST /runs/{id}/verify {ready: true}` re-runs the leg at the branch tip as it stands and marks the PR ready on green)
 severity: low
 reason: The operator path for a paused sweep is "do not resume; the landed bundles stay on the draft PR; the next sweep re-queues the bundle from the ledger" — but the WIP commit carries the paused bundle's spec into the PR, so the ready override would merge a spec for work that never landed. On 2026-11-08 the operator removed it by a plain commit (c58958f6) before the re-run. Fix to make: when the operator marks a paused sweep ready (or declines the resume), the re-run drops the `wip:` commit (a revert of it, or the WIP never commits the spec onto the PR branch — it stays in the run workspace for the resume), so the branch tip is the landed bundles only; a test born from a paused sweep with one WIP commit and a ready override.
-status: done 2026-11-09
+status: resolved 2026-11-09 by thkennedy/tk-studio#370 (sweep bundle dw-paused-sweep-wip-off-pr)
 resolution: resolved by sweep bundle dw-paused-sweep-wip-off-pr
 
 ### DW-194: A story that tightens what a run worktree requires of its checkout reaches only the shared fixture; the end-to-end fixtures that build checkouts with `gitInit` break on the host leg alone, the sandbox gate running no supervisor test (hole 117)
@@ -1690,7 +1690,7 @@ source_spec: `spec-dw-68-playable-judge-deny-profile.md`
 location: apps/supervisor/src/hostverify.ts judgeDenyRules
 severity: medium
 reason: Review pass 1 (blind hunter): `judgeDenyRules` skips `.bmad-loop` wholesale; only the media chain `.bmad-loop/runs/<engine>/playable/` must stay open. The bundle intent enumerates plugins/apps/_bmad-output and the project's code folders only, so denying run state siblings level by level along the media path is beyond this bundle. Deferral class (a): DW-68's read-only rule.
-status: done 2026-11-09
+status: resolved 2026-11-09 by thkennedy/tk-studio#370 (sweep bundle dw-judge-profile-run-state-deny)
 resolution: resolved by sweep bundle dw-judge-profile-run-state-deny
 
 ### DW-199: The judge profile also leaves `.bmad-loop/` writable by the Write/Edit tools, so the judge could overwrite the engine run's state (transcripts, tasks, journal) beside the media.
@@ -1699,7 +1699,7 @@ source_spec: `spec-dw-68-playable-judge-deny-profile.md`
 location: apps/supervisor/src/hostverify.ts judgeDenyRules
 severity: medium
 reason: Review pass 2 (blind hunter): `judgeDenyRules` skips `.bmad-loop` wholesale, so no `Edit(...)`/`Write(...)` rule covers the run folder's siblings of `playable/`. Same root as the read-side deferral; denying siblings level by level along the media path is beyond the bundle intent's enumerated folders. The half about rewriting the profile itself is moot: `--settings` is loaded at session start. Deferral class (a): DW-68's read-only rule.
-status: done 2026-11-09
+status: resolved 2026-11-09 by thkennedy/tk-studio#370 (sweep bundle dw-judge-profile-run-state-deny)
 resolution: resolved by sweep bundle dw-judge-profile-run-state-deny
 
 ### DW-200: Story 38.4's decision sink runs only inside the Atlassian sync-back tick, a shipped job tk-studio never declared, so an answered sweep decision is never ingested and every later triage skips it as "already asked" (hole 120)
@@ -1748,4 +1748,12 @@ source_spec: `handoff-phase1-loop-2026-10-09.md` 2026-11-09 day-9c update; DW-20
 location: plugins/tk-studio/lib/tests/test_maintenance_job.py (the real run; 8ee76c1d makes its failure name the reason and the failed checks); plugins/tk-studio/lib/tests/test_conformance.py (`ConformanceRealPluginTestCase`, the same drives); plugins/tk-studio/contracts/conformance/_budget.py; tools/verify_host.py (`run_gate`: the lib suite under the host's env, the seats included, in a fresh verify worktree); apps/supervisor/src/hostverify.ts (the event); the box's scheduled task `tk-studio supervisor` (`Priority` 7 in the definition, the tree `Normal`)
 severity: medium
 reason: Three of the last six legs were re-runs on this signature; each costs 60 to 80 minutes and the operator a hand suite, and the fix cannot be chosen while the factor is unknown. Fix to make: (a) measure — the two bun drives (`approve+hostverify+hostleg`, `sweep.test.ts`) timed in a fresh verify worktree against a warmed one (Defender's first-read scan of new files), and the lib suite under `supervisor_env`'s stripped seats against the host's env; (b) the leg's event names the box's activity in its window (DW-202 (b)) and, from 8ee76c1d on, the failed check's name; (c) the remedy the measure picks: the drives' bounds take the fresh-worktree figure, or the gate warms the worktree (`bun install` and one read of the supervisor tree) before the lib suite, or the lib suite runs under the stripped env as the supervisor suite does.
+status: open
+
+### DW-206: The sweep's decision sink re-asks every decision still open on Jira, because its dedupe record is local tracking memory the run's worktree never receives (hole 123)
+origin: the sixth sweep's close-out 2026-11-09 14:17Z (run q-run-sweep-20261109T095041Z-480ca3): `sweep-decisions-posted` created TKSTUDIO-263 (DW-179) and TKSTUDIO-264 (DW-191) although TKSTUDIO-260 and 261 — the fifth sweep's Tasks for the same ids — were still Blocked - Awaiting User; the served checkout's inbox lists both pairs
+source_spec: `handoff-phase1-loop-2026-10-09.md` 2026-11-09 day-9d update; Story 38.4 (the decision sink and its record); Story 35.7 (the sweep run's close-out posts the triage's decisions); Story 38.1 (`COPIED_RUNTIME`: the runtime files a run's worktree receives); DW-200 (the sink's loud 'answered, not ingested' notice — the same record)
+location: plugins/tk-studio/lib/sweepdecisions.py (`load_record`, `RECORD_REL` = `_bmad-output/tracking/decisions-jira.json`; the `asked_on`/`open_on` dedupe reads it from the run's `root`); apps/supervisor/src/worktree.ts (`COPIED_RUNTIME`: `.bmad-loop/policy.toml`, `.bmad-loop/routing.current.json`, `.tk-studio/config.local.yaml` — no tracking record); apps/supervisor/src/sweep.ts (the close-out's `sweep-decisions-posted` call with `cwd` the worktree); plugins/tk-studio/lib/inbox.py (the inbox already lists every open `tk-studio-decision` issue by id)
+severity: medium
+reason: Every sweep's close-out asks the owner the same open questions again as new Tasks (two of five this time; all five next time if none are answered), splitting his answers across issues the sink's record cannot reconcile, and the duplicates cannot be closed from an unattended session (the Jira transition was refused). Fix to make: (a) the worktree materialise copies `_bmad-output/tracking/decisions-jira.json` (or the tracking folder) with the other runtime files when the served checkout has it, so the sink's record is the served one; (b) the sink's dedupe also consults the open `tk-studio-decision` issues on Jira (the inbox's pull: an open issue whose `{ids}` lists the id counts as `asked_on`), so a worktree without the record never re-asks; (c) a repeated ask of an id already open is a loud `skipped: already asked on <key>` note in `sweep-decisions-posted`, and the test `test_sweepdecisions.py` pins a fresh root against a Jira fake holding an open issue for the id. Until then: close TKSTUDIO-263/264 as duplicates of 260/261 by hand.
 status: open
