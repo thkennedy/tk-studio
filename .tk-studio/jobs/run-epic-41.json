@@ -1,0 +1,18 @@
+{
+  "job_schema_version": 1,
+  "id": "run-epic-41",
+  "type": "run-epic",
+  "description": "tk-studio Epic 41 (the nightly hygiene pass: the supervisor keeps time, and one small tidy a night; the owner's direction on DW-86 and DW-179, TKSTUDIO-219 and TKSTUDIO-260; the research _bmad-output/planning-artifacts/research/nightly-hygiene-2026-11-09/research.md): seven stories in the order each becomes usable alone (41.1 the supervisor fires declared timed jobs, 41.2 claude-fable-5-2 is a model the studio knows and the pins are visible, 41.3 the hygiene ledger, 41.4 the hygiene run, 41.5 the night's bounds and its report, 41.6 the nights begin, 41.7 the records), one story per run (stop.after_stories 1), contract 0.1.37 additive. Submit it with POST /jobs {project: tk-studio, job: run-epic-41} only after tk-studio/run-epic-41 is placed {tier: sbx, sandbox: claude-tk-studio} in the supervisor's per-job config (hole 90), only after Epic 40 has landed (41.2 leans on 39.8's settings page and 40.1's changes build, 41.6 on 40.1 to 40.4), and only after the previous landing's docs PR has merged; 41.2 is queued only after 41.1's proof (one run that nothing but the schedule started) is in the merged docs, and 41.7 only after the first night is. Model: this definition carries no model field yet, so the launch session and the legs run on the route in force; Story 41.2 adds claude-fable-5-2 to the studio's model list, the 41-* routing rule and this job's model field (the owner's 'plan on using Fable 5.2 for it', TKSTUDIO-260), because today pipeline.py refuses a route that names a model outside its list and prices.json has no row to meter a session on it. Guards: the type's (max_wall_clock_seconds 3600 for the engine, host_verify_seconds 7200 for the host leg, merged key-wise); no interim guard.",
+  "target": {
+    "payload": {
+      "epic": 41
+    }
+  },
+  "stop": {
+    "max_runs": 13,
+    "after_stories": 1
+  },
+  "guards": {
+    "max_turns": 80
+  }
+}

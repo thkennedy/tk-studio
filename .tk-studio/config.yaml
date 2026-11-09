@@ -56,6 +56,10 @@ jobs:
   # place tk-studio/run-epic-40 {tier: sbx} in the supervisor's per-job config before the first POST (hole 90),
   # and POST only after Epic 39 has landed and the previous landing's docs PR has merged.
   - run-epic-40
+  # run-epic-41 (2026-11-09): Epic 41, the nightly hygiene pass, planned on Tim's answer of 2026-11-09 (TKSTUDIO-260);
+  # place tk-studio/run-epic-41 {tier: sbx} in the supervisor's per-job config before the first POST (hole 90),
+  # and POST only after Epic 40 has landed and the previous landing's docs PR has merged.
+  - run-epic-41
 
 # Role-keyed working sets (AD-17) — recorded only on explicit
 # confirmation via tk-studio-onboard; one entry per role.
