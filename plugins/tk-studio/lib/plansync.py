@@ -1293,9 +1293,8 @@ def _folder_steps(site: str, key: str, titles: list[str],
     tail = ("" if not record else
             ", then record each folder's id (from its address bar) under "
             "`planning.confluence.folders.<name>` in `.tk-studio/config.yaml`, "
-            "or add `read:custom-content:confluence` and "
-            "`read:hierarchical-content:confluence` to the Confluence key so "
-            "the rerun adopts them")
+            "or add `read:hierarchical-content:confluence` to the Confluence "
+            "key so the rerun adopts them")
     return [f"Sign in to https://{site}/wiki as the owner seat, open space "
             f"`{key}` and, from the sidebar's + > Folder, create the "
             f"top-level folder{'s' if len(titles) > 1 else ''} "
@@ -1753,11 +1752,12 @@ def setup(project_root: Path, dry_run: bool = False,
             try:
                 titles = confluence.find_folders(conf, str(space.get("id")))
             except confluence.ConfluenceError as exc:
-                # Confluence's space-children listing wants read:custom-content
-                # beside read:hierarchical-content (hole 91). Story 38.7
-                # (DW-182 (3)): without it nothing is created — an unadopted
-                # folder could duplicate one made by hand — and every
-                # unrecorded folder goes to the owner's numbered steps.
+                # The listing is the homepage's children (hole 124), which wants
+                # read:hierarchical-content. Story 38.7 (DW-182 (3)): without
+                # it nothing is created — an unadopted folder could duplicate
+                # one made by hand — and every unrecorded folder goes to the
+                # owner's numbered steps. A space with no homepage is not this
+                # case: that refusal is raised and blocks the setup by name.
                 # the client folds the 401 into its own message (the token, its email,
                 # the org toggle), so a 401 on this one listing counts as the scope gap
                 if "scope" not in str(exc).lower() and " 401 " not in str(exc):

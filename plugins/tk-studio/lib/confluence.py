@@ -235,11 +235,36 @@ def create_space(client: ConfluenceClient, key: str,
     return data, ""
 
 
+def space_homepage(client: ConfluenceClient, space_id: str) -> str | None:
+    """The id of the space's homepage (`GET /spaces/{id}`, `read:space`), or
+    None when the space names none."""
+    status, data = client.request("GET", f"/spaces/{space_id}")
+    if status != 200 or not isinstance(data, dict):
+        raise ConfluenceError(f"setup: GET /spaces/{space_id} returned {status}")
+    home = data.get("homepageId")
+    return str(home) if home else None
+
+
 def find_folders(client: ConfluenceClient, space_id: str) -> dict[str, str]:
-    """title -> folder id for the space's top-level folders, every page."""
+    """title -> folder id for the space's top-level folders, every page.
+
+    A folder made with no `parentId` sits under the space's homepage
+    (measured on the owner's site, 2026-11-09: `GET /folders/{id}` answers
+    `parentType: page`, `parentId` the homepage), so the listing is the
+    homepage's direct children: `GET /pages/{id}/direct-children`
+    (`read:hierarchical-content`). Hole 124: `GET /spaces/{id}/direct-children`,
+    which this read used before, is in no published Confluence v2 spec — the
+    gateway matches it to no scope and refuses every scoped token ("scope
+    does not match"), whatever the token carries."""
+    home = space_homepage(client, space_id)
+    if home is None:
+        raise ConfluenceError(
+            f"setup: space {space_id} has no homepage (GET /spaces/{space_id} "
+            f"names no homepageId), so its top-level folders cannot be listed "
+            f"— set a homepage in the space's settings and rerun")
     return {entry["title"]: str(entry.get("id"))
             for entry in _paged_results(client,
-                                        f"/spaces/{space_id}/direct-children")
+                                        f"/pages/{home}/direct-children")
             if entry.get("type") == "folder"
             and isinstance(entry.get("title"), str)}
 

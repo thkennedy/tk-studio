@@ -623,7 +623,7 @@ So that I export only what I see.
 SCOPE_TITLE = "ENG-001: Scope of Work"
 SCOPE_REL = "_bmad-output/engagements/ENG-001/scope.md"
 REVISE_AT = "2026-10-25T05:30:00.000Z"
-FOLDERS_GET = ("GET", "confluence:/spaces/S-1/direct-children")
+FOLDERS_GET = ("GET", "confluence:/pages/home-S-1/direct-children")
 
 
 class FakeEngagementConfluence(FakeConfluencePublish):
