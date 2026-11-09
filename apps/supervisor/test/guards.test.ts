@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { finishRun, guardReason, hasTurnTokenGuard, mirror, recoverAfterTimeout, wallClockGuard, type Started, type TimeoutContext } from "../src/cli";
@@ -11,6 +11,21 @@ import {
   claudeConfigDir, locateTranscript, parseTranscript, parseTranscripts, resultCounts, transcriptCounts, TranscriptError, usageTokens,
 } from "../src/transcript";
 import { tempDir, track } from "./tmp";
+
+const pinned: Record<string, string | undefined> = {};
+beforeAll(() => {
+  // Story 38.6 (DW-173), copied from tier.test.ts (Story 37.2, C7): the box's own seat never shapes a worker argv. A
+  // `TK_ATLASSIAN_*` in `process.env` inserts `-e NAME` pairs (`sbxEnvPassthrough`) and shifts the fixed-position argv
+  // the sbx cases assert, so the env is pinned here (the preload's style): every `TK_*ATLASSIAN*` variable removed for
+  // this file, and put back in `afterAll` so a later file of a multi-file `bun test` (one process) sees the box's env
+  // unchanged.
+  for (const name of Object.keys(process.env)) {
+    if (/^TK_.*ATLASSIAN/.test(name)) { pinned[name] = process.env[name]; delete process.env[name]; }
+  }
+});
+afterAll(() => {
+  for (const [name, value] of Object.entries(pinned)) if (value !== undefined) process.env[name] = value;
+});
 
 // ---------------------------------------------------------------- AC1: the process-tree kill
 

@@ -9,6 +9,7 @@ import importlib.util
 import io
 import json
 import os
+import shutil
 import sqlite3
 import stat
 import subprocess
@@ -180,8 +181,12 @@ class TestSupervisorGate(VerifyHostCase):
         self.assertEqual(vh.SUPERVISOR_TEST_TIMEOUT_MS, budget.HOST_TEST_TIMEOUT_MS)
         self.assertEqual(vh.SUPERVISOR_TEST_TIMEOUT_MS, 30_000)
         self.run_main(self.CHANGED)
-        files = [c[1] for c in self.spawns() if c[1][:2] == ("bun", "test")]
-        self.assertEqual(len(files), 2)
+        # Story 38.6 (CAP-5): every bun spawn, the e2e step's included, carries the figure
+        bun = [c[1] for c in self.spawns() if c[1][0] == "bun" and c[1][1] != "x"]
+        files = [argv for argv in bun if argv[:2] == ("bun", "test")]
+        self.assertEqual(bun, files, "no bun spawn but `bun test`")
+        self.assertEqual(len(files), 3)
+        self.assertEqual(files[-1][-1], "./test/command-line.test.ts")
         for argv in files:
             with self.subTest(argv=argv):
                 self.assertEqual(argv[2:4], ("--timeout", str(budget.HOST_TEST_TIMEOUT_MS)))
@@ -195,26 +200,28 @@ class TestSupervisorGate(VerifyHostCase):
             "lib suite", "conformance",
             ("bun", "test", "--timeout", "30000", "./test/api.test.ts"),
             ("bun", "test", "--timeout", "30000", "./test/queue.test.ts"),
+            ("bun", "test", "--timeout", "30000", "./test/command-line.test.ts"),  # Story 38.6: the e2e step
             ("bunx", "tsc", "--noEmit", "-p", "apps/supervisor"),
             "studio-web",
         ])
-        for call in self.spawns()[:2]:
+        for call in self.spawns()[:3]:
             self.assertEqual(call[2], self.sup)
-        self.assertEqual(self.spawns()[2][2], vh.ROOT)
+        self.assertEqual(self.spawns()[3][2], vh.ROOT)
         # bunx resolves the app's own installed TypeScript (on PATH first), never a downloaded latest
-        tsc_path = self.spawns()[2][3]["PATH"].split(os.pathsep)
+        tsc_path = self.spawns()[3][3]["PATH"].split(os.pathsep)
         self.assertEqual(tsc_path[0], str(self.sup / "node_modules" / ".bin"))
         self.assertEqual(tsc_path[1:], os.environ.get("PATH", "").split(os.pathsep))
-        for call in self.spawns()[:2]:
+        for call in self.spawns()[:3]:
             self.assertNotIn(str(self.sup / "node_modules" / ".bin"), call[3].get("PATH", ""))
-        self.assertNotIn("command-line", out)
+        self.assertIn("== supervisor: test/command-line.test.ts 97 pass, 0 fail in 5s", out)
         self.assertEqual(out.splitlines()[-1], "verify_host: ok (lib suite, conformance, supervisor, studio-web)")
 
     def test_each_file_under_420s_with_no_tk_supervisor_vars_and_the_per_run_temp(self):
         self.run_main(self.CHANGED)
         temps = set()
         for _, argv, _, env, timeout, existed in self.spawns():
-            self.assertEqual(timeout, 420)
+            # Story 38.6: the e2e step under its own 1800 s bound, every other spawn under 420 s
+            self.assertEqual(timeout, 1800 if argv[-1] == "./test/command-line.test.ts" else 420)
             self.assertFalse([k for k in env if k.upper().startswith("TK_SUPERVISOR_")])
             self.assertEqual(env["KEEP_ME"], "1")
             self.assertEqual(env["TK_STUDIO_ROOT"], str(vh.ROOT))  # hole 82: the suites use this repo's plugin
@@ -272,8 +279,9 @@ class TestSupervisorGate(VerifyHostCase):
             f"== supervisor: apps/supervisor changed since {BASE[:12]}",
             "== supervisor: test/api.test.ts 97 pass, 0 fail in 5s",
             "== supervisor: test/queue.test.ts 97 pass, 0 fail in 30s",
+            "== supervisor: test/command-line.test.ts 97 pass, 0 fail in 5s",
             "== supervisor: tsc ok in 9s",
-            "== supervisor: ok in 44s; 2 files, 194 pass, 0 fail; slowest test/queue.test.ts 30s",
+            "== supervisor: ok in 49s; 3 files, 291 pass, 0 fail; slowest test/queue.test.ts 30s",
         ])
 
     def test_skipped_tests_are_counted_and_named_never_silent(self):
@@ -296,7 +304,7 @@ class TestSupervisorGate(VerifyHostCase):
             "== supervisor: test/api.test.ts skip: POST /jobs through the real submit path > SkillMissing",
         ])
         self.assertIn("== supervisor: test/queue.test.ts 97 pass, 0 fail in 3s", lines)
-        self.assertIn("== supervisor: ok in 9s; 2 files, 192 pass, 0 fail, 2 skip; slowest", out)
+        self.assertIn("== supervisor: ok in 12s; 3 files, 289 pass, 0 fail, 2 skip; slowest", out)
 
     def test_a_skip_count_with_no_names_still_names_the_skip(self):
         # bun prints no per-test lines under an AI-agent env: the count line keeps the skip from being silent.
@@ -320,7 +328,7 @@ class TestSupervisorGate(VerifyHostCase):
         rc, out = self.run_main(self.CHANGED, spawn=spawn)
         self.assertEqual(rc, 1)
         self.assertIn("== supervisor: test/queue.test.ts 96 pass, 1 fail in 2s rc=1", out)
-        self.assertIn("== supervisor: FAILED in 6s; 2 files, 106 pass, 1 fail; slowest test/api.test.ts 2s", out)
+        self.assertIn("== supervisor: FAILED in 8s; 3 files, 116 pass, 1 fail; slowest test/api.test.ts 2s", out)
         self.assertIn("== supervisor failed (rc=1)", out)
         self.assertIn("(fail) queue > EBUSY on rmdir", out.split("== supervisor failed")[1])
         self.assertEqual(out.splitlines()[-1], "verify_host: FAILED (supervisor)")
@@ -345,7 +353,7 @@ class TestSupervisorGate(VerifyHostCase):
         rc, out = self.run_main(self.CHANGED, spawn=spawn)
         self.assertEqual(rc, 0)
         self.assertIn("== supervisor: test/api.test.ts ? pass, ? fail in 0s", out)
-        self.assertIn("== supervisor: ok in 0s; 2 files, 0 pass, 0 fail;", out)
+        self.assertIn("== supervisor: ok in 0s; 3 files, 0 pass, 0 fail;", out)
 
     def test_tsc_failure_fails_the_gate(self):
         def spawn(argv, cwd, env, timeout):
@@ -356,6 +364,44 @@ class TestSupervisorGate(VerifyHostCase):
         self.assertEqual(rc, 1)
         self.assertIn("== supervisor: tsc FAILED rc=2 in 0s", out)
         self.assertIn("error TS2322", out.split("== supervisor failed")[1])
+
+    def test_story_38_6_a_red_e2e_suite_fails_the_gate_and_its_tail_is_repeated(self):
+        def spawn(argv, cwd, env, timeout):
+            self.clock.now += 4
+            if argv[-1].endswith("command-line.test.ts"):
+                return 1, "(fail) e2e > submit refused\n" + bun_out(90, 6)
+            return 0, bun_out(10, 0) if argv[1] == "test" else ""
+        rc, out = self.run_main(self.CHANGED, spawn=spawn)
+        self.assertEqual(rc, 1)
+        self.assertIn("== supervisor: test/command-line.test.ts 90 pass, 6 fail in 4s rc=1", out)
+        self.assertIn("== supervisor: tsc ok in 4s", out)  # tsc still runs after a red e2e step
+        self.assertIn("== supervisor: FAILED in 16s; 3 files, 110 pass, 6 fail; slowest test/api.test.ts 4s", out)
+        self.assertIn("(fail) e2e > submit refused", out.split("== supervisor failed")[1])
+        self.assertIn("--- test/command-line.test.ts", out.split("== supervisor failed")[1])
+        self.assertEqual(out.splitlines()[-1], "verify_host: FAILED (supervisor)")
+
+    def test_story_38_6_an_absent_e2e_suite_is_one_named_skip_line(self):
+        (self.sup / "test" / "command-line.test.ts").unlink()
+        rc, out = self.run_main(self.CHANGED)
+        self.assertEqual(rc, 0)
+        self.assertNotIn("./test/command-line.test.ts", [c[1][-1] for c in self.spawns()])
+        lines = [l for l in out.splitlines() if l.startswith("== supervisor:")]
+        self.assertEqual(lines[3:5], ["== supervisor: test/command-line.test.ts skip: e2e suite absent",
+                                      "== supervisor: tsc ok in 9s"])
+        self.assertRegex(out, r"== supervisor: ok in \d+s; 2 files, ")  # an absent e2e step adds no file to the count
+
+    def test_story_38_6_a_timed_out_e2e_suite_is_named_and_fails_the_gate(self):
+        def spawn(argv, cwd, env, timeout):
+            if argv[-1].endswith("command-line.test.ts"):
+                self.clock.now += timeout
+                return None, "e2e output before the hang\n"
+            self.clock.now += 1
+            return 0, bun_out(5, 0) if argv[1] == "test" else ""
+        rc, out = self.run_main(self.CHANGED, spawn=spawn)
+        self.assertEqual(rc, 1)
+        self.assertIn("== supervisor: test/command-line.test.ts ? pass, ? fail in 1800s (timed out after 1800s)", out)
+        self.assertIn("slowest test/command-line.test.ts 1800s", out)
+        self.assertIn("e2e output before the hang", out.split("== supervisor failed")[1])
 
     def test_bun_x_when_bunx_cannot_start(self):
         seen = []
@@ -380,7 +426,7 @@ class TestSupervisorGate(VerifyHostCase):
         self.assertIn("== supervisor: test/api.test.ts ? pass, ? fail in 0s rc=127", out)
         self.assertIn("== supervisor: test/queue.test.ts 1 pass, 0 fail in 0s", out)
         self.assertIn("cannot start 'bun'", out.split("== supervisor failed")[1])
-        self.assertIn("== supervisor: FAILED in 0s; 2 files, 1 pass, 0 fail;", out)
+        self.assertIn("== supervisor: FAILED in 0s; 3 files, 2 pass, 0 fail;", out)
         self.assertEqual(out.splitlines()[-1], "verify_host: FAILED (supervisor)")
 
     def test_tsc_that_cannot_start_either_way_fails_the_gate(self):
@@ -549,8 +595,9 @@ class TestDurations(VerifyHostCase):
         self.assertEqual(rc, 0, out)
         lines = out.splitlines()
         self.assertEqual(lines[-1], "verify_host: ok (lib suite, conformance, supervisor, studio-web)")
-        # lib suite and conformance 3 s each (`fake_run_gate`), the supervisor 44 s from the clock, studio-web 3 s
-        self.assertEqual(lines[-2], "== durations: lib suite=3s, conformance=3s, supervisor=44s, studio-web=3s")
+        # lib suite and conformance 3 s each (`fake_run_gate`), the supervisor 49 s from the clock (Story 38.6: the
+        # e2e step's 5 s included), studio-web 3 s
+        self.assertEqual(lines[-2], "== durations: lib suite=3s, conformance=3s, supervisor=49s, studio-web=3s")
         self.assertEqual(sum(1 for l in lines if l.startswith("== durations:")), 1)
 
     def test_red_the_line_after_every_tail_and_before_the_failed_verdict(self):
@@ -563,7 +610,7 @@ class TestDurations(VerifyHostCase):
         self.assertEqual(rc, 1)
         lines = out.splitlines()
         self.assertEqual(lines[-1], "verify_host: FAILED (supervisor)")
-        self.assertEqual(lines[-2], "== durations: lib suite=3s, conformance=3s, supervisor=6s, studio-web=3s")
+        self.assertEqual(lines[-2], "== durations: lib suite=3s, conformance=3s, supervisor=8s, studio-web=3s")
         tail_header = next(i for i, l in enumerate(lines) if l.startswith("== supervisor failed (rc=1)"))
         self.assertLess(tail_header, len(lines) - 2)  # the line follows every failure tail
 
@@ -763,3 +810,41 @@ class TestBesideLeg(VerifyHostCase):
         with redirect_stdout(out), self.assertRaises(SystemExit):
             vh.main(["--help"])
         self.assertIn("--beside-leg", out.getvalue())
+
+
+@unittest.skipUnless(shutil.which("bun"), "bun absent")
+class TestSlowSecondFile(unittest.TestCase):
+    """Story 38.6 (AC2, CAP-5 by behaviour): the per-test figure holds past the first file. The real gate and the real
+    `spawn` run two fixture files, the second's test over the (patched) figure: the first green, the second red."""
+
+    def test_the_per_file_timeout_holds_past_the_first_file(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        fixture = Path(tmp.name) / "apps" / "supervisor"
+        (fixture / "test").mkdir(parents=True)
+        (fixture / "node_modules").mkdir()  # no `bun install`
+        (fixture / "test" / "a.test.ts").write_text(
+            'import { expect, test } from "bun:test"; test("fast", () => { expect(1).toBe(1); });\n', encoding="utf-8")
+        (fixture / "test" / "b.test.ts").write_text(
+            'import { test } from "bun:test"; test("slow past the figure", async () => { await Bun.sleep(1500); });\n',
+            encoding="utf-8")
+        base = Path(tmp.name) / "temp"  # a fresh temp folder outside any checkout
+        base.mkdir()
+        out = io.StringIO()
+        with mock.patch.object(vh, "SUPERVISOR", fixture), \
+                mock.patch.object(vh, "SUPERVISOR_TEST_TIMEOUT_MS", 500), \
+                mock.patch.object(vh, "TSC_ARGV", ([sys.executable, "-c", "pass"],)), \
+                mock.patch.object(vh, "temp_base", lambda: base), \
+                redirect_stdout(out):
+            rc, _ = vh.run_supervisor_gate()
+        lines = out.getvalue().splitlines()
+        self.assertEqual(rc, 1, out.getvalue())
+        a = next(l for l in lines if l.startswith("== supervisor: test/a.test.ts "))
+        b = next(l for l in lines if l.startswith("== supervisor: test/b.test.ts "))
+        self.assertRegex(a, r"^== supervisor: test/a\.test\.ts 1 pass, 0 fail in \d+s$")
+        self.assertRegex(b, r"^== supervisor: test/b\.test\.ts 0 pass, 1 fail in \d+s rc=1$")
+        self.assertIn("== supervisor: test/command-line.test.ts skip: e2e suite absent", lines)
+        # the control: a bare run (bun's own 5 s default) passes the file, so the red is the flag's
+        control = subprocess.run(["bun", "test", "./test/b.test.ts"], cwd=str(fixture),  # win-ok: the bare control
+                                 capture_output=True, encoding="utf-8", timeout=60)
+        self.assertEqual(control.returncode, 0, control.stdout + control.stderr)

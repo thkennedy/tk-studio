@@ -1907,23 +1907,47 @@ describe("Story 36.5 (M5, DW-113): the shared skills store", () => {
     readFile: () => plugin,
   });
 
-  test("the tolerant parse: one name per line, the first token", () => {
-    expect(parseSkillsList("tk-studio-launch   0.3.9\r\n\n  tk-studio-evals\n")).toEqual(["tk-studio-launch", "tk-studio-evals"]);
+  /** Story 38.6 (DW-183): the 2026-11-06 capture on the Windows host, `sbx skills ls`, exit 0, verbatim (36-5 spec's
+   * Consult Log): the header, then the store's top-level entries, not skills. */
+  const CAPTURE = [
+    "SKILL       STORE",
+    "synced      C:\\Users\\tim\\AppData\\Local\\DockerSandboxes\\sandboxes\\state\\agent-skills",
+    "tk-studio   C:\\Users\\tim\\AppData\\Local\\DockerSandboxes\\sandboxes\\state\\agent-skills",
+  ].join("\r\n") + "\r\n";
+
+  test("the parse, pinned to the capture: the header skipped, each line's first token a store entry", () => {
+    expect(parseSkillsList(CAPTURE)).toEqual(["synced", "tk-studio"]);
+    expect(parseSkillsList(CAPTURE.replace(/\r\n/g, "\n"))).toEqual(["synced", "tk-studio"]);
     expect(skillsLsArgv()).toEqual(["skills", "ls"]);
   });
 
-  test("listed: in the store; a listing that names only the plugin defers to the store folder's skill", async () => {
-    expect(await skillInStore(SKILL, fake({ exit: 0, stdout: `${SKILL} x\n`, stderr: "" }))).toEqual({ in_store: true });
-    expect(await skillInStore(SKILL, fake({ exit: 0, stdout: "tk-studio\n", stderr: "" }, { [STORE]: ["tk-studio"], [join(STORE, "tk-studio", "skills")]: [SKILL] }))).toEqual({ in_store: true });
+  test("the walk is the skill check: the capture names only the plugin folder, the store folder's skill decides", async () => {
+    expect(await skillInStore(SKILL, fake({ exit: 0, stdout: CAPTURE, stderr: "" }, { [STORE]: ["synced", "tk-studio"], [join(STORE, "tk-studio", "skills")]: [SKILL] }))).toEqual({ in_store: true });
+    expect(await skillInStore(SKILL, fake({ exit: 0, stdout: CAPTURE, stderr: "" }, { [STORE]: [SKILL] }))).toEqual({ in_store: true });
   });
 
-  test("absent: names the store, the release from its plugin.json (or `unknown`) and the import", async () => {
+  test("the listing never answers `true` alone: a listing naming the skill (a plugin named like it) with no store folder", async () => {
+    const out = await skillInStore(SKILL, fake({ exit: 0, stdout: `${SKILL} x\n`, stderr: "" }));
+    expect(out).toMatchObject({ in_store: false, via: "sbx skills ls", release: "unknown" });
+  });
+
+  test("absent: a listing with no tk-studio plugin folder names the store, the release from its plugin.json (or `unknown`) and the import", async () => {
     const out = await skillInStore(SKILL, fake({ exit: 0, stdout: "other\n", stderr: "" }, { [STORE]: ["tk-studio"] }, JSON.stringify({ version: "0.3.7" })));
     expect(out).toMatchObject({ in_store: false, release: "0.3.7", via: "sbx skills ls" });
     if (out.in_store !== false) throw new Error("unreachable");
-    expect(out.text).toBe(`${SKILL} is not in the sbx skills store (${STORE}; plugin 0.3.7); import the release: tk-studio update, then sbx skills import --force`);
+    expect(out.text).toBe(`${SKILL} is not in the sbx skills store (${STORE}; plugin 0.3.7; the listing names no tk-studio plugin folder); import the release: tk-studio update, then sbx skills import --force`);
     const unknown = await skillInStore(SKILL, fake({ exit: 0, stdout: "", stderr: "" }));
-    expect(unknown).toMatchObject({ in_store: false, release: "unknown" });
+    expect(unknown).toMatchObject({ in_store: false, release: "unknown", via: "sbx skills ls" });
+  });
+
+  test("the capture with a readable store folder lacking the skill: absent, read from the store folder", async () => {
+    const out = await skillInStore(SKILL, fake({ exit: 0, stdout: CAPTURE, stderr: "" }, { [STORE]: ["synced", "tk-studio"] }, JSON.stringify({ version: "0.3.9" })));
+    expect(out).toMatchObject({ in_store: false, release: "0.3.9", via: "store folder" });
+  });
+
+  test("the capture with no readable store folder: unknown, the listing names the plugin folder, not skills", async () => {
+    expect(await skillInStore(SKILL, fake({ exit: 0, stdout: CAPTURE, stderr: "" }))).toEqual({
+      in_store: "unknown", why: `the listing names the tk-studio plugin folder, not skills; no store folder at ${STORE}` });
   });
 
   test("the verb missing: the host store folder decides, and the refusal says so; neither source proves nothing", async () => {

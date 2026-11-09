@@ -16,7 +16,7 @@ bun src/cli.ts recover                                            # the restart 
 bun src/cli.ts drain                                              # recover, then drive every unowned queued run
 bun src/cli.ts serve                                              # the HTTP API on the tailnet (see HTTP API)
 bun src/cli.ts verify <run id>                                    # re-run an ended run's host leg (Story 33.8)
-bun test
+bun test --timeout 30000
 bunx tsc --noEmit
 ```
 

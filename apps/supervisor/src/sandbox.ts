@@ -339,10 +339,14 @@ function skillsStore(env: Env): { dir: string | null; shown: string } {
   return base ? { dir: join(base, ...STORE_SUBPATH), shown: join(base, ...STORE_SUBPATH) } : { dir: null, shown: `%LOCALAPPDATA%\\${STORE_SUBPATH.join("\\")}` };
 }
 
-/** One name per line, each line's first whitespace-separated token (tolerant: the output is pinned to the operator's
- * capture when it lands). */
+/** Story 38.6 (DW-183): `sbx skills ls`'s header line (the 2026-11-06 capture: `SKILL       STORE`). */
+const SKILLS_LS_HEADER = /^SKILL\s+STORE\b/;
+
+/** The store's top-level entries `sbx skills ls` names: the header dropped, then each non-empty line's first
+ * whitespace-separated token. Pinned to the 2026-11-06 capture (`SKILL  STORE`, then `synced <path>` and
+ * `tk-studio <path>`): the listing names the store's entries (the `tk-studio` plugin folder), not skills. */
 export const parseSkillsList = (out: string): string[] =>
-  (out ?? "").split(/\r?\n/).map((l) => l.trim().split(/\s+/)[0] ?? "").filter(Boolean);
+  (out ?? "").split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !SKILLS_LS_HEADER.test(l)).map((l) => l.split(/\s+/)[0] ?? "").filter(Boolean);
 
 export type SkillInStore =
   | { in_store: true }
@@ -350,9 +354,12 @@ export type SkillInStore =
   | { in_store: "unknown"; why: string }
   | { in_store: false; store: string; release: string; via: "sbx skills ls" | "store folder"; text: string };
 
-/** Is `skill` in the shared skills store? `sbx skills ls` names it; a listing that does not (or a verb that is missing)
- * reads the host's store folder (`<skill>/`, `<plugin>/skills/<skill>/`). The release named on a refusal is the store's
- * `<plugin>/.claude-plugin/plugin.json` version, else `unknown`. Never throws. */
+/** Is `skill` in the shared skills store? Story 38.6 (DW-183), in this order: the host's store folder walk is the skill
+ * check (`<skill>/`, `<plugin>/skills/<skill>/` → in the store); `sbx skills ls` is the plugin-folder check (a listing
+ * that answered without `tk-studio` → absent, `via: "sbx skills ls"`); a readable store folder whose walk lacks the
+ * skill → absent, `via: "store folder"`; a listing naming `tk-studio` with no readable store folder, or neither
+ * source → `unknown`. The listing never answers `true` alone (a plugin named like a skill). The release named on a
+ * refusal is the store's `<plugin>/.claude-plugin/plugin.json` version, else `unknown`. Never throws. */
 export async function skillInStore(skill: string, deps: SandboxDeps = {}): Promise<SkillInStore> {
   const store = skillsStore(deps.env ?? process.env);
   let listed: string[] | null = null, why = "";
@@ -361,13 +368,16 @@ export async function skillInStore(skill: string, deps: SandboxDeps = {}): Promi
     if (r.exit === 0) listed = parseSkillsList(r.stdout);
     else why = `sbx skills ls exited ${r.exit}: ${clip(r.stderr || r.stdout, 200)}`;
   } catch (e) { why = `sbx skills ls: ${clip(message(e), 200)}`; }
-  if (listed?.includes(skill)) return { in_store: true };
   const entries = store.dir ? listHost(deps, store.dir) : [];
   if (entries.includes(skill)) return { in_store: true };
   const plugins = [STORE_PLUGIN, ...entries.filter((e) => e !== STORE_PLUGIN)];
   if (store.dir && plugins.some((p) => listHost(deps, join(store.dir!, p, "skills")).includes(skill))) return { in_store: true };
-  if (listed === null && !entries.length) return { in_store: "unknown", why: `${why}; no store folder at ${store.shown}` };
-  const via = listed === null ? "store folder" : "sbx skills ls";
+  const noPlugin = listed !== null && !listed.includes(STORE_PLUGIN);
+  if (!noPlugin && !entries.length) {
+    if (listed !== null) return { in_store: "unknown", why: `the listing names the ${STORE_PLUGIN} plugin folder, not skills; no store folder at ${store.shown}` };
+    return { in_store: "unknown", why: `${why}; no store folder at ${store.shown}` };
+  }
+  const via = noPlugin ? "sbx skills ls" : "store folder";
   let release = "unknown";
   for (const p of store.dir ? plugins : []) {
     try {
@@ -375,7 +385,8 @@ export async function skillInStore(skill: string, deps: SandboxDeps = {}): Promi
       if (typeof version === "string" && version) { release = version; break; }
     } catch { /* an unreadable plugin.json names no release */ }
   }
-  const said = listed === null ? `; read from the store folder: ${why}` : "";
+  const said = noPlugin ? `; the listing names no ${STORE_PLUGIN} plugin folder`
+    : `; read from the store folder: ${listed === null ? why : `the listing names the ${STORE_PLUGIN} plugin folder, not skills`}`;
   return { in_store: false, store: store.shown, release, via,
     text: `${skill} is not in the sbx skills store (${store.shown}; plugin ${release}${said}); import the release: tk-studio update, then sbx skills import --force` };
 }

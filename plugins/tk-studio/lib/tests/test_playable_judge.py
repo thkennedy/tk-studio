@@ -8,9 +8,11 @@ malformed answer), each ending `blocked` with exit 2 and the AD-11 block.
 """
 from __future__ import annotations
 
+import ast
 import contextlib
 import io
 import json
+import os
 import re
 import sys
 import tempfile
@@ -283,8 +285,10 @@ class DriveBoundsTests(unittest.TestCase):
     def test_every_bun_suite_drive_bound_derives_from_its_manifest_timeout(self):
         budget, conformance = self._conformance("_budget")
         runner, _ = self._conformance("runner")
+        # Story 38.6: a bun drive is one the bounds step reads as one (its AST `[bun, "test", …]` predicate)
+        semantics, _ = self._conformance("e2e_windows_semantics")
         found = {path.stem for path in conformance.glob("e2e_*.py")
-                 if 'shutil.which("bun")' in path.read_text(encoding="utf-8")}
+                 if any(semantics._bun_test_list(n) for n in ast.walk(ast.parse(path.read_bytes())))}
         self.assertEqual(found, set(self.BUN_DRIVES))  # a new bun drive joins this list and the helper
         manifest = json.loads((conformance / "manifest.json").read_text(encoding="utf-8"))
         for module in self.BUN_DRIVES:
@@ -322,6 +326,59 @@ class DriveBoundsTests(unittest.TestCase):
                 self.assertEqual(text.count('"test"'), text.count("*bun_test_args()"))
         # guard the guard: the walk must keep reading the real multi-file drives
         self.assertLessEqual({"e2e_paused_exits", "e2e_vertical_slice"}, set(multi_file))
+
+    def test_every_bun_drive_spawns_the_bun_on_path_with_the_host_figure(self):
+        # Story 38.6 (AC2): pinned by behaviour, not by the drive's text: a fake `bun` first on PATH logs each argv,
+        # and every bun drive's bun step must spawn it with `--timeout <_budget.HOST_TEST_TIMEOUT_MS>`
+        budget, _ = self._conformance("_budget")
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        bin_dir = Path(tmp.name) / "bin"
+        bin_dir.mkdir()
+        log = Path(tmp.name) / "bun.log"
+        body = ("import json, os, sys\n"
+                "with open(os.environ['FAKE_BUN_LOG'], 'a', encoding='utf-8') as f:\n"
+                "    f.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+                "print(' 1 pass')\nprint(' 0 fail')\n")
+        if sys.platform == "win32":
+            script = bin_dir / "fake_bun.py"
+            script.write_text(body, encoding="utf-8")
+            fake = bin_dir / "bun.cmd"
+            fake.write_text(f'@"{sys.executable}" "{script}" %*\r\n', encoding="utf-8")
+        else:
+            fake = bin_dir / "bun"
+            fake.write_text(f"#!{sys.executable}\n{body}", encoding="utf-8")
+            fake.chmod(0o755)
+        calls = {
+            "e2e_engine_gate": lambda d: d.run()["steps"],
+            "e2e_vertical_slice": lambda d: d.suite_steps(),
+            "e2e_run_sweep": lambda d: d.suite_steps(),
+            "e2e_paused_exits": lambda d: d.suite_steps(),
+            "e2e_playable_verify": lambda d: d.run()["steps"],
+        }
+        self.assertEqual(set(calls), set(self.BUN_DRIVES))
+        want = str(budget.HOST_TEST_TIMEOUT_MS)
+        with mock.patch.dict(os.environ, {"PATH": str(bin_dir) + os.pathsep + os.environ.get("PATH", ""),
+                                          "FAKE_BUN_LOG": str(log)}):
+            for module in self.BUN_DRIVES:
+                with self.subTest(drive=module):
+                    drive, _ = self._conformance(module)
+                    log.write_text("", encoding="utf-8")
+                    if module == "e2e_playable_verify":
+                        with mock.patch.object(drive, "core_steps", lambda: []):
+                            steps = calls[module](drive)
+                    else:
+                        steps = calls[module](drive)
+                    if any(s["step"] == "locate" and "not_run" in s for s in steps):
+                        self.skipTest("no checkout: the drives do not reach bun")
+                    bun_step = next(s for s in steps if s["step"] == "bun")
+                    self.assertEqual(os.path.normcase(bun_step["detail"]), os.path.normcase(str(fake)))
+                    argvs = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines() if line]
+                    tests = [a for a in argvs if a[:1] == ["test"]]
+                    self.assertTrue(tests, argvs)
+                    for argv in tests:
+                        self.assertIn("--timeout", argv)
+                        self.assertEqual(argv[argv.index("--timeout") + 1], want)
 
     def _budget_over(self, manifest: dict):
         budget, _ = self._conformance("_budget")

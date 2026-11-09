@@ -199,6 +199,34 @@ class SettledShapeRuleTest(unittest.TestCase):
                         section3.index("A split story's spec resolves by its exact"))
 
     @unittest.skipUnless(TASK_PLANNING.is_file(), "studio-pipeline plugin not in this checkout")
+    def test_story_38_6_task_planning_names_the_host_test_figure(self):
+        # Story 38.6 (DW-172): the planner is told the host figure and the derived suite bound; the figures come
+        # from `_budget`, never a copy here
+        spec = importlib.util.spec_from_file_location(
+            "budget_under_test", PLUGIN_ROOT / "contracts" / "conformance" / "_budget.py")
+        budget = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(budget)
+        figure = f"{budget.HOST_TEST_TIMEOUT_MS:_} ms".replace("_", " ")
+        need = f"({budget.HOST_TEST_TIMEOUT_MS // 1000 + budget.HEADROOM_S} s)"
+        self.assertEqual((figure, need), ("30 000 ms", "(45 s)"))
+        section3 = _flat(TASK_PLANNING.read_text(encoding="utf-8").split("## 3.", 1)[1].split("\n## 4.", 1)[0])
+        self.assertIn("**The host test figure (Story 38.6, DW-172).** A plan that adds or widens a test sizes it to "
+                      "the Windows host, not the Linux gate:", section3)
+        self.assertIn(f"`_budget.HOST_TEST_TIMEOUT_MS` (`plugins/tk-studio/contracts/conformance/_budget.py`) is "
+                      f"{figure} a test on the host", section3)
+        self.assertIn(f"every `bun test` the plan names carries `--timeout {budget.HOST_TEST_TIMEOUT_MS}` "
+                      f"(`_budget.bun_test_args()`)", section3)
+        self.assertEqual(budget.bun_test_args(), ["--timeout", str(budget.HOST_TEST_TIMEOUT_MS)])
+        self.assertIn("a bun drive's suite bound derives from its manifest `timeout`, never a copy: "
+                      "`suite_bound = timeout - install_s - other_s - _budget.HEADROOM_S`", section3)
+        self.assertIn(f"which must hold the host figure plus `_budget.HEADROOM_S` {need} or "
+                      f"`e2e_windows_semantics`'s `bounds` step fails it.", section3)
+        self.assertIn("Git-backed fixtures, subprocesses and a widened drive filter are planned against that "
+                      "figure, never the Linux gate's timings.", section3)
+        self.assertLess(section3.index("**Contract tests (the Stories row).**"),
+                        section3.index("**The host test figure (Story 38.6, DW-172).**"))
+
+    @unittest.skipUnless(TASK_PLANNING.is_file(), "studio-pipeline plugin not in this checkout")
     def test_task_planning_plans_every_story_and_refuses_open_questions(self):
         # Story 35.2: the bootstrap plans every manifest entry in list order (section 3
         # each, the named story first); an un-noted open question of the story's CAPs is

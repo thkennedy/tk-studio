@@ -134,6 +134,8 @@ Every entry's `invoke_dev_with` already names `plans/<N>-<M>.md` (a `<key>-s2` e
 
 **Contract tests (the Stories row).** A test that pins the contract's `| Story / rulings` row uses one prefix regex ending in an optional later-stories group (`Story N\.1, …, Story N\.k(, Story N\.m)* \(Epic N\)`), never a literal of the whole row, so appending a story is never a deviation (35.4's consult, retrospective C8).
 
+**The host test figure (Story 38.6, DW-172).** A plan that adds or widens a test sizes it to the Windows host, not the Linux gate: `_budget.HOST_TEST_TIMEOUT_MS` (`plugins/tk-studio/contracts/conformance/_budget.py`) is 30 000 ms a test on the host, every `bun test` the plan names carries `--timeout 30000` (`_budget.bun_test_args()`), and a bun drive's suite bound derives from its manifest `timeout`, never a copy: `suite_bound = timeout - install_s - other_s - _budget.HEADROOM_S`, which must hold the host figure plus `_budget.HEADROOM_S` (45 s) or `e2e_windows_semantics`'s `bounds` step fails it. Git-backed fixtures, subprocesses and a widened drive filter are planned against that figure, never the Linux gate's timings.
+
 ## 4. Validate
 
 Run `bmad-loop validate --project <project root> --spec <spec folder, project-relative>`. A dirty working tree is expected mid-run, so ignore that line. Fix any manifest finding. A manifest that does not parse must never be left behind: restore the previous entries and record `planning failed: <reason>` instead.

@@ -14,7 +14,10 @@ is unavailable.
 
 The studio-web gate is `bun run verify` in apps/studio-web. The supervisor gate (holes 51, 56, 63, 64)
 runs every apps/supervisor/test/*.test.ts but the e2e suite (command-line.test.ts) in its own
-`bun test --timeout 30000 <file>` (Story 37.2: the per-test figure on the command, DW-155), each under a 420 s timeout (the tree killed past it), with every TK_SUPERVISOR_*, TK_ATLASSIAN_* and TK_STUDIO_ATLASSIAN_*
+`bun test --timeout 30000 <file>` (Story 37.2: the per-test figure on the command, DW-155), each under a 420 s timeout (the tree killed past it),
+then (Story 38.6, DW-167) the e2e suite in its own step, `bun test --timeout 30000 ./test/command-line.test.ts` under a
+1800 s timeout with the same environment, printing the same per-file line (one
+`== supervisor: test/command-line.test.ts skip: e2e suite absent` line when the file is absent), with every TK_SUPERVISOR_*, TK_ATLASSIAN_* and TK_STUDIO_ATLASSIAN_*
 variable stripped from the environment and TMPDIR/TEMP/TMP at a per-run folder
 `<tempfile.gettempdir()>/tk-verify-supervisor-<UTC stamp>-<pid>/` (the gate's own temp folder, outside
 any git checkout: the suites' queues refuse a path inside one, and the gate fails before the first file
@@ -75,8 +78,9 @@ GIT_TIMEOUT = 60
 
 SUPERVISOR = ROOT / "apps" / "supervisor"
 SUPERVISOR_GATE = "supervisor"
-SUPERVISOR_E2E = "command-line.test.ts"  # spawns `bun src/cli.ts`; run by hand, type-checked by tsc
+SUPERVISOR_E2E = "command-line.test.ts"  # spawns `bun src/cli.ts`; Story 38.6 (DW-167): its own step, after the files
 SUPERVISOR_FILE_TIMEOUT = 420
+SUPERVISOR_E2E_TIMEOUT = 1800  # Story 38.6: the e2e suite's bound (its per-test bounds run to 240 s; ~96 tests)
 # Story 37.2 (DW-155, hole 108): the per-test timeout on every file's command, the preload's figure; equal to the
 # conformance `_budget.HOST_TEST_TIMEOUT_MS` (pinned by test_verify_host.py; no cross-tree import).
 SUPERVISOR_TEST_TIMEOUT_MS = 30_000
@@ -287,6 +291,41 @@ def run_supervisor_gate() -> tuple[int, str]:
         print(message, flush=True)
         tails.append(message)
 
+    def bun_file(rel: str, timeout: int) -> None:
+        """One `bun test --timeout <figure> ./<rel>` under `timeout`, its line (and named skip lines) printed, its
+        timing and counts joined to the gate's; a red file fails the gate with its tail (the files and the e2e step)."""
+        nonlocal failed, total_pass, total_fail, total_skip
+        t0 = time.monotonic()
+        try:
+            rc, out = spawn(["bun", "test", "--timeout", str(SUPERVISOR_TEST_TIMEOUT_MS), f"./{rel}"], SUPERVISOR, env,
+                            timeout)
+        except OSError as exc:
+            rc, out = 127, f"cannot start 'bun': {exc}"
+        seconds = time.monotonic() - t0
+        timings.append((rel, seconds))
+        p, f = bun_counts(out)
+        skips, skipped = bun_skips(out)
+        total_pass += p or 0
+        total_fail += f or 0
+        total_skip += skips
+        # Story 37.6 (B8): `, S skip` only when bun skipped any (skip 0 leaves the line, and 37.2's verdicts, as they were)
+        skip = f", {skips} skip" if skips else ""
+        line = f"== {SUPERVISOR_GATE}: {rel} {'?' if p is None else p} pass, {'?' if f is None else f} fail{skip} in {seconds:.0f}s"
+        if rc is None:
+            line += f" (timed out after {timeout}s)"
+        elif rc != 0:
+            line += f" rc={rc}"
+        print(line, flush=True)
+        # One named line per skipped test, never a silent skip; bun quiet (an AI-agent env) still says how many.
+        for name in skipped:
+            print(f"== {SUPERVISOR_GATE}: {rel} skip: {name}", flush=True)
+        if skips and not skipped:
+            print(f"== {SUPERVISOR_GATE}: {rel} skip: {skips} test(s), names not reported", flush=True)
+        if rc != 0:
+            failed = True
+            tails.append(f"--- {rel}\n{out.rstrip()}")
+
+    e2e_ran = False  # Story 38.6: the e2e step's file joins the closing line's count when it ran
     try:
         try:
             tmp = temp_base() / f"{TEMP_PREFIX}-{stamp}-{os.getpid()}"
@@ -322,36 +361,15 @@ def run_supervisor_gate() -> tuple[int, str]:
                 files = []
                 env = {}  # no dependencies: neither the suites nor tsc can run
         for rel in files:
-            t0 = time.monotonic()
-            try:
-                rc, out = spawn(["bun", "test", "--timeout", str(SUPERVISOR_TEST_TIMEOUT_MS), f"./{rel}"], SUPERVISOR, env,
-                           SUPERVISOR_FILE_TIMEOUT)
-            except OSError as exc:
-                rc, out = 127, f"cannot start 'bun': {exc}"
-            seconds = time.monotonic() - t0
-            timings.append((rel, seconds))
-            p, f = bun_counts(out)
-            skips, skipped = bun_skips(out)
-            total_pass += p or 0
-            total_fail += f or 0
-            total_skip += skips
-            # Story 37.6 (B8): `, S skip` only when bun skipped any (skip 0 leaves the line, and 37.2's verdicts, as they were)
-            skip = f", {skips} skip" if skips else ""
-            line = f"== {SUPERVISOR_GATE}: {rel} {'?' if p is None else p} pass, {'?' if f is None else f} fail{skip} in {seconds:.0f}s"
-            if rc is None:
-                line += f" (timed out after {SUPERVISOR_FILE_TIMEOUT}s)"
-            elif rc != 0:
-                line += f" rc={rc}"
-            print(line, flush=True)
-            # One named line per skipped test, never a silent skip; bun quiet (an AI-agent env) still says how many.
-            for name in skipped:
-                print(f"== {SUPERVISOR_GATE}: {rel} skip: {name}", flush=True)
-            if skips and not skipped:
-                print(f"== {SUPERVISOR_GATE}: {rel} skip: {skips} test(s), names not reported", flush=True)
-            if rc != 0:
-                failed = True
-                tails.append(f"--- {rel}\n{out.rstrip()}")
+            bun_file(rel, SUPERVISOR_FILE_TIMEOUT)
         if env:
+            # Story 38.6 (DW-167): the e2e suite under the leg, in its own step, never a silent exclusion
+            e2e = f"test/{SUPERVISOR_E2E}"
+            if (SUPERVISOR / e2e).is_file():
+                bun_file(e2e, SUPERVISOR_E2E_TIMEOUT)
+                e2e_ran = True
+            else:
+                print(f"== {SUPERVISOR_GATE}: {e2e} skip: e2e suite absent", flush=True)
             t0 = time.monotonic()
             rc, out = 127, ""
             # bunx finds a bin on PATH before it downloads one: the app's own TypeScript, not the latest
@@ -381,7 +399,7 @@ def run_supervisor_gate() -> tuple[int, str]:
     slowest = max(timings, key=lambda t: t[1]) if timings else None
     slow = f"slowest {slowest[0]} {slowest[1]:.0f}s" if slowest else "slowest none"
     print(f"== {SUPERVISOR_GATE}: {'FAILED' if failed else 'ok'} in {time.monotonic() - started:.0f}s; "
-          f"{len(files)} files, {total_pass} pass, {total_fail} fail{f', {total_skip} skip' if total_skip else ''}; {slow}", flush=True)
+          f"{len(files) + e2e_ran} files, {total_pass} pass, {total_fail} fail{f', {total_skip} skip' if total_skip else ''}; {slow}", flush=True)
     return (1 if failed else 0), "\n".join(tails)
 
 

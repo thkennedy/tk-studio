@@ -9,6 +9,9 @@ class below is green in the engine's gate and red on the host leg. A scan of
     apps/supervisor/test    <checkout>/apps/supervisor/test
     _bmad/scripts           <checkout>/_bmad/scripts
     tools                   <checkout>/tools
+    plugins/tk-studio/skills/*/scripts   <plugin>/skills/*/scripts (Story 38.6, B9)
+    .bmad-loop/plugins      <checkout>/.bmad-loop/plugins (Story 38.6, B9; the nested
+                            apps/supervisor/.bmad-loop copy is pinned equal or rendered, never scanned)
 
 (`*.py` by AST, `*.ts` by line, `//` and JSDoc/block-comment lines skipped, folders starting
 with a dot and `node_modules` skipped)
@@ -50,6 +53,12 @@ suite_bound(…)`, read from the `--plugin-root` manifest's `timeout` less its `
 `other_s` and `_budget.HEADROOM_S`) holds the 30 000 ms host figure plus `_budget.HEADROOM_S`;
 a bun drive with no manifest entry or no derived bound is a red hit.
 
+A `config verify commands` step (Story 38.6) reads every `.tk-studio/config.yaml` under the
+checkout (else the plugin root; `node_modules`, `.git`, `.venv` and every dot-folder but
+`.tk-studio` pruned) line by line, comment lines skipped (stdlib-only: no YAML parse): a line
+running `bun test` with no `--timeout N`, or `N` under `_budget.HOST_TEST_TIMEOUT_MS`, is a hit
+naming `<rel>:<line>` and the host figure; a trailing `# win-ok: <reason>` exempts the line.
+
 The remainder is exempted inline: `win-ok: <reason>` in a comment on the hit's line (any
 line of a multi-line Python call). An absent scope is a `not_run` step, `ok`; a Python file
 that does not parse is a red hit (as the encoding drive). Prints one JSON object
@@ -60,6 +69,7 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -88,7 +98,22 @@ RULE_BUN = (f"bounds: a bun test argv with no --timeout: the preload's setDefaul
 RULE_GIT = (f"bounds: a drive git subprocess with no timeout=: every step a drive spends is bounded under the "
             f"{HOST_FIGURE} host figure's headroom (B7)")
 
+RULE_VERIFY = (f"config verify commands: a bun test verify command with no --timeout at the {HOST_FIGURE} host "
+               f"figure: the host runs each test under bun's 5 s default otherwise: name --timeout "
+               f"{_budget.HOST_TEST_TIMEOUT_MS} (_budget.HOST_TEST_TIMEOUT_MS)")
+
 WIN_OK = re.compile(r"win-ok:\s*\S")
+# A `.tk-studio/config.yaml` verify command line running `bun test` (a quoted `bun.exe` path too), its `--timeout N`,
+# a comment line and a trailing `# win-ok: <reason>` comment.
+VERIFY_BUN_TEST = re.compile(r"""(?:^|[\s"'/\\:-])bun(?:\.exe)?["']?\s+test\b""")
+VERIFY_TIMEOUT = re.compile(r"--timeout(?:=|\s+)(\d+)")
+YAML_COMMENT_LINE = re.compile(r"^\s*#")
+TRAILING_WIN_OK = re.compile(r"(?:^|\s)#.*win-ok:\s*\S")
+# A trailing YAML comment (` #` to the line's end), and the shell separators between one command's runs (`&&` matched
+# before a cmd single `&`).
+TRAILING_COMMENT = re.compile(r"(?:^|\s)#.*$")
+SHELL_SEPARATOR = re.compile(r"&&|\|\||;|\||&")
+CONFIG_PRUNE = {"node_modules", ".git", ".venv"}
 SUBPROCESS_CALLS = {"run", "Popen", "check_output", "check_call", "call"}
 CLEARS = {"rmdir", "rmtree", "rmSync", "rmdirSync", "_remove", "unlink", "unlinkSync", "remove"}
 # A pid or random part: `pid` as a token (`getpid`, `process.pid`, `lock_pid`, `ownerPid`; never `rapid`).
@@ -463,8 +488,9 @@ def _source_files(root: Path) -> list[Path]:
                   and not any(part.startswith(".") or part == "node_modules" for part in p.relative_to(root).parts))
 
 
-def _scan_step(step: str, root: Path, base: Path) -> dict:
-    files = _source_files(root)
+def _scan_step(step: str, roots: list[Path], base: Path) -> dict:
+    """One step over `roots`, each file labelled relative to `base` (the encoding drive's `_scan_step` shape)."""
+    files = [path for root in roots for path in _source_files(root)]
     hits: list[str] = []
     for path in files:
         label = path.relative_to(base).as_posix()
@@ -626,18 +652,74 @@ def bounds_step(plugin_root: Path, checkout: Path | None) -> dict:
             "detail": f"{scanned} file(s), every bun test argv carries --timeout ({HOST_FIGURE}), every drive git call a timeout="}
 
 
+def verify_command_hits(text: str, label: str) -> list[str]:
+    """Every verify-command line of one `.tk-studio/config.yaml` running `bun test` with no `--timeout N` or `N` under
+    the host figure, as `<label>:<line> <rule>: <line>`; comment lines and a trailing `# win-ok: <reason>` exempt.
+    The flag is read from the code part only (a trailing comment stripped), and each `bun test` run is judged on its
+    own span: the line splits into segments at `&&`, `||`, `;`, `|` and a cmd single `&`, and within a segment a run's
+    span runs from its `bun test` to the next `bun test` or the segment's end (two runs in one YAML flow sequence never
+    share a flag): any bare or low run flags the line; a `bun test` only in the trailing comment runs nothing and is
+    no hit."""
+    hits = []
+    for index, line in enumerate(text.splitlines(), 1):
+        if YAML_COMMENT_LINE.match(line) or not VERIFY_BUN_TEST.search(line) or TRAILING_WIN_OK.search(line):
+            continue
+        runs = []
+        for seg in SHELL_SEPARATOR.split(TRAILING_COMMENT.sub("", line)):
+            starts = [match.start() for match in VERIFY_BUN_TEST.finditer(seg)]
+            runs += [seg[start:end] for start, end in zip(starts, starts[1:] + [len(seg)])]
+        if not runs or all((flag := VERIFY_TIMEOUT.search(run)) and int(flag.group(1)) >= _budget.HOST_TEST_TIMEOUT_MS
+                        for run in runs):
+            continue
+        hits.append(f"{label}:{index} {RULE_VERIFY}: {' '.join(line.split())[:CALL_WIDTH]}")
+    return hits
+
+
+def _config_files(top: Path) -> list[Path]:
+    """Every `.tk-studio/config.yaml` under `top`: `node_modules`, `.git`, `.venv` and dot-folders but `.tk-studio`
+    pruned."""
+    found = []
+    for folder, dirnames, filenames in os.walk(top):
+        dirnames[:] = sorted(d for d in dirnames
+                             if d not in CONFIG_PRUNE and (not d.startswith(".") or d == ".tk-studio"))
+        if Path(folder).name == ".tk-studio" and "config.yaml" in filenames:
+            found.append(Path(folder) / "config.yaml")
+    return sorted(found)
+
+
+def verify_commands_step(plugin_root: Path, checkout: Path | None) -> dict:
+    """Story 38.6: every `.tk-studio/config.yaml` verify command running `bun test` names `--timeout` at the figure."""
+    top = checkout or plugin_root
+    configs = _config_files(top)
+    hits: list[str] = []
+    for path in configs:
+        hits += verify_command_hits(path.read_text(encoding="utf-8", errors="replace"), path.relative_to(top).as_posix())
+    if hits:
+        return {"step": "config verify commands", "ok": False,
+                "detail": f"{len(hits)} verify command(s) under the {HOST_FIGURE} host figure: " + "; ".join(hits)}
+    return {"step": "config verify commands", "ok": True,
+            "detail": f"{len(configs)} config(s), every bun test verify command carries --timeout ({HOST_FIGURE})"}
+
+
 def run(plugin_root: Path = PLUGIN_ROOT) -> dict:
     checkout = enc._checkout(plugin_root)
-    scopes = [("plugins/tk-studio/lib", plugin_root / "lib", plugin_root.parents[1] if checkout else plugin_root)]
+    scopes = [("plugins/tk-studio/lib", [plugin_root / "lib"], plugin_root.parents[1] if checkout else plugin_root)]
     for rel in ("apps/supervisor/src", "apps/supervisor/test", "_bmad/scripts", "tools"):
-        scopes.append((rel, checkout / rel if checkout else None, checkout))
+        scopes.append((rel, [checkout / rel] if checkout else [], checkout))
+    skills = plugin_root / "skills"
+    scopes.append(("plugins/tk-studio/skills/*/scripts",
+                   sorted(p for p in skills.glob("*/scripts") if p.is_dir()) if skills.is_dir() else [],
+                   checkout or plugin_root))
+    scopes.append((".bmad-loop/plugins", [checkout / ".bmad-loop" / "plugins"] if checkout else [], checkout))
     steps = []
-    for step, root, base in scopes:
-        if root is None or not root.is_dir():
+    for step, roots, base in scopes:
+        roots = [root for root in roots if root.is_dir()]
+        if not roots:
             steps.append({"step": step, "ok": True, "not_run": f"{step} absent"})
         else:
-            steps.append(_scan_step(step, root, base))
+            steps.append(_scan_step(step, roots, base))
     steps.append(bounds_step(plugin_root, checkout))
+    steps.append(verify_commands_step(plugin_root, checkout))
     return {"ok": all(s["ok"] for s in steps), "steps": steps}
 
 

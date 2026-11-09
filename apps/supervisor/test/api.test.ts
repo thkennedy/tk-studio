@@ -1064,14 +1064,18 @@ process.exitCode = Number(fs.readFileSync(${JSON.stringify(join(bin, "exit"))}, 
 
 // The real submit path (registry `show` → `resolve` → enqueue) against a throwaway store.
 // win32 too (DW-5): the Windows host runs this suite (no fake binary is exec'd here).
-const canRunE2E = !!process.env.TK_STUDIO_ROOT && spawnSync("uv", ["--version"]).status === 0;
+// Story 38.6 (EP-36 B8): skipped only without `uv` (37.6's named skip lines report it); TK_STUDIO_ROOT unset (a hand
+// run, the engine sandbox) defaults to this test's own checkout for the describe, restored after it.
+const hasUv = spawnSync("uv", ["--version"]).status === 0;
 
-describe.skipIf(!canRunE2E)("POST /jobs through the real submit path", () => {
+describe.skipIf(!hasUv)("POST /jobs through the real submit path", () => {
   const store = tempDir("tk-sup-api-store-");
   const project = tempDir("tk-sup-api-proj-");
-  let prevHome: string | undefined, projectId = "";
+  let prevHome: string | undefined, prevRoot: string | undefined, projectId = "";
   beforeAll(() => {
     prevHome = process.env.TK_STUDIO_HOME;
+    prevRoot = process.env.TK_STUDIO_ROOT;
+    if (!process.env.TK_STUDIO_ROOT) process.env.TK_STUDIO_ROOT = resolve(REPO, "..", "..");
     process.env.TK_STUDIO_HOME = store;
     mkdirSync(join(project, ".tk-studio", "jobs"), { recursive: true });
     copyFileSync(join(REPO, ".tk-studio", "jobs", "studio-health.json"), join(project, ".tk-studio", "jobs", "studio-health.json"));
@@ -1082,7 +1086,10 @@ describe.skipIf(!canRunE2E)("POST /jobs through the real submit path", () => {
     const shown = spawnSync("uv", ["run", join(plugin, "lib", "registry.py"), "show"], { env, encoding: "utf-8" });
     projectId = Object.keys(JSON.parse(shown.stdout.slice(shown.stdout.indexOf("{"))).projects)[0];
   });
-  afterAll(() => { if (prevHome === undefined) delete process.env.TK_STUDIO_HOME; else process.env.TK_STUDIO_HOME = prevHome; });
+  afterAll(() => {
+    if (prevHome === undefined) delete process.env.TK_STUDIO_HOME; else process.env.TK_STUDIO_HOME = prevHome;
+    if (prevRoot === undefined) delete process.env.TK_STUDIO_ROOT; else process.env.TK_STUDIO_ROOT = prevRoot;
+  });
 
   const real = () => {
     const queue = track(new Queue(join(tempDir("tk-sup-api-q-"), "q.db")));

@@ -625,3 +625,10 @@
 - What no longer holds: plans/38-5.md Files: "`apps/supervisor/src/closeout.ts` (modify) — … `findSpec`'s rule"; Code Map: "`closeout.ts findSpec` :166-181"
 - Suggested adjustment: invoke_dev_with: edit `findSpec`'s split-spec rule in `worktree.ts` (already in Files), not `closeout.ts`; tests may import it from either module. This is no deviation from the Files list. Also re-grep 38-5's `worktree.ts` anchors, which moved from 1346 to 1689 lines.
 - Status: closed — applied to the unstarted 38-5 entry's invoke_dev_with by the 38-2 gate session (2026-11-08)
+
+## operator — scope: operator — from 38-6-the-gates-coverage-widened — 2026-11-09
+
+- What changed: owner decisions since Epic 38 was planned. TKSTUDIO-235 closed DW-145/152/156/158/163/181, TKSTUDIO-234 answered `max_runs`, and on 2026-11-07 the operator retired the handoff's "Still Tim's" list in favour of Jira tasks.
+- What no longer holds: Story 38.7 AC3, "the follow-up-review entries (DW-145, 152, 156, 158, 163, 181) stay `open (owner's decision …)`", and the handoff list naming "the fourth sweep's `max_runs` once 38.3 lands" as owed.
+- Suggested adjustment: none needed to run. The 38-6 gate absorbed both into 38-7's invoke_dev_with and plan: the entries stay byte-unchanged as resolved, recorded in a DRIFT line, and the list names Jira tasks. A `bmad-correct-course` of the epics.md wording is optional, for the record.
+- Status: open — operator note, no pause

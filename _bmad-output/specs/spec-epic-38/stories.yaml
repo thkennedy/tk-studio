@@ -234,4 +234,14 @@
     in the spec folder; the engine resolves it by the glob
     `38-7-the-records-reconciled-and-the-policys-bands-*.md`, and a file named
     `38-7-the-records-reconciled-and-the-policys-bands.md` is read as pending (loop
-    deficiency 1, story 21-6).
+    deficiency 1, story 21-6). Refresh (38-6 gate, 2026-11-09): plans/38-7.md's "Refreshed at the 38-6 gate" block
+    has the anchors at HEAD after 38.1-38.6 and the owner's decisions since planning.
+    TKSTUDIO-235 closed all six follow-up-review entries (DW-181 included): leave them
+    byte-unchanged (no relabel), with DW-186/188 untouched, and record the AC's "stay
+    open" clause as overtaken in one DRIFT line (affects: none). CAP-14 (b)/(c) is
+    recorded (36-5 Consult Log, 2026-11-07T21:07Z), so DW-168 closes and the ask cites
+    that record. Keep DW-182's decision line and its awaiting clause. Name each owner
+    item in the handoff list by its Jira task (the list was retired 2026-11-07). The PR
+    rule also needs the eleven PR-less `by Story 38.1`-`38.6` closures filled (#350,
+    #352, #357, #359, #363, 38.6's PR). Halt (consult) if a detached re-run leg would
+    read 38.7's own closures red (plan Risks).

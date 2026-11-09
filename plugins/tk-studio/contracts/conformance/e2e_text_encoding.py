@@ -4,9 +4,10 @@ Linux defaults a text-mode open to UTF-8 and the Windows host to its code page,
 so a bare call is green in the engine's gate and red on the host leg. An AST scan
 of every `*.py` under
 
-    lib              <plugin>/lib (the tests included)
-    tools/installer  <checkout>/tools/installer
-    apps/*/scripts   <checkout>/apps/*/scripts
+    lib                                  <plugin>/lib (the tests included)
+    tools/installer                      <checkout>/tools/installer
+    plugins/tk-studio/skills/*/scripts   <plugin>/skills/*/scripts (Story 38.6, B9)
+    .bmad-loop/plugins                   <checkout>/.bmad-loop/plugins (Story 38.6, B9)
 
 for `write_text`, `read_text`, `open` and `Path.open` with no `encoding=` keyword
 (a positional encoding does not count, nor does `encoding=None`; a computed value
@@ -38,8 +39,8 @@ computed and not provably binary; their absent mode is `rb`, so it is exempt.
 
 `os.fdopen` and `tempfile` are other names and never match. A folder whose name
 starts with a dot (a virtual environment) is not source. A root that does not exist
-(`apps/*/scripts`, or `tools/installer` in an extracted archive) is a `not_run` step,
-`ok`; `lib` is what the plugin ships, so its absence is red, never a scan of nothing.
+(`tools/installer`, the skills' scripts or `.bmad-loop/plugins` in an extracted archive) is a
+`not_run` step, `ok`; `lib` is what the plugin ships, so its absence is red, never a scan of nothing.
 
 Prints one JSON object {ok, steps[]} and exits nonzero on a red step. Stdlib-only
 (NFR9); never prompts (AD-11).
@@ -256,11 +257,18 @@ def run(plugin_root: Path = PLUGIN_ROOT) -> dict:
         steps.append(_scan_step("tools/installer", [installer], checkout))
     else:
         steps.append({"step": "tools/installer", "ok": True, "not_run": "tools/installer absent"})
-    app_scripts = sorted(p for p in (checkout / "apps").glob("*/scripts") if p.is_dir()) if checkout else []
-    if app_scripts:
-        steps.append(_scan_step("apps/*/scripts", app_scripts, checkout))
+    skills = plugin_root / "skills"
+    skill_scripts = sorted(p for p in skills.glob("*/scripts") if p.is_dir()) if skills.is_dir() else []
+    if skill_scripts:
+        steps.append(_scan_step("plugins/tk-studio/skills/*/scripts", skill_scripts, checkout or plugin_root))
     else:
-        steps.append({"step": "apps/*/scripts", "ok": True, "not_run": "no apps/*/scripts folder"})
+        steps.append({"step": "plugins/tk-studio/skills/*/scripts", "ok": True,
+                      "not_run": "no plugins/tk-studio/skills/*/scripts folder"})
+    pipeline = checkout / ".bmad-loop" / "plugins" if checkout else None
+    if pipeline is not None and pipeline.is_dir():
+        steps.append(_scan_step(".bmad-loop/plugins", [pipeline], checkout))
+    else:
+        steps.append({"step": ".bmad-loop/plugins", "ok": True, "not_run": ".bmad-loop/plugins absent"})
     return {"ok": all(s["ok"] for s in steps), "steps": steps}
 
 
