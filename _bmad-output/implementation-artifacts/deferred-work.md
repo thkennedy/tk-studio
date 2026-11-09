@@ -1583,7 +1583,8 @@ source_spec: `38-2-a-run-that-does-no-work-says-so-spec.md`
 location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261107-231024-c5ae; this entry preserves the lingering recommendation for a deliberate later review.
-status: open
+status: done 2026-11-09
+resolution: already resolved: Owner decision ingested on the ledger entry (_bmad-output/implementation-artifacts/deferred-work.md DW-186 `decision: A — Close as accepted — Later stories and gates reviewed the same surfaces (TKSTUDIO-258, 2026-11-09)`), committed by 5cfc1280 (day-9b docs PR #367, the hand sync-back tick that moved TKSTUDIO-258 to Done); nothing is owed in code — the entry is a lingering follow-up-review recommendation the owner closed, the DW-8 precedent (resolved by #332 on an owner close).
 decision: A — Close as accepted — Later stories and gates reviewed the same surfaces (TKSTUDIO-235 precedent). (TKSTUDIO-258, 2026-11-09)
 
 ### DW-187: The launch-time plan-status pass writes `blocked` on one refused connection to api.atlassian.com (WinError 10060) and never retries (hole 115).
