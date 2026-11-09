@@ -81,6 +81,7 @@ class FakeAtlassian(FakeJira):
         self.filters: list[dict] = []
         self.spaces: dict[str, dict] = {}
         self.folders: dict[str, list[dict]] = {}
+        self.no_homepage: set[str] = set()   # space ids that name no homepage
         self.force: dict[tuple[str, str], tuple[int, object]] = {}
         self.urls: list[str] = []
         self.v3_queries: list[dict] = []   # every GET /workflows/search query
@@ -293,8 +294,22 @@ class FakeAtlassian(FakeJira):
             return 200, space
         m = re.match(r"^/spaces/([^/]+)/direct-children$", path)
         if method == "GET" and m:
+            # in no published v2 spec: the gateway refuses every scoped token
+            # (hole 124, measured 2026-11-09) — nothing may read this route
+            return 401, {"code": 401,
+                         "message": "Unauthorized; scope does not match"}
+        m = re.match(r"^/spaces/([^/]+)$", path)
+        if method == "GET" and m:
+            space = {"id": m.group(1)}
+            if m.group(1) not in self.no_homepage:
+                space["homepageId"] = f"home-{m.group(1)}"
+            return 200, space
+        m = re.match(r"^/pages/home-([^/]+)/direct-children$", path)
+        if method == "GET" and m:
+            # a folder made with no parent sits under the space's homepage
             return self._cursor_page(
-                path, [{"id": "home", "type": "page", "title": "Overview"}]
+                path, [{"id": "tpl", "type": "page",
+                        "title": "Template - How-to guide"}]
                 + self.folders.get(m.group(1), []), q)
         if method == "POST" and path == "/folders":
             entry = {"id": self._id(50000), "type": "folder",
@@ -556,7 +571,7 @@ class Story387SetupTests(SetupTestCase):
 
     def _children(self):
         space = self.fake.spaces["TKSTUDIO"]
-        return ("GET", f"confluence:/spaces/{space['id']}/direct-children")
+        return ("GET", f"confluence:/pages/home-{space['id']}/direct-children")
 
     def test_the_version_read_spells_expand_values_transitions(self):
         # the full setup's update reads the version with the site's spelling
@@ -595,12 +610,67 @@ class Story387SetupTests(SetupTestCase):
                 self.assertIn("create the top-level folders `GDD`, `Records`", steps)
                 self.assertIn("record each folder's id (from its address bar) under "
                               "`planning.confluence.folders.<name>`", steps)
-                self.assertIn("`read:custom-content:confluence` and "
-                              "`read:hierarchical-content:confluence`", steps)
+                self.assertIn("or add `read:hierarchical-content:confluence` to "
+                              "the Confluence key so the rerun adopts them", steps)
+                self.assertNotIn("read:custom-content", steps)
                 self.assertIn("folder listing refused by scope: the unrecorded folders are "
                               "handed to the owner's numbered steps, none created "
                               "(an unadopted folder could duplicate one made by hand)",
                               result["notes"])
+
+    def test_the_folder_listing_reads_the_homepages_children(self):
+        # hole 124: the space-children route is in no published spec and the
+        # gateway refuses it for every scoped token; the listing is the
+        # homepage's direct children, followed page by page
+        self._setup(owner_account_id="acc-owner")
+        space = self.fake.spaces["TKSTUDIO"]
+        self.fake.page_size = 2
+        calls = len(self.fake.calls)
+        client = confluence.ConfluenceClient(CLOUD, "agent@example.com", "t",
+                                             self.fake, site=SITE)
+        titles = confluence.find_folders(client, space["id"])
+        self.assertEqual(sorted(titles), sorted(FOLDER_TITLES))
+        self.assertNotIn("Template - How-to guide", titles)
+        read = [path for _, path in self.fake.calls[calls:]]
+        self.assertEqual(read[0], f"confluence:/spaces/{space['id']}")
+        self.assertGreater(len(read), 2)   # the children came in pages
+        self.assertEqual(set(read[1:]),
+                         {f"confluence:/pages/home-{space['id']}/direct-children"})
+        self.assertFalse([path for _, path in self.fake.calls
+                          if path.endswith(f"/spaces/{space['id']}/direct-children")])
+
+    def test_a_listed_folder_is_adopted_not_handed_over(self):
+        # the live case hole 124 broke: a folder that exists on the site and is
+        # not recorded is adopted from the listing, never re-created
+        self._setup(owner_account_id="acc-owner")
+        text = self.config.read_text(encoding="utf-8")
+        kept = [line for line in text.splitlines(keepends=True)
+                if not re.match(r"^\s+(gdd|records):", line)]
+        self.config.write_text("".join(kept), encoding="utf-8", newline="")
+        writes = len(self.fake.writes())
+        result = self._setup()
+        self.assert_block_last(result, "complete")
+        self.assertEqual(len(self.fake.writes()), writes)
+        self.assertIn("folder GDD", result["found"])
+        self.assertIn("folder Records", result["found"])
+        self.assertEqual(result["owner_steps"], [])
+        self.assertFalse([n for n in result["notes"] if "refused by scope" in n])
+        self.assertTrue(self._binding()["confluence"]["folders"]["gdd"])
+
+    def test_a_space_with_no_homepage_is_refused_by_name(self):
+        self._setup(owner_account_id="acc-owner")
+        space = self.fake.spaces["TKSTUDIO"]
+        self.fake.no_homepage.add(space["id"])
+        client = confluence.ConfluenceClient(CLOUD, "agent@example.com", "t",
+                                             self.fake, site=SITE)
+        with self.assertRaises(confluence.ConfluenceError) as caught:
+            confluence.find_folders(client, space["id"])
+        self.assertIn("has no homepage", str(caught.exception))
+        writes = len(self.fake.writes())
+        result = self._setup()
+        self.assert_block_last(result, "blocked")
+        self.assertIn("has no homepage", result["reason"])
+        self.assertEqual(len(self.fake.writes()), writes)
 
     def test_every_folder_recorded_is_found_and_nothing_is_created(self):
         self._setup(owner_account_id="acc-owner")

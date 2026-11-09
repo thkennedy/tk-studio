@@ -117,10 +117,14 @@ class FakeConfluence:
         path, _, query = url.split(c.API_PREFIX, 1)[1].partition("?")
         self.calls.append((method, path))
         del query  # one page per list: no cursor to follow
-        m = re.match(r"^/spaces/([^/]+)/direct-children$", path)
+        m = re.match(r"^/spaces/([^/]+)$", path)
         if method == "GET" and m:
-            return self._cursor([{"id": "home", "type": "page",
-                                  "title": "Overview"}]
+            return 200, {"id": m.group(1), "homepageId": f"home-{m.group(1)}"}
+        m = re.match(r"^/pages/home-([^/]+)/direct-children$", path)
+        if method == "GET" and m:
+            # top-level folders sit under the space's homepage (hole 124)
+            return self._cursor([{"id": "tpl", "type": "page",
+                                  "title": "Template - How-to guide"}]
                                 + self.folders.get(m.group(1), []))
         if method == "POST" and path == "/folders":
             entry = {"id": self._id(50000 if not body.get("parentId")

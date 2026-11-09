@@ -3110,8 +3110,9 @@ patch). **The setup (DW-182):** `find_workflow_version` reads `GET /workflows/se
 (the site answers 400 to any other expand). The folder step counts a folder recorded at
 `planning.confluence.folders.<name>` as found (`folder <Title> (recorded)`); with the children read refused by scope or
 401 nothing is created: every unrecorded folder goes to the owner's numbered steps (record each id under
-`planning.confluence.folders.<name>`, or add `read:custom-content:confluence` and `read:hierarchical-content:confluence`
-to the key), a dry run lists them there and not under `would_create`. `plansync.py setup --directory <root>
+`planning.confluence.folders.<name>`, or add `read:hierarchical-content:confluence` to the key — hole 124: the listing is
+the space homepage's direct children, `GET /spaces/{id}` then `GET /pages/{homepageId}/direct-children`; the
+space-children route is in no published v2 spec and is refused for every scoped token), a dry run lists them there and not under `would_create`. `plansync.py setup --directory <root>
 --verify-workflow --project-key <SCRATCH> [--dry-run]` removes the first present GLOBAL transition the template needs
 from the scratch project's workflow (`update_workflow(..., replace=True)`, which posts exactly the given list), re-reads
 it absent, restores the original list and re-reads it present, answering `verify_workflow {project_key, transition,
