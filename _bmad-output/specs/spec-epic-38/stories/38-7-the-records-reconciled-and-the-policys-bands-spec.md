@@ -230,6 +230,9 @@ DRIFT: the contract's 0.1.34 Story 38.7 `--verify-workflow` clause names the pre
 | review | 1 | 2026-11-09T15:10:23Z | 2026-11-09T15:26:40Z | d3a65304-2a68-4d85-be2f-4a5eadd574e0 | claude-opus-5-5 | medium | 8157272 | 72848 | 5.3385 | completed |
 | review | 2 | 2026-11-09T15:26:41Z | 2026-11-09T15:40:44Z | 21a0dbe5-78fe-4096-a12c-19c14c5ae60a | claude-opus-5-5 | medium | 11115754 | 74078 | 6.2590 | completed |
 | gate | 1 | 2026-11-09T15:40:44Z | 2026-11-09T15:42:07Z | 8c97d24e-6a67-47e7-8301-5dbd3f1e7893 | claude-opus-5-5 | medium | 973605 | 7224 | 0.9366 | completed |
+| host-leg | 1 | 2026-11-09T15:42:19Z | 2026-11-09T17:00:21Z | — | — | — | — | — | — | green |
+| close-out | 1 | 2026-11-09T17:00:21Z | 2026-11-09T17:00:31Z | — | — | — | — | — | — | PR |
+| merge | — | 2026-11-09T17:01:23Z | 2026-11-09T17:01:23Z | — | — | — | — | — | — | merged |
 
 
 
