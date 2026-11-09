@@ -308,8 +308,11 @@ class FakeAtlassian(FakeJira):
 
 
 class SetupTestCase(unittest.TestCase):
+    # Story 39.1: the supervisor's origin variables are cleared too, so a
+    # host that sets them never adds an `Open:` line to an exact body pin.
     ENV_KEYS = ("TK_STUDIO_HOME", jirabackend.TOKEN_ENV, jirabackend.EMAIL_ENV,
-                *jirabackend.AGENT_ENV_NAMES)
+                *jirabackend.AGENT_ENV_NAMES, "TK_SUPERVISOR_TLS_NAME",
+                "TK_SUPERVISOR_BIND", "TK_SUPERVISOR_PORT")
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()

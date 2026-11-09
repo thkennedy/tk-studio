@@ -4,6 +4,9 @@
 // projection's reason; the HUD (the run in flight, or the last ended run); the project switcher
 // (`GET /agents`, remembered per browser). The rules are in `model.ts`, the canvas in `scene.ts`:
 // a state change is `setPose` on the same sprite, never a rebuild.
+// Story 39.1: the project is the address's (`/app/office/<project>`, the `project` prop); with none, the remembered
+// choice is picked and replaces the address (`onProject(p, true)`); the switcher pushes it (`onProject(p, false)`). A
+// served address project is remembered as the switcher's is; one not served is replaced as none is.
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { Application } from "pixi.js";
 import type { OfficeStore } from "../live/store";
@@ -13,6 +16,7 @@ import {
 import {
   bubbleFor, desksFrom, fetchAgents, hudModel, projectsFrom, rememberedProject, rememberProject, type RegistryRow,
 } from "./model";
+import { addressProject } from "../screen";
 
 export interface CanvasStats {
   zoom: number;
@@ -43,11 +47,15 @@ const panel = {
 /** Bubbles stack above the HUD panel (1) and App's debug panel (2). */
 const BUBBLE_Z = 3;
 
-export function OfficeScreen({ store, onStats }: { store: OfficeStore; onStats?: (s: CanvasStats) => void }) {
+export function OfficeScreen({ store, onStats, project, onProject }: {
+  store: OfficeStore;
+  onStats?: (s: CanvasStats) => void;
+  project: string | null;
+  onProject: (project: string, replace: boolean) => void;
+}) {
   const containerRef = useRef<HTMLDivElement>(null);
   const live = useSyncExternalStore(store.subscribe, store.getState);
   const [projects, setProjects] = useState<string[]>([]);
-  const [project, setProject] = useState<string | null>(null);
   const [rows, setRows] = useState<RegistryRow[]>([]);
   const [error, setError] = useState<string | null>(null);
   /** The canvas's own failure (Pixi startup, the sheet): never cleared by the fetches. */
@@ -69,12 +77,22 @@ export function OfficeScreen({ store, onStats }: { store: OfficeStore; onStats?:
       if (!ans.ok) return setError(ans.error);
       const list = projectsFrom(ans.agents);
       setProjects(list);
-      setProject(rememberedProject(list));
     });
     return () => {
       cancelled = true;
     };
   }, []);
+
+  // The address's project against the served list: a served one is remembered (the shown and the remembered project
+  // agree); none, or one not served, is replaced by the remembered choice (`addressProject`).
+  const onProjectRef = useRef(onProject);
+  onProjectRef.current = onProject;
+  useEffect(() => {
+    const next = addressProject(project, projects, rememberedProject(projects));
+    if (next === null) return;
+    if ("remember" in next) rememberProject(next.remember);
+    else onProjectRef.current(next.replace, true);
+  }, [project, projects]);
 
   // The selected project's desks (`GET /agents?project=<id>`).
   useEffect(() => {
@@ -265,8 +283,8 @@ export function OfficeScreen({ store, onStats }: { store: OfficeStore; onStats?:
           <select
             value={project ?? ""}
             onChange={(e) => {
-              setProject(e.target.value);
               rememberProject(e.target.value);
+              onProject(e.target.value, false);
             }}
           >
             {projects.map((p) => (

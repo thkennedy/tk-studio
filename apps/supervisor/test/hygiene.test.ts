@@ -4,11 +4,11 @@ import { hostname } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { cancelRun, mirror, studioOps } from "../src/cli";
-import { NotifierConfigMissing, NotifierUnknown, notifier, workDir } from "../src/env";
+import { NotifierConfigMissing, NotifierUnknown, notifier, supervisorOrigin, workDir } from "../src/env";
 import {
-  canonicalPr, claimRefusedLine, copyTranscript, END_HYGIENE_EVENTS, recordClaimRefusal, endNotice, isGodot, isWithin, NOTICE_MAX_BYTES, notifierSecrets, notify, noticeText, prUrl,
+  canonicalPr, claimRefusedLine, copyTranscript, END_HYGIENE_EVENTS, engagementRoute, recordClaimRefusal, endNotice, isGodot, isWithin, NOTICE_MAX_BYTES, notifierSecrets, notify, noticeText, prUrl,
   REFUSED_UNDER_TEST, robocopyOk, scrubNotifier, snapshot, snapshotArgv, SnapshotFailed, snapshotOnce, snapshotTarget, sweepEnds, TRUNCATED_MARKER,
-  underBunTest,
+  routeUrl, runRoute, underBunTest,
 } from "../src/hygiene";
 import { NOTIFIER_VARS } from "./preload";
 import { END_LEASE_STALE_MS, NOTIFIED_BEFORE, Queue, type Owner, type Probes, type QueueRun } from "../src/queue";
@@ -846,5 +846,70 @@ describe("Story 33.2: one notifier line per new claim refusal, naming the run an
     fx.queue.end(run.run_id, "cancelled", "by hand", { from: "queued" });
     expect(await recordClaimRefusal(fx.queue, run.run_id, "other", "other", "x", { env: TG_ENV, fetch: fetchFn })).toBe(false);
     expect(calls).toHaveLength(0);
+  });
+});
+
+// Story 39.1: the run's end carries the page that answers it. Every env here names the three origin variables
+// explicitly (an empty string is unset), so a host whose User environment sets them cannot move a pin.
+describe("Story 39.1: the notifier line's route_url from the supervisor's origin", () => {
+  const NO_ORIGIN = { TK_SUPERVISOR_TLS_NAME: "", TK_SUPERVISOR_BIND: "", TK_SUPERVISOR_PORT: undefined };
+  const TLS = { TK_SUPERVISOR_TLS_NAME: "studio.example.ts.net", TK_SUPERVISOR_BIND: "100.100.1.2", TK_SUPERVISOR_PORT: "8787" };
+  const BIND = { TK_SUPERVISOR_TLS_NAME: "", TK_SUPERVISOR_BIND: "100.100.1.2", TK_SUPERVISOR_PORT: "9000" };
+
+  test("supervisorOrigin: the TLS name, else the bind, else none; a bad port or blank values are none; never throws", () => {
+    expect(supervisorOrigin(TLS)).toBe("https://studio.example.ts.net:8787");
+    expect(supervisorOrigin({ ...TLS, TK_SUPERVISOR_TLS_NAME: "  studio.example.ts.net  ", TK_SUPERVISOR_PORT: "8443" })).toBe("https://studio.example.ts.net:8443");
+    expect(supervisorOrigin(BIND)).toBe("http://100.100.1.2:9000");
+    expect(supervisorOrigin(NO_ORIGIN)).toBeNull();
+    expect(supervisorOrigin({ TK_SUPERVISOR_TLS_NAME: "   ", TK_SUPERVISOR_BIND: " ", TK_SUPERVISOR_PORT: "" })).toBeNull();
+    expect(supervisorOrigin({ ...TLS, TK_SUPERVISOR_PORT: "70000" })).toBeNull();
+    expect(supervisorOrigin({ ...BIND, TK_SUPERVISOR_PORT: "x" })).toBeNull();
+    expect(supervisorOrigin({})).toBeNull();
+  });
+
+  test("the routes and their absolute URL (undefined with no origin)", () => {
+    expect(runRoute("q-1")).toBe("/app/run/q-1");
+    expect(engagementRoute("p", "ENG-001")).toBe("/app/chat/ENG-001?project=p");
+    expect(engagementRoute("a b", "ENG/1")).toBe("/app/chat/ENG%2F1?project=a%20b");
+    expect(routeUrl(runRoute("q-1"), TLS)).toBe("https://studio.example.ts.net:8787/app/run/q-1");
+    expect(routeUrl(runRoute("q-1"), BIND)).toBe("http://100.100.1.2:9000/app/run/q-1");
+    expect(routeUrl(runRoute("q-1"), NO_ORIGIN)).toBeUndefined();
+  });
+
+  test("noticeText: open: <route_url> is the last line, after the PR, kept whole under a clipped reason", () => {
+    const base = { run_id: "q-1", job_id: "j", project_id: "p", studio_run_id: null, state: "complete", reason: "done", pr: PR };
+    const url = "https://studio.example.ts.net:8787/app/run/q-1";
+    expect(noticeText({ ...base, route_url: url })).toBe(`${noticeText(base)}\nopen: ${url}`);
+    expect(noticeText({ ...base, route_url: url }).split("\n").slice(-2)).toEqual([`PR: ${PR}`, `open: ${url}`]);
+    const long = noticeText({ ...base, reason: "r".repeat(8000), route_url: url });
+    expect(Buffer.byteLength(long, "utf-8")).toBeLessThanOrEqual(NOTICE_MAX_BYTES);
+    expect(long).toContain(TRUNCATED_MARKER);
+    expect(long).toEndWith(`\nPR: ${PR}\nopen: ${url}`);
+    const swept = noticeText({ ...base, sweep: "1/2 bundles", route_url: url });
+    expect(swept.split("\n").slice(-3)).toEqual(["sweep: 1/2 bundles", `PR: ${PR}`, `open: ${url}`]);
+  });
+
+  test("sweepEnds with an origin: the sent text ends open: <origin>/app/run/<id> and notified carries route_url; without, unchanged", async () => {
+    const fx = fixture();
+    const r = fx.enqueue("j", { owner: A });
+    await fx.queue.claim(r.run_id, A);
+    await mirror(fx.queue, r.run_id, { jobId: "j", defn: {} }, {
+      ok: true, job_id: "j", run_id: null, state: "complete", status_block: { status: "complete", artifacts: [PR] },
+    });
+    const f = fakeFetch();
+    expect(await sweepEnds(fx.queue, { env: { ...NTFY_ENV, ...TLS }, fetch: f.fetchFn })).toEqual([r.run_id]);
+    const url = `https://studio.example.ts.net:8787/app/run/${r.run_id}`;
+    const body = String(f.calls[0].init?.body);
+    expect(body).toEndWith(`\nPR: ${PR}\nopen: ${url}`);
+    expect(fx.queue.events(r.run_id).find((e) => e.kind === "notified")!.detail).toEqual({ via: "ntfy", state: "complete", pr: PR, route_url: url });
+
+    const plain = fx.enqueue("k");
+    fx.queue.end(plain.run_id, "blocked", "worker failed");
+    const g = fakeFetch();
+    expect(await sweepEnds(fx.queue, { env: { ...NTFY_ENV, ...NO_ORIGIN }, fetch: g.fetchFn })).toEqual([plain.run_id]);
+    const text = String(g.calls[0].init?.body);
+    expect(text).toBe(noticeText(endNotice(fx.queue, fx.queue.get(plain.run_id)!)));
+    expect(text).not.toContain("open:");
+    expect(fx.queue.events(plain.run_id).find((e) => e.kind === "notified")!.detail).toEqual({ via: "ntfy", state: "blocked" });
   });
 });

@@ -6,7 +6,7 @@ import { issueAnswer, PR } from "../inbox/fixture";
 import type { FetchLike } from "../inbox/model";
 import { NONE, type StorageLike } from "../office/model";
 import {
-  canAct, canSend, canSendReply, CHOOSE_TEXT, commentAuthor, costText, fetchIssue, ISSUE_KEY, issueUrl, issueView, NOT_METERED, postReply, rememberedIssue, rememberIssue,
+  canAct, canSend, canSendReply, CHOOSE_TEXT, commentAuthor, costText, fetchIssue, ISSUE_KEY, issueUrl, issueView, NOT_METERED, postReply, rememberedIssue,
   replyUrl, SENT_NOTICE, sentAfter,
 } from "./model";
 
@@ -68,14 +68,11 @@ describe("the issue view (Story 31.6)", () => {
 
   it("the remembered issue: tk-studio.web.issue; absent, malformed or throwing is none", () => {
     expect(ISSUE_KEY).toBe("tk-studio.web.issue");
-    const s = memory();
-    expect(rememberedIssue(s)).toBeNull();
-    rememberIssue({ project: "p", key: "TKS-3" }, s);
-    expect(rememberedIssue(s)).toEqual({ project: "p", key: "TKS-3" });
+    expect(rememberedIssue(memory())).toBeNull();
+    expect(rememberedIssue(memory({ [ISSUE_KEY]: JSON.stringify({ project: "p", key: "TKS-3" }) }))).toEqual({ project: "p", key: "TKS-3" });
     expect(rememberedIssue(memory({ [ISSUE_KEY]: "{nope" }))).toBeNull();
     expect(rememberedIssue(memory({ [ISSUE_KEY]: JSON.stringify({ project: "p" }) }))).toBeNull();
     expect(rememberedIssue(throwing)).toBeNull();
-    expect(() => rememberIssue({ project: "p", key: "K-1" }, throwing)).not.toThrow();
     expect(CHOOSE_TEXT).toBe("Choose an item in the Inbox");
   });
 

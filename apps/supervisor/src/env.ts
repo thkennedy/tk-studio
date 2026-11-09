@@ -113,6 +113,19 @@ export function apiPort(env: Env = process.env): number {
   return n;
 }
 
+/** Story 39.1: the supervisor's own origin, for the absolute URL a notifier line carries — `https://<TLS_NAME>:<port>`
+ * when TK_SUPERVISOR_TLS_NAME is set (trimmed), else `http://<TK_SUPERVISOR_BIND>:<port>`, else null; `<port>` is
+ * `apiPort` (an invalid TK_SUPERVISOR_PORT answers null). Never throws: the senders run outside `serve` too. */
+export function supervisorOrigin(env: Env = process.env): string | null {
+  let port: number;
+  try { port = apiPort(env); } catch { return null; }
+  const name = env.TK_SUPERVISOR_TLS_NAME?.trim();
+  if (name) return `https://${name}:${port}`;
+  const bind = env.TK_SUPERVISOR_BIND?.trim();
+  if (bind) return `http://${bind}:${port}`;
+  return null;
+}
+
 /** Story 34.5: the engine MCP forwarder's documented fixed port (operator-decisions §2: nothing else listens in the
  * 8000 range). Story 35.4: no longer the default — set TK_SUPERVISOR_ENGINE_MCP_PORT=8788 to keep it fixed. */
 export const DEFAULT_ENGINE_MCP_PORT = 8788;

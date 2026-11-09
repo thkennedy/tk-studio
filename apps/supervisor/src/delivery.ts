@@ -57,7 +57,9 @@
  *                  outcome's state (a `go {cap}` from `partial` or a `revise` since: no close, no notice, no event);
  *                  that path, and the `run-ended` row's once guard, count only a `run-ended` line for the run newer
  *                  than the record's newest `go` line.
- *   the notice     one notifier line `engagement ENG-NNN <outcome>: <page url | closeout.md path>`, then
+ *   the notice     one notifier line `engagement ENG-NNN <outcome>: <page url | closeout.md path>` (Story 39.1: with
+ *                  the engagement's chat page as its `route_url`, `open: <url>`, when the origin resolves; the
+ *                  refusal's line too), then
  *                  `engagement-closeout {engagement, project, run_id, outcome, page, ok, notify, stories_left}`
  *                  (`stories_left` the lib's, an array of strings else `[]`; on the transient-close path, which runs
  *                  no lib, the `run-ended` line's `stories_left`, strings only, else `[]`). A lib refusal by name
@@ -73,7 +75,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  APPROVE_EVENT, CLOSEOUT_EVENT, applyRow, blockOwed, defaultNotify, eventsFor, goAfterEnd, landedStory, linksOf, serialised,
+  APPROVE_EVENT, CLOSEOUT_EVENT, applyRow, blockOwed, defaultNotify, eventsFor, goAfterEnd, landedStory, linksOf, routeOf, serialised,
   stops, targetsOf, type ApproveDeps, type Target,
 } from "./approve";
 import { jobRunCosts } from "./board";
@@ -430,7 +432,7 @@ async function closeoutStep(queue: Queue, deps: DeliveryDeps, t: Target, out: Cl
     if (!lib) return; // transient: the next pass
     const notice = (o: string, reason: string): EndNotice => ({
       run_id: run.run_id, job_id: run.job_id, project_id: run.project_id ?? project, studio_run_id: run.studio_run_id,
-      state: o, reason,
+      state: o, reason, ...routeOf(deps, project, id),
     });
     if (lib.status === "blocked") {
       if (told()) return; // another process's pass told meanwhile
@@ -457,7 +459,7 @@ async function closeoutStep(queue: Queue, deps: DeliveryDeps, t: Target, out: Cl
   const link = typeof page?.url === "string" && page.url ? page.url : closeoutRel(id);
   const notice: EndNotice = {
     run_id: run.run_id, job_id: run.job_id, project_id: run.project_id ?? project, studio_run_id: run.studio_run_id,
-    state: outcome, reason: `engagement ${id} ${outcome}: ${link}`,
+    state: outcome, reason: `engagement ${id} ${outcome}: ${link}`, ...routeOf(deps, project, id),
   };
   const notify = await (deps.notify ?? ((n: EndNotice) => defaultNotify(deps, n)))(notice).catch((e) => ({ ok: false, error: clip(message(e)) }));
   queue.serviceEvent(CLOSEOUT_EVENT, { engagement: id, project, run_id: run.run_id, outcome, page, ok: true, notify, stories_left: storiesLeft }, nowIso(deps));

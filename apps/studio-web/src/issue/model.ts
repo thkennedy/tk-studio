@@ -33,7 +33,8 @@ const defaultStorage = (): StorageLike | null => {
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 
-/** The stored `(project, key)`, else null (absent, malformed, or a storage that throws). */
+/** The stored `(project, key)`, else null (absent, malformed, or a storage that throws). Story 39.1: read once by
+ * `screen.ts`'s `migrateRemembered`; nothing writes the key any more (the issue is the address `/app/inbox/<KEY>`). */
 export function rememberedIssue(storage: StorageLike | null = defaultStorage()): IssueRef | null {
   try {
     const raw = storage?.getItem(ISSUE_KEY);
@@ -41,15 +42,6 @@ export function rememberedIssue(storage: StorageLike | null = defaultStorage()):
     return isObj(v) && typeof v.project === "string" && v.project && typeof v.key === "string" && v.key ? { project: v.project, key: v.key } : null;
   } catch {
     return null;
-  }
-}
-
-/** Stores the choice; a storage that throws is ignored. */
-export function rememberIssue(ref: IssueRef, storage: StorageLike | null = defaultStorage()): void {
-  try {
-    storage?.setItem(ISSUE_KEY, JSON.stringify({ project: ref.project, key: ref.key }));
-  } catch {
-    /* in memory only */
   }
 }
 

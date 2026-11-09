@@ -1,6 +1,6 @@
 # Deferred Work
 
-<!-- deferred-work counter: last minted DW-209; mint through plansync.py deferred mint -->
+<!-- deferred-work counter: last minted DW-210; mint through plansync.py deferred mint -->
 
 ### DW-124: Contract §4 `submit` admitted a full job definition but the CLI/skill surface was id-only
 origin: migrated from legacy ledger ("Deferred from: code review of feat/tk-studio-connector (2026-08-06)"), 2026-10-29
@@ -1780,4 +1780,12 @@ source_spec: `38-7-the-records-reconciled-and-the-policys-bands-spec.md`
 location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261109-142842-1357; this entry preserves the lingering recommendation for a deliberate later review.
+status: open
+
+### DW-210: Follow-up review still recommended for 39-1-the-web-has-addresses after the damping cap was spent
+origin: review-budget-followup
+source_spec: `39-1-the-web-has-addresses-spec.md`
+location: n/a
+severity: low
+reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261109-174858-6626; this entry preserves the lingering recommendation for a deliberate later review.
 status: open

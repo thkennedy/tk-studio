@@ -113,7 +113,8 @@ const hasAnswer = (q: Record<string, unknown>) => q.answer !== undefined && q.an
  * is an open question (the option's label when it equals one, case-insensitively and trimmed, a copied `- ` bullet
  * and ` (default)` suffix ignored; else the text verbatim). A line whose text is the question's own `text` (trimmed,
  * case-insensitively) is the block comment's `<id>: <text>` header copied back, not an answer: ignored; so is an
- * `impact: <text>` line whose text is any open question's `impact` (the comment's `Impact: <impact>` line). */
+ * `impact: <text>` line whose text is any open question's `impact` (the comment's `Impact: <impact>` line), and an
+ * `open: <url>` line whose text is an `http(s)://…/app/inbox/<KEY>` URL (the comment's Story 39.1 `Open: <url>` line). */
 export function parseAnswers(body: string, questions: readonly Record<string, unknown>[]): Record<string, string> {
   const open = new Map(questions.filter((q) => typeof q.id === "string" && !hasAnswer(q)).map((q) => [q.id as string, q]));
   const impacts = new Set([...open.values()].map((q) => (typeof q.impact === "string" ? q.impact.trim().toLowerCase() : null))
@@ -129,6 +130,7 @@ export function parseAnswers(body: string, questions: readonly Record<string, un
     const folded = text.trim().toLowerCase();
     if (typeof q.text === "string" && q.text.trim().toLowerCase() === folded) continue; // a copied header
     if (id === "impact" && impacts.has(folded)) continue; // a copied `Impact: <impact>` line
+    if (id === "open" && /^https?:\/\/\S+\/app\/inbox\/\S+$/i.test(text.trim())) continue; // a copied `Open: <url>` line (Story 39.1)
     const bare = text.trim().replace(BULLET_RE, "").replace(DEFAULT_SUFFIX_RE, "").trim().toLowerCase();
     const options = Array.isArray(q.options) ? q.options : [];
     const label = options

@@ -4,40 +4,54 @@
 // waits for. The rules are in `model.ts`. Fetched on a project change, again when the project's runs in the store
 // change (an `office.run` or `office.progress` delta), and when the window regains focus or the page becomes
 // visible (a closed finding, a plan edit, new spend or a new local day reach no delta), never on a timer.
-import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
+// Story 39.1: the project is the address's (`/app/board/<project>`, the `project` prop); with none, the remembered
+// choice is picked and replaces the address (`onProject(p, true)`); the switcher pushes it (`onProject(p, false)`). A
+// served address project is remembered as the switcher's is; one not served is replaced as none is.
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { OfficeStore } from "../live/store";
 import { fetchAgents, projectsFrom, rememberedProject, rememberProject } from "../office/model";
+import { addressProject } from "../screen";
 import { boardColumns, boardRows, fetchBoard, refetchKey, type BoardAnswer } from "./model";
 
 const font = "13px/1.4 ui-monospace, Menlo, Consolas, monospace";
 const link = { color: "#9cf" } as const;
 
-export function BoardScreen({ store }: { store: OfficeStore }) {
+export function BoardScreen({ store, project, onProject }: { store: OfficeStore; project: string | null; onProject: (project: string, replace: boolean) => void }) {
   const live = useSyncExternalStore(store.subscribe, store.getState);
   const [projects, setProjects] = useState<string[]>([]);
-  const [project, setProject] = useState<string | null>(null);
+  const onProjectRef = useRef(onProject);
+  onProjectRef.current = onProject;
   const key = refetchKey(live, project);
   const [wake, setWake] = useState(0);
   const [board, setBoard] = useState<BoardAnswer | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // The project list (`GET /agents`) and the choice the Office remembers; read again on a wake while no project is
-  // chosen (a failed read, or none served yet), never on a timer.
+  // The project list (`GET /agents`) and, with no project in the address, the choice the Office remembers (replacing
+  // the address); read again on a wake while no list or no project is held (a failed read, or none served yet), never
+  // on a timer.
+  const listed = projects.length > 0;
   useEffect(() => {
-    if (project !== null) return;
+    if (project !== null && listed) return;
     let cancelled = false;
     void fetchAgents(null).then((ans) => {
       if (cancelled) return;
       if (!ans.ok) return setError(ans.error);
       setError(null);
-      const list = projectsFrom(ans.agents);
-      setProjects(list);
-      setProject(rememberedProject(list));
+      setProjects(projectsFrom(ans.agents));
     });
     return () => {
       cancelled = true;
     };
-  }, [project, wake]);
+  }, [project, listed, wake]);
+
+  // The address's project against the served list: a served one is remembered (the shown and the remembered project
+  // agree); none, or one not served, is replaced by the remembered choice (`addressProject`).
+  useEffect(() => {
+    const next = addressProject(project, projects, rememberedProject(projects));
+    if (next === null) return;
+    if ("remember" in next) rememberProject(next.remember);
+    else onProjectRef.current(next.replace, true);
+  }, [project, projects]);
 
   // A refetch when the window regains focus or the page becomes visible again.
   useEffect(() => {
@@ -80,8 +94,8 @@ export function BoardScreen({ store }: { store: OfficeStore }) {
           value={project ?? ""}
           onChange={(e) => {
             setBoard(null);
-            setProject(e.target.value);
             rememberProject(e.target.value);
+            onProject(e.target.value, false);
           }}
         >
           {projects.map((p) => (

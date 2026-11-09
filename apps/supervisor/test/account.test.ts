@@ -65,6 +65,8 @@ function fixture(o: FxOpts = {}) {
     ...(o.session === false ? {} : { session: { secret: SECRET } }),
     origin: o.origin ?? ORIGIN,
     account: { sleep: async (ms) => { sleeps.push(ms); } },
+    // Story 39.1: an unbuilt web, so a cookie GET / stays the read-only page whatever the checkout's dist holds.
+    web: { dir: tempDir("tk-sup-account-web-") },
   });
   const call = async (method: string, path: string, init: { body?: string; headers?: Record<string, string>; cookie?: string; bearer?: boolean } = {}) => {
     const headers: Record<string, string> = { ...(init.headers ?? {}) };
