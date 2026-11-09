@@ -1,6 +1,6 @@
 # Deferred Work
 
-<!-- deferred-work counter: last minted DW-199; mint through plansync.py deferred mint -->
+<!-- deferred-work counter: last minted DW-203; mint through plansync.py deferred mint -->
 
 ### DW-124: Contract §4 `submit` admitted a full job definition but the CLI/skill surface was id-only
 origin: migrated from legacy ledger ("Deferred from: code review of feat/tk-studio-connector (2026-08-06)"), 2026-10-29
@@ -238,7 +238,7 @@ source_spec: `28-6-the-plugin-side-honours-the-queues-starter-lock-spec.md`
 location: plugins/tk-studio/lib/jobrun.py checkout match / apps/supervisor/src/queue.ts foldCase
 severity: low
 reason: apps/supervisor/src/queue.ts foldCase lowercases on win32 and darwin; the story (AC1) pins the plugin's compare as "case-folded on Windows", so folding darwin would extend the story. Supervisor hosts are the Windows agent PC and the Linux engine today. DEFERRAL DISCIPLINE (a): AC1's checkout match. Edge-case-hunter, review pass 2026-10-17.
-status: done 2026-11-08
+status: resolved 2026-11-08 by thkennedy/tk-studio#366 (sweep bundle dw-jobrun-finish-and-lock-match)
 resolution: resolved by sweep bundle dw-jobrun-finish-and-lock-match
 
 ### DW-28: Follow-up review still recommended for 29-3-the-office-projection-semantic-states-progress-and-its after the damping cap was spent
@@ -621,7 +621,7 @@ location: apps/supervisor/src/hostverify.ts defaultJudge; plugins/tk-studio/skil
 severity: medium
 reason: Review pass 1 (blind hunter). AC1 names the read-only rule; enforcing it needs a deny-profile design for invokeSkill's `deny_profile`, which this story's plan does not settle. Deferral class (a).
 decision: owner 2026-11-07 (TKSTUDIO-224): A — ship the judge deny profile: no Edit/Write/Bash and no Read of the project's code, `plugins`, `apps` and `_bmad-output` folders, passed by `defaultJudge` and pinned by a test; best effort, not a seal; stays open for the sweep bundle. Operator reading 2026-11-08 (the fourth sweep, run q-run-sweep-20261108T093348Z-f76978, bundle playable-judge-sandbox-hygiene paused at a CRITICAL escalation 12:55Z): the literal list breaks the judge itself — its SKILL.md runs `uv run playable_judge.py prepare|verdict` through Bash and writes `answer.json` through Write to produce the `judge.json` the host leg requires (`hostverify.ts` defaultJudge) — so the profile that carries the ruling's intent is the scoped one: bare `Edit` denied, `Write(...)` and `Read(...)` denied for `./plugins/**`, `./apps/**`, `./_bmad-output/**` and the project's code folders, Bash left open (best effort, as ruled: a Bash read of the code is not sealed). The literal list plus a host-run judge core (a `judge.json` contract change) was weighed and set aside as a rework beyond the bundle. The owner may override on TKSTUDIO-224 (a comment names the reading); the bundle re-queues in the next sweep with this intent. DW-69 does not depend on it and may bundle alone.
-status: done 2026-11-08
+status: resolved 2026-11-08 by thkennedy/tk-studio#366 (sweep bundle dw-playable-judge-deny-profile)
 resolution: resolved by sweep bundle dw-playable-judge-deny-profile
 
 ### DW-69: A 33.8 re-run on an ended run pins (starts) the stopped sandbox for the judge and nothing releases it; it carries no pin record, so the launch check warns "started outside the supervisor" until the ne
@@ -1037,7 +1037,7 @@ location: apps/supervisor/src/hostleg.ts:253-262 (the `-B` refusal), :217-232 (t
 severity: medium
 reason: 35.1's CAP-2 cut (`supervisor/run-<id>` reset to origin's tip, never detached) holds for a slice re-run that must commit, but a non-slice re-run after a close-out error meets the run's own kept worktree. Fix: cut detached when no slice commit is due; name the kept worktree in the `VerifyFailed` reason (and offer its removal); a test whose refusal comes from a close-out that kept its worktree.
 decision: owner 2026-11-07 (TKSTUDIO-221): A — the re-run cuts a detached checkout when no slice commit is due, so a plain re-run always works; the refusal (naming the kept worktree's path) stays only when a slice must commit onto the run branch; a test born from a close-out that kept its worktree pins it; stays open for the sweep bundle
-status: done 2026-11-08
+status: resolved 2026-11-08 by thkennedy/tk-studio#366 (sweep bundle dw-hostleg-rerun-detached-cut)
 resolution: resolved by sweep bundle dw-hostleg-rerun-detached-cut
 
 ### DW-118: The sweep's end rule overrides the engine's own end: `sweepEndState` applies whenever a summary exists and the engine was not killed, so an engine that ended `failed`/`blocked` after its last bundle reads `complete` by bundle count.
@@ -1102,7 +1102,7 @@ source_spec: `spec-dw-5-job-finish-idempotence.md`
 location: plugins/tk-studio/lib/jobrun.py:375
 severity: low
 reason: update_run persists the terminal state before _finalize_run; _finalize_run guards only capture, and _land_summary (write_workspace_json) can raise before the emit. Before DW-5 a repeat finish re-ran _finalize_run. The intent mandates the no-op, so the fix belongs in _finalize_run ordering or a finalized marker (deferral class b, AD-12 exactly-once).
-status: done 2026-11-08
+status: resolved 2026-11-08 by thkennedy/tk-studio#366 (sweep bundle dw-jobrun-finish-and-lock-match)
 resolution: resolved by sweep bundle dw-jobrun-finish-and-lock-match
 
 ### DW-129: Two concurrent finish calls on the same non-terminal run can both pass the pre-read and both emit a job-run event.
@@ -1112,7 +1112,7 @@ location: plugins/tk-studio/lib/jobrun.py:701
 severity: low
 reason: The read_run check in finish and the write in update_run are separate, unlocked steps, and update_run accepts a same-state terminal rewrite (job.py:586). This race predates DW-5 (which only closes the sequential repeat); closing it needs a check inside update_run or a lock, which the DW-5 spec forbids changing (deferral class b, AD-12).
 decision: owner 2026-11-07 (TKSTUDIO-222): A — accept it: `finish` is single-writer and a concurrent finish on one run is not supported, written into `jobrun.py`'s docstring and the contract's §4, then closed; stays open for that docstring and contract line (the sweep bundle)
-status: done 2026-11-08
+status: resolved 2026-11-08 by thkennedy/tk-studio#366 (sweep bundle dw-jobrun-finish-and-lock-match)
 resolution: resolved by sweep bundle dw-jobrun-finish-and-lock-match
 
 ### DW-130: A block the operator resolved by resuming the run leaves its Jira issue in `Blocked - Awaiting User`: no resume path transitions out of the block, and the Done promotion then holds as an AD-5 conflict with the owner still tagged (hole 101).
@@ -1565,7 +1565,7 @@ source_spec: `38-1-the-host-legs-own-guard-and-its-measure-spec.md`
 location: tools/verify_host.py:398-449
 severity: medium
 reason: live_legs treats any latest host-verify-leg with a non-null owner and no later host-verify as live (tools/verify_host.py:398-418); the lease records no guard or deadline (apps/supervisor/src/hostverify.ts:238-242); no pid probe by design (plan Settled shape 7: os.kill on win32 is TerminateProcess). Meets deferral (a): the refusal is behaviour AC3 names. A re-run of the leg (takeVerifyLeg takes over a dead owner) or --beside-leg clears it today. Raised by both review layers.
-status: done 2026-11-08
+status: resolved 2026-11-08 by thkennedy/tk-studio#366 (sweep bundle dw-host-leg-live-lease-guards)
 resolution: resolved by sweep bundle dw-host-leg-live-lease-guards
 
 ### DW-185: On the Windows host a guard's tree kill (taskkill /F /T) may kill a gate's child before verify_host.py itself, letting it print "== <suite>: FAILED rc=1" so a guard-cut leg reads red instead of inconc
@@ -1575,6 +1575,7 @@ location: apps/supervisor/src/hostverify.ts:970-971
 severity: medium
 reason: guardInconclusive requires redSuites empty (apps/supervisor/src/hostverify.ts:970-971); a FAILED gate line printed by the parent after its child was killed would count as red. Unproven on the host (kill order is not guaranteed); the first real guard trip on the box shows it. Meets deferral (a): the inconclusive (guard) verdict is behaviour AC2 names.
 status: open
+decision: A — Keep open until a real trip (TKSTUDIO-257, 2026-11-09)
 
 ### DW-186: Follow-up review still recommended for 38-2-a-run-that-does-no-work-says-so after the damping cap was spent
 origin: review-budget-followup
@@ -1583,6 +1584,7 @@ location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261107-231024-c5ae; this entry preserves the lingering recommendation for a deliberate later review.
 status: open
+decision: A — Close as accepted — Later stories and gates reviewed the same surfaces (TKSTUDIO-235 precedent). (TKSTUDIO-258, 2026-11-09)
 
 ### DW-187: The launch-time plan-status pass writes `blocked` on one refused connection to api.atlassian.com (WinError 10060) and never retries (hole 115).
 origin: operator session 2026-11-08 (Story 38.3's run `q-run-epic-38-20261108T033847Z-8b5e54`: its first `plan-status` event at 03:41:28Z)
@@ -1590,7 +1592,7 @@ source_spec: `kb/agent-pc-setup-runbook.md` fixes row "hole 115"; `handoff-phase
 location: plugins/tk-studio/lib/plansync.py plan-status (the Jira call behind the `in-progress` sync); apps/supervisor/src/planstatus.ts (the pass that records the answer)
 severity: low
 reason: At launch the pass read `ok: false, error: blocked, reason: "cannot reach api.atlassian.com: <urlopen error [WinError 10060] A connection attempt failed …"` and the story's `in-progress` never reached Jira; the end-of-run pass at 06:12:47Z synced fine (TKSTUDIO-228 `Done`), so the record healed itself, but a `blocked` written on a single transient refusal is a false alarm the operator reads past, and a launch whose only Jira write is this one leaves the issue `Backlog` for the run's whole length. Fix to make: retry a connection-level error (`URLError`, socket timeouts) a bounded number of times with a short back-off before writing `blocked`, and name the retry count in the reason when it still fails.
-status: done 2026-11-08
+status: resolved 2026-11-08 by thkennedy/tk-studio#366 (sweep bundle dw-atlassian-client-hardening)
 resolution: resolved by sweep bundle dw-atlassian-client-hardening
 
 ### DW-188: Follow-up review still recommended for 38-4-the-owners-decisions-have-a-source-and-a-sink after the damping cap was spent
@@ -1600,6 +1602,7 @@ location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261108-062538-196e; this entry preserves the lingering recommendation for a deliberate later review.
 status: open
+decision: A — Close as accepted — TKSTUDIO-235 precedent; the first live decision ingest is its proof. (TKSTUDIO-259, 2026-11-09)
 
 ### DW-189: `jirabackend.py`'s 403 refusals name the wrong scope on three setup calls (`/statuses/search` and `/workflow/search` say `read:jira-work`; `POST /project` says `manage:jira-project`), and `confluence.py`'s refusal hint lacks `read:content-details:confluence` for the v1 attachment upload.
 origin: operator session 2026-11-08 (the TKSTUDIO-236 research: the endpoint inventory mapped to Atlassian's published scope lists; posted as comment 10524)
@@ -1607,7 +1610,7 @@ source_spec: `kb/atlassian-free-tier.md` item 5 (the rewritten scope lists); `ha
 location: plugins/tk-studio/lib/jirabackend.py `find_statuses` (`_paged_values(client, "/statuses/search", …, scope=SCOPE_READ)` twice: the Jira v2 spec lists `manage:jira-configuration`), `find_workflow` (`/workflow/search` with `scope=SCOPE_READ`: the deprecated endpoint lists `manage:jira-project`), `create_project` (`POST /project` with `scope=SCOPE_PROJECT`: the spec lists `manage:jira-configuration`); plugins/tk-studio/lib/confluence.py `upload_attachment` (the v1 `PUT /content/{id}/child/attachment` (`scope=SCOPE_ATTACHMENT, v1=True`: the v1 spec adds `read:content-details:confluence`)
 severity: low
 reason: A `403` on one of these calls prints a remedy naming a scope the token already has, so the operator recreates a token that fails the same way (the pattern Tim named on TKSTUDIO-236: "I have recreated the API keys multiple times and yet we still seem to be missing permissions"). Fix to make: carry the spec's scope on each call (`SCOPE_CONFIGURATION` for `/statuses/search` and `POST /project`, `SCOPE_PROJECT` for `/workflow/search`, `read:content-details:confluence` beside `write:attachment:confluence` on the v1 upload) and pin each in the backends' tests; the message shape is unchanged. Sweep-safe.
-status: done 2026-11-08
+status: resolved 2026-11-08 by thkennedy/tk-studio#366 (sweep bundle dw-atlassian-client-hardening)
 resolution: resolved by sweep bundle dw-atlassian-client-hardening
 
 ### DW-190: Two engagements of one project starting their first append in separate supervisor processes at once can both see no holder: the approve lock is per engagement, so the DW-49 wait check is not atomic ac
@@ -1656,7 +1659,7 @@ source_spec: `handoff-phase1-loop-2026-10-09.md` 2026-11-08 day-9a update; Story
 location: apps/supervisor/test/preload.ts (bunfig's `[test] preload`: the one hook every `bun test` in apps/supervisor runs); tools/verify_host.py (the beside-a-live-leg check: the lease the close-out notes, `legGuard`/`noteCloseOutLease`); plugins/tk-studio/lib/_budget.py (the drives' bounds); kb/agent-pc-setup-runbook.md (the fixes table's hole-118 row)
 severity: low
 reason: A red leg costs 62 to 70 minutes and a second POST; the one guard built (38.1's) covers `verify_host.py` alone, so an operator sizing a fix by hand beside the leg contends the drives whose bounds assume a quiet box and reads a hang that is not one. Fix to make: the supervisor suite's preload (or a `bun test` wrapper the runbook names) reads the same live-leg signal `verify_host.py` reads and refuses (exit 2 naming the run) unless `TK_VERIFY_BESIDE_LEG=1` — the leg's own `bun test` children carry that variable; the runbook's rule: hand checks before the POST, never during. The rule itself is recorded in the handoff and the runbook now.
-status: done 2026-11-08
+status: resolved 2026-11-08 by thkennedy/tk-studio#366 (sweep bundle dw-host-leg-live-lease-guards)
 resolution: resolved by sweep bundle dw-host-leg-live-lease-guards
 
 ### DW-196: A re-run's lease deadline starts at takeVerifyLeg, before the cut and materialise, so the leg's host step can outlive the deadline by the cut time and both guards stop refusing in that tail.
@@ -1689,4 +1692,36 @@ source_spec: `spec-dw-68-playable-judge-deny-profile.md`
 location: apps/supervisor/src/hostverify.ts judgeDenyRules
 severity: medium
 reason: Review pass 2 (blind hunter): `judgeDenyRules` skips `.bmad-loop` wholesale, so no `Edit(...)`/`Write(...)` rule covers the run folder's siblings of `playable/`. Same root as the read-side deferral; denying siblings level by level along the media path is beyond the bundle intent's enumerated folders. The half about rewriting the profile itself is moot: `--settings` is loaded at session start. Deferral class (a): DW-68's read-only rule.
+status: open
+
+### DW-200: Story 38.4's decision sink runs only inside the Atlassian sync-back tick, a shipped job tk-studio never declared, so an answered sweep decision is never ingested and every later triage skips it as "already asked" (hole 120)
+origin: operator session 2026-11-09 00:1xZ: the owner answered TKSTUDIO-257/258/259 at 20:27 to 20:31Z (`DW-185:A`, `DW-186: A`, `DW-188: A`, moved to Block Resolved); the fifth sweep's triage (20:32Z) and sink (00:05Z) skipped the ids as already asked; no `_bmad-output/tracking/inbox.json`, `answers` empty, no `q-sync…` run ever in the queue
+source_spec: `handoff-phase1-loop-2026-10-09.md` 2026-11-09 day-9b update; Story 38.4 (TKSTUDIO-231: the source and the sink, `sweepdecisions.ingest` "runs in the sync-back tick right after `inbox.derive`"); Story 31.4 (the sync-back, `plansync.py sync-back`); TKSTUDIO-262 (the owner's cadence decision, `SYNC: <letter>`)
+location: plugins/tk-studio/jobs/atlassian-sync-back.json ("shipped undeclared … the project declares it in .tk-studio/config.yaml jobs and may override the schedule", cron `*/10 * * * *`); .tk-studio/config.yaml `jobs:` (no `atlassian-sync-back`); plugins/tk-studio/lib/syncback.py `tick` → `sweepdecisions.ingest`; plugins/tk-studio/lib/sweepdecisions.py `post` (the "already asked" skip reads only the record); apps/supervisor/src/sweep.ts (the PR text "the owner answers there and the sync-back ingests the answers")
+severity: medium
+reason: The owner's answers are the loop's only input for its decisions, and the sink that takes them has never been reachable here: each answer waits for an operator's hand tick, and the sweep's own text promises an ingest that cannot happen. Fix to make: (a) declare `atlassian-sync-back` for tk-studio at the cadence TKSTUDIO-262 chooses (the docs-sized PR: the config's `jobs:` entry, `.tk-studio/jobs/atlassian-sync-back.json` with the schedule override, the supervisor's per-job placement on the host tier), and record the first tick on the issue; (b) `sweepdecisions.post`'s "already asked" skip reads the issue's live status (one GET per skipped id, or the search the tick already makes) and names an id whose issue is Block Resolved as "answered on <KEY>, not ingested — the sync-back tick has not run" in the triage notice and the PR, so the gap is loud, not silent; (c) the studio doctor (`tk activate`) warns when a project's config declares no sync-back while its plan backend is Jira. Until (a) lands, the operator runs `plansync.py sync-back --directory .` once after each landing from the docs clone and copies `_bmad-output/tracking/` to the served checkout.
+status: open
+
+### DW-201: A red host leg's event keeps the last 20 lines of the gate's output, and `verify_host.py` repeats every red gate's tail last, so with two red gates the first gate's failure names are lost (hole 119's second leg)
+origin: the fifth sweep's host-leg re-run 2026-11-09 01:36Z (run q-run-sweep-20261108T202640Z-af3d56): `verify_host: FAILED (lib suite, supervisor)` — the event's `stdout_tail` held the supervisor suite's tail (hostverify.test.ts, 1 fail) and the `== durations:` line; the lib suite's `FAIL:` names (failures in 1941 s) were nowhere, so the red could only be re-run or reproduced by hand (32 minutes)
+source_spec: `handoff-phase1-loop-2026-10-09.md` 2026-11-09 day-9b update; Story 38.1 (the `verdicts` and `suite_durations` on the event); DW-185 (the guard-cut reading, the same event)
+location: tools/verify_host.py (`--tail N`, "repeats every failing gate's output tail last"; `run_gate`); apps/supervisor/src/hostverify.ts (`TAIL_LINES = 20`, `tail()`, the `verdicts` extraction of the gate-level `ok|FAILED` lines); plugins/tk-studio/contracts/driver-contract.md (the `host-verify` event)
+severity: low
+reason: A red leg costs 60 to 70 minutes; when its event cannot name the failing tests, the operator pays another leg or a hand suite to learn them. Fix to make: `verify_host.py` prints, for each red gate, one compact verdict line the event's `verdicts` extraction keeps — `== <gate>: failures: <name>, <name> …` from unittest's `FAIL:`/`ERROR:` lines and bun's `(fail)` lines (clipped to a few hundred characters) — before the tails; and `hostverify.ts` carries each red gate's own last lines (`gate_tails: {<gate>: [...]}`), not only the last 20 of the whole. Pin both in `test_verify_host.py` and `hostverify.test.ts`.
+status: open
+
+### DW-202: The box's own maintenance (Defender's scheduled scan and its cache/verification/cleanup tasks, Windows Automatic Maintenance's burst) lands inside a host leg, and the suites' timing-bound tests read the contention as a failure (hole 119)
+origin: the fifth sweep's two red legs 2026-11-09 (run q-run-sweep-20261108T202640Z-af3d56): the close-out leg's lib suite red on the maintenance-conformance test (its bun drives past their 185/180 s bounds) with Defender's scheduled scan at 23:34:39Z; the re-run's supervisor suite red on hostverify.test.ts's hole-77 bash capture test with Windows Automatic Maintenance at 01:31:30Z; both green by hand on an idle box, and the third leg went green (02:55 to 03:57Z, 3706 s, clear of both windows)
+source_spec: `handoff-phase1-loop-2026-10-09.md` 2026-11-09 day-9b update; DW-195 (hole 118: the operator's contention, the same drives); Story 37.2 (`_budget.py`: the drives' bounds from the host figure plus headroom); hole 116 (Defender's signature update under a leg)
+location: the box's Task Scheduler (`\Microsoft\Windows\Windows Defender\Windows Defender Scheduled Scan`, Automatic Maintenance's activation boundary and the `maintenancetasks`/`ProactiveScan`/`StorageSense`/NGEN tasks); plugins/tk-studio/lib/_budget.py (the drives' bounds); apps/supervisor/test/hostverify.test.ts (hole 77's capture test); apps/supervisor/src/hostverify.ts (the event); kb/agent-pc-setup-runbook.md (the hole-119 row)
+severity: low
+reason: A leg runs 60 to 70 minutes several times a day, so the box's daily maintenance windows meet it often enough to cost a re-run each time, and the operator cannot tell contention from code without the box's event log. Fix to make: (a) move the box's maintenance to a quiet hour and say so in the runbook (Defender's scheduled scan and Automatic Maintenance's start time set by the operator; the backup task already has its own window); (b) the leg's event names the maintenance and Defender tasks that ran inside its window (`box_activity: [...]` from the Task Scheduler and the Defender operational log, read after the gate), so a red reads as contention at once; (c) the two timing-bound tests take headroom that survives a maintenance burst, or retry once under contention named in their output.
+status: open
+
+### DW-203: `test_track`'s `ValidateCheckTests.setUp` asserts the owner seat absent with `assertNotIn(name, os.environ)`, so a failure prints the whole environment — the supervisor bearer, the Telegram token, the session secret, the Atlassian tokens — into the unittest output, the gate's tail and the queue event
+origin: operator session 2026-11-09 02:1xZ: the lib suite run by hand on a shell that carries the seats (the gate strips `TK_SUPERVISOR_`, `TK_ATLASSIAN_` and `TK_STUDIO_ATLASSIAN_`; a hand run does not) — 38 `test_track` failures, each message the full `environ({...})` with every secret value in clear
+source_spec: `handoff-phase1-loop-2026-10-09.md` 2026-11-09 day-9b update; the secrets rule (nothing secret on an argument, in a log, an event or a transcript); DW-201 (the same tails reach the queue event)
+location: plugins/tk-studio/lib/tests/test_track.py `ValidateCheckTests.setUp` (line ~964) and every `assertNotIn(<name>, os.environ)` / `assertIn(<name>, os.environ)` in the lib tests (unittest's message prints the container); tools/verify_host.py (the tails it repeats); apps/supervisor/src/hostverify.ts (`tail()` redacts by pattern, not every value)
+severity: medium
+reason: One hand run with the seats present writes every secret the box holds into a log and, on a leg, into the queue event and the PR; a redaction that matches known shapes cannot catch a value it does not know. Fix to make: the assertions compare `name in os.environ` to `False` (`assertFalse(name in os.environ, name)`) or assert on `sorted(k for k in os.environ if k.startswith(prefix))`, never on the mapping itself; a lib-wide test (or conformance's `e2e_windows_semantics` style check) greps the tests for `os.environ)` inside an `assertIn`/`assertNotIn` call; and the hand-run recipe in the runbook strips the seats as the gate does.
 status: open
