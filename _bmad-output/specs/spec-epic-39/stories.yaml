@@ -1,0 +1,252 @@
+# stories.yaml: Epic 39 of this project, transcribed 1:1 from _bmad-output/planning-artifacts/epics.md
+# by .bmad-loop/plugins/studio-pipeline/transcribe.py on 2026-11-09. The epics document is
+# the plan; the studio gate may append remediation entries (`<key>-r<n>`) and revise
+# UNSTARTED entries' invoke_dev_with, nothing else.
+
+- id: "39-1-the-web-has-addresses"
+  title: "The Web Has Addresses"
+  description: >-
+    I want every screen and every thing in the studio web to have a URL, and every
+    notice the studio sends me to carry the one URL that answers it, So that a link from
+    a notice or a chat reply opens the right page, and the back button works (addendum
+    §3.3). Canonical: ST-175.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 39.1: The
+    Web Has Addresses", the authoritative specification (user story and acceptance
+    criteria). Read the epic's own narrative (the paragraphs under "## Epic 39:") for
+    scope, rulings and the repo the story targets; transcribe the story into the spec's
+    intent contract and never re-derive, generalise or extend it. Plan: plans/39-1.md
+    when present (its Code Map is the investigation). Project rules and the verify gate:
+    the studio customization (_bmad/custom/bmad-build-auto.toml). Routing:
+    .bmad-loop/routing.current.json; pass the model, effort and advisor of implementer
+    and reviewers explicitly on every subagent launch. Advisor: when
+    routing.current.json gives the session an advisor other than `off`, consult the
+    advisor on: verify-red, halt, deviation above 0, a high-severity finding, a
+    tripwire, a file outside Files, and before declaring the story done; append a `##
+    Consult Log` entry per advisor call. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
+    executor spec as `stories/39-1-the-web-has-addresses-spec.md` in the spec folder;
+    the engine resolves it by the glob `39-1-the-web-has-addresses-*.md`, and a file
+    named `39-1-the-web-has-addresses.md` is read as pending (loop deficiency 1, story
+    21-6).
+
+- id: "39-2-the-sandbox-login-has-a-clock"
+  title: "The Sandbox Login Has a Clock"
+  description: >-
+    I want to see how long the sandbox's Claude login stays valid and to renew it from
+    the page by opening the sign-in and pasting the code, So that the one monthly chore
+    that blocks every sandbox run is thirty seconds from any device, never a terminal,
+    and never fails silently again (hole 69; TKSTUDIO-233; addendum §3.7 and §4 choice
+    7). Canonical: ST-183.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 39.2: The
+    Sandbox Login Has a Clock", the authoritative specification (user story and
+    acceptance criteria). Read the epic's own narrative (the paragraphs under "## Epic
+    39:") for scope, rulings and the repo the story targets; transcribe the story into
+    the spec's intent contract and never re-derive, generalise or extend it. Plan:
+    plans/39-2.md when present (its Code Map is the investigation). Project rules and
+    the verify gate: the studio customization (_bmad/custom/bmad-build-auto.toml).
+    Routing: .bmad-loop/routing.current.json; pass the model, effort and advisor of
+    implementer and reviewers explicitly on every subagent launch. Advisor: when
+    routing.current.json gives the session an advisor other than `off`, consult the
+    advisor on: verify-red, halt, deviation above 0, a high-severity finding, a
+    tripwire, a file outside Files, and before declaring the story done; append a `##
+    Consult Log` entry per advisor call. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
+    executor spec as `stories/39-2-the-sandbox-login-has-a-clock-spec.md` in the spec
+    folder; the engine resolves it by the glob
+    `39-2-the-sandbox-login-has-a-clock-*.md`, and a file named
+    `39-2-the-sandbox-login-has-a-clock.md` is read as pending (loop deficiency 1, story
+    21-6).
+
+- id: "39-3-the-studio-chat"
+  title: "The Studio Chat"
+  description: >-
+    I want to talk to the studio itself from the web and have it answer, streaming, and
+    offer the action it would take as a button, So that I give the studio its
+    instructions in the page and not in the Claude Code app (addendum §3.8; AD-11).
+    Canonical: ST-176.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 39.3: The
+    Studio Chat", the authoritative specification (user story and acceptance criteria).
+    Read the epic's own narrative (the paragraphs under "## Epic 39:") for scope,
+    rulings and the repo the story targets; transcribe the story into the spec's intent
+    contract and never re-derive, generalise or extend it. Plan: plans/39-3.md when
+    present (its Code Map is the investigation). Project rules and the verify gate: the
+    studio customization (_bmad/custom/bmad-build-auto.toml). Routing:
+    .bmad-loop/routing.current.json; pass the model, effort and advisor of implementer
+    and reviewers explicitly on every subagent launch. Advisor: when
+    routing.current.json gives the session an advisor other than `off`, consult the
+    advisor on: verify-red, halt, deviation above 0, a high-severity finding, a
+    tripwire, a file outside Files, and before declaring the story done; append a `##
+    Consult Log` entry per advisor call. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
+    executor spec as `stories/39-3-the-studio-chat-spec.md` in the spec folder; the
+    engine resolves it by the glob `39-3-the-studio-chat-*.md`, and a file named
+    `39-3-the-studio-chat.md` is read as pending (loop deficiency 1, story 21-6).
+
+- id: "39-4-the-kanban-and-the-story"
+  title: "The Kanban and the Story"
+  description: >-
+    I want a board of columns per status with a card per story, and a page per story
+    with its plan text, its Stage Log, its runs and its PR, So that I see where every
+    story is and what each one cost without opening Jira or the repository (addendum
+    §3.2 F-D). Canonical: ST-177.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 39.4: The
+    Kanban and the Story", the authoritative specification (user story and acceptance
+    criteria). Read the epic's own narrative (the paragraphs under "## Epic 39:") for
+    scope, rulings and the repo the story targets; transcribe the story into the spec's
+    intent contract and never re-derive, generalise or extend it. Plan: plans/39-4.md
+    when present (its Code Map is the investigation). Project rules and the verify gate:
+    the studio customization (_bmad/custom/bmad-build-auto.toml). Routing:
+    .bmad-loop/routing.current.json; pass the model, effort and advisor of implementer
+    and reviewers explicitly on every subagent launch. Advisor: when
+    routing.current.json gives the session an advisor other than `off`, consult the
+    advisor on: verify-red, halt, deviation above 0, a high-severity finding, a
+    tripwire, a file outside Files, and before declaring the story done; append a `##
+    Consult Log` entry per advisor call. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
+    executor spec as `stories/39-4-the-kanban-and-the-story-spec.md` in the spec folder;
+    the engine resolves it by the glob `39-4-the-kanban-and-the-story-*.md`, and a file
+    named `39-4-the-kanban-and-the-story.md` is read as pending (loop deficiency 1,
+    story 21-6).
+
+- id: "39-5-the-runs-timeline-and-the-progress-in-view"
+  title: "The Run's Timeline and the Progress in View"
+  description: >-
+    I want a run shown as a timeline from claim to close-out with its clock against its
+    guard and its cost per stage, and the queue shown with what is queued, running and
+    paused, So that I can tell at a glance whether a run is healthy and how long it has
+    left (addendum §3.2 F-A). Canonical: ST-178.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 39.5: The
+    Run's Timeline and the Progress in View", the authoritative specification (user
+    story and acceptance criteria). Read the epic's own narrative (the paragraphs under
+    "## Epic 39:") for scope, rulings and the repo the story targets; transcribe the
+    story into the spec's intent contract and never re-derive, generalise or extend it.
+    Plan: plans/39-5.md when present (its Code Map is the investigation). Project rules
+    and the verify gate: the studio customization (_bmad/custom/bmad-build-auto.toml).
+    Routing: .bmad-loop/routing.current.json; pass the model, effort and advisor of
+    implementer and reviewers explicitly on every subagent launch. Advisor: when
+    routing.current.json gives the session an advisor other than `off`, consult the
+    advisor on: verify-red, halt, deviation above 0, a high-severity finding, a
+    tripwire, a file outside Files, and before declaring the story done; append a `##
+    Consult Log` entry per advisor call. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
+    executor spec as `stories/39-5-the-runs-timeline-and-the-progress-in-view-spec.md`
+    in the spec folder; the engine resolves it by the glob
+    `39-5-the-runs-timeline-and-the-progress-in-view-*.md`, and a file named
+    `39-5-the-runs-timeline-and-the-progress-in-view.md` is read as pending (loop
+    deficiency 1, story 21-6).
+
+- id: "39-6-sessions-and-sub-agents-as-characters"
+  title: "Sessions and Sub-Agents as Characters"
+  description: >-
+    I want to see every live session and the sub-agents it spawns as characters in the
+    office, each doing what it is doing, and to click one and see what it is up to, So
+    that the office shows the studio as it works, not one still figure per role
+    (addendum §3.4). Canonical: ST-179.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 39.6:
+    Sessions and Sub-Agents as Characters", the authoritative specification (user story
+    and acceptance criteria). Read the epic's own narrative (the paragraphs under "##
+    Epic 39:") for scope, rulings and the repo the story targets; transcribe the story
+    into the spec's intent contract and never re-derive, generalise or extend it. Plan:
+    plans/39-6.md when present (its Code Map is the investigation). Project rules and
+    the verify gate: the studio customization (_bmad/custom/bmad-build-auto.toml).
+    Routing: .bmad-loop/routing.current.json; pass the model, effort and advisor of
+    implementer and reviewers explicitly on every subagent launch. Advisor: when
+    routing.current.json gives the session an advisor other than `off`, consult the
+    advisor on: verify-red, halt, deviation above 0, a high-severity finding, a
+    tripwire, a file outside Files, and before declaring the story done; append a `##
+    Consult Log` entry per advisor call. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
+    executor spec as `stories/39-6-sessions-and-sub-agents-as-characters-spec.md` in the
+    spec folder; the engine resolves it by the glob
+    `39-6-sessions-and-sub-agents-as-characters-*.md`, and a file named
+    `39-6-sessions-and-sub-agents-as-characters.md` is read as pending (loop deficiency
+    1, story 21-6).
+
+- id: "39-7-messages-both-ways-and-the-check-in"
+  title: "Messages Both Ways and the Check-In"
+  description: >-
+    I want one inbox that holds everything that waits on me or informs me, each item
+    answerable in the page, and check-in points agreed at approval that ask me to
+    continue or stop from a link, So that Jira is the record and the fallback, not the
+    channel (addendum §3.5, §3.6; DW-178, DW-48). Canonical: ST-180.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 39.7:
+    Messages Both Ways and the Check-In", the authoritative specification (user story
+    and acceptance criteria). Read the epic's own narrative (the paragraphs under "##
+    Epic 39:") for scope, rulings and the repo the story targets; transcribe the story
+    into the spec's intent contract and never re-derive, generalise or extend it. Plan:
+    plans/39-7.md when present (its Code Map is the investigation). Project rules and
+    the verify gate: the studio customization (_bmad/custom/bmad-build-auto.toml).
+    Routing: .bmad-loop/routing.current.json; pass the model, effort and advisor of
+    implementer and reviewers explicitly on every subagent launch. Advisor: when
+    routing.current.json gives the session an advisor other than `off`, consult the
+    advisor on: verify-red, halt, deviation above 0, a high-severity finding, a
+    tripwire, a file outside Files, and before declaring the story done; append a `##
+    Consult Log` entry per advisor call. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
+    executor spec as `stories/39-7-messages-both-ways-and-the-check-in-spec.md` in the
+    spec folder; the engine resolves it by the glob
+    `39-7-messages-both-ways-and-the-check-in-*.md`, and a file named
+    `39-7-messages-both-ways-and-the-check-in.md` is read as pending (loop deficiency 1,
+    story 21-6).
+
+- id: "39-8-model-and-effort-in-the-owners-hands"
+  title: "Model and Effort in the Owner's Hands"
+  description: >-
+    I want to see and change which model and effort each leg uses, the bands and the
+    default autonomy, from a settings page, and to see the route the next run will take,
+    So that resource choices are mine to make in the page and recorded like every other
+    change (addendum §3.7; AD-14). Canonical: ST-181.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 39.8: Model
+    and Effort in the Owner's Hands", the authoritative specification (user story and
+    acceptance criteria). Read the epic's own narrative (the paragraphs under "## Epic
+    39:") for scope, rulings and the repo the story targets; transcribe the story into
+    the spec's intent contract and never re-derive, generalise or extend it. Plan:
+    plans/39-8.md when present (its Code Map is the investigation). Project rules and
+    the verify gate: the studio customization (_bmad/custom/bmad-build-auto.toml).
+    Routing: .bmad-loop/routing.current.json; pass the model, effort and advisor of
+    implementer and reviewers explicitly on every subagent launch. Advisor: when
+    routing.current.json gives the session an advisor other than `off`, consult the
+    advisor on: verify-red, halt, deviation above 0, a high-severity finding, a
+    tripwire, a file outside Files, and before declaring the story done; append a `##
+    Consult Log` entry per advisor call. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
+    executor spec as `stories/39-8-model-and-effort-in-the-owners-hands-spec.md` in the
+    spec folder; the engine resolves it by the glob
+    `39-8-model-and-effort-in-the-owners-hands-*.md`, and a file named
+    `39-8-model-and-effort-in-the-owners-hands.md` is read as pending (loop deficiency
+    1, story 21-6).
+
+- id: "39-9-the-records-are-whole"
+  title: "The Records Are Whole"
+  description: >-
+    I want the epic's records to be complete and the front end's state at the end of the
+    epic written down, including what a phone UI would need, So that the next epic
+    starts from a true account and the phone decision starts from evidence, not theory
+    (addendum §4 choice 5; D5). Canonical: ST-182.
+  invoke_dev_with: >-
+    Story text: _bmad-output/planning-artifacts/epics.md, section "### Story 39.9: The
+    Records Are Whole", the authoritative specification (user story and acceptance
+    criteria). Read the epic's own narrative (the paragraphs under "## Epic 39:") for
+    scope, rulings and the repo the story targets; transcribe the story into the spec's
+    intent contract and never re-derive, generalise or extend it. Plan: plans/39-9.md
+    when present (its Code Map is the investigation). Project rules and the verify gate:
+    the studio customization (_bmad/custom/bmad-build-auto.toml). Routing:
+    .bmad-loop/routing.current.json; pass the model, effort and advisor of implementer
+    and reviewers explicitly on every subagent launch. Advisor: when
+    routing.current.json gives the session an advisor other than `off`, consult the
+    advisor on: verify-red, halt, deviation above 0, a high-severity finding, a
+    tripwire, a file outside Files, and before declaring the story done; append a `##
+    Consult Log` entry per advisor call. Deviations: one `DRIFT: <what> - <why> -
+    affects: <keys|none>` line each in the Auto Run Result. Spec file: write the
+    executor spec as `stories/39-9-the-records-are-whole-spec.md` in the spec folder;
+    the engine resolves it by the glob `39-9-the-records-are-whole-*.md`, and a file
+    named `39-9-the-records-are-whole.md` is read as pending (loop deficiency 1, story
+    21-6).
