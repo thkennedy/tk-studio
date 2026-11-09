@@ -630,7 +630,8 @@ source_spec: `34-3-the-playable-verify-leg-spec.md`
 location: apps/supervisor/src/hostverify.ts defaultJudge pin; apps/supervisor/src/hostleg.ts runLeg
 severity: low
 reason: Consult ruling 2026-10-27 (high-severity-finding, option A), sandbox.ts:22-31. Deferral class (c): a safety/resource rule on the box.
-status: open
+status: done 2026-11-09
+resolution: resolved by sweep bundle dw-judge-pin-release
 
 ### DW-70: Headless conformance drives ignore a manifest `timeout` (runner.py _run_drive uses DEFAULT_TIMEOUT 60); 34.1's e2e_engine_gate.py declares 120 and its 50+40 s bounds overrun the real 60 s cap. Also me
 origin: spec-deferred d7abdbe1ec63
@@ -782,7 +783,8 @@ location: plugins/tk-studio/lib/assets.py; apps/supervisor/src/enginemcp.ts:345-
 severity: low
 reason: `assets.py` holds a YAML-subset reader beside the imported `miniyaml`, the validator, a PNG codec, a GLB parser, two Blender runners, the kit indexer, the matcher, two gates, the manifest rewriter, a Meshy client and the CLI. Fix: split `assets.py` by section before the next ladder story. Epic 35 (retro-epic-35 A3): `plansync.py` 2,138 → 3,508 lines (126 defs/classes, 12 sections), 99 % of the growth the stage log (`:2116-3202`, 35.8) and `ledger-resolve` (`:3205-3301`, 35.7) — two products inside the plan-sync module, consumed as a sub-API by report.py, measurepush.py, `planstatus.ts` and the engine hook, the `# ---- stage log` marker the natural seam; `planstatus.ts` 369 → 631, the stage pass 42 % of the file and the one supervisor pass not in its own module (the shape 35.7 chose for `ledgerPass`); `hostverify.ts` 735 → 943 with five step kinds, the judge-process layer and the PR renderer and no section markers; `report.py` test-to-code ≈ 0.4. Fix, added: `lib/stagelog.py` (the stage log and `ledger-resolve` out of plansync.py, which also closes DW-85's private reach) and `src/stagepass.ts` beside `sweep.ts`; section markers in `hostverify.ts`; a `test_report.py`. Lands before Epic 36 adds surface on `sweep.ts`/`planstatus.ts` (AI-10).
 decision: owner 2026-11-07 (TKSTUDIO-220): A — one split story: the stage log and `ledger-resolve` out of `plansync.py` into `lib/stagelog.py` (which also removes `report.py`'s reach into `plansync._stage_target`) and the stage pass out of `planstatus.ts` into `src/stagepass.ts`; the rest of the list (the asset generator/index/mirror split, `hostverify.ts` markers, a `test_report.py`, the `enginemcp.ts` entry) closed as accepted; stays open for that split story (the next sweep bundle or the next hygiene epic)
-status: open — narrowed 2026-10-31 by thkennedy/tk-studio#319 (36.7: `assets.py` split along `lib/_png.py`, `lib/_proc.py`, `lib/_core.py` and `lib/_glb.py`; `engage.py scope` back under 149 lines, its two closures lifted to module level; remaining: the assets manifest reader and validator, the generator/index/mirror/match/write-back/placement split (blocked by the tests' patch targets through `assets.`), `plansync.py` → `lib/stagelog.py`, `src/stagepass.ts`, `hostverify.ts` section markers, a `test_report.py`, `report.py`'s reach into `plansync._stage_target`, `enginemcp.ts` as a process entry)
+status: done 2026-11-09
+resolution: resolved by sweep bundle dw-stagelog-stagepass-split
 
 ### DW-88: The judge's rubric ids live three times with no cross-pin.
 origin: retro epic-34 (_bmad-output/specs/spec-epic-34/RETROSPECTIVE.md), B5
@@ -1583,7 +1585,8 @@ source_spec: `38-2-a-run-that-does-no-work-says-so-spec.md`
 location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261107-231024-c5ae; this entry preserves the lingering recommendation for a deliberate later review.
-status: open
+status: done 2026-11-09
+resolution: already resolved: Owner decision ingested on the ledger entry (_bmad-output/implementation-artifacts/deferred-work.md DW-186 `decision: A — Close as accepted — Later stories and gates reviewed the same surfaces (TKSTUDIO-258, 2026-11-09)`), committed by 5cfc1280 (day-9b docs PR #367, the hand sync-back tick that moved TKSTUDIO-258 to Done); nothing is owed in code — the entry is a lingering follow-up-review recommendation the owner closed, the DW-8 precedent (resolved by #332 on an owner close).
 decision: A — Close as accepted — Later stories and gates reviewed the same surfaces (TKSTUDIO-235 precedent). (TKSTUDIO-258, 2026-11-09)
 
 ### DW-187: The launch-time plan-status pass writes `blocked` on one refused connection to api.atlassian.com (WinError 10060) and never retries (hole 115).
@@ -1619,7 +1622,8 @@ source_spec: `spec-approve-concurrency-and-reapproval.md`
 location: apps/supervisor/src/approve.ts approveStep (the DW-49 wait check)
 severity: medium
 reason: approveStep takes only takeLock(<worktree>.lock) per engagement; serialised() covers one process. Serve and run/drain processes can each run approvePass concurrently. Meets DEFERRAL DISCIPLINE (b): AD-4 id uniqueness.
-status: open
+status: done 2026-11-09
+resolution: resolved by sweep bundle dw-approve-cross-process-hardening
 
 ### DW-191: Two engagements of one project that each still have an earlier approve PR open, both revised and re-approved before either new cycle appends, hold each other through the cross-cycle hold: a mutual Wai
 origin: spec-deferred e13671470a74
@@ -1635,7 +1639,8 @@ source_spec: `spec-approve-concurrency-and-reapproval.md`
 location: apps/supervisor/src/approve.ts the fresh re-approval path (removeWorktree before the cut)
 severity: medium
 reason: dropSuperseded runs only on the onBranch read-tree cut (the path DW-51 names); the fresh path's removeWorktree drops the only copy of the keys. Pre-existing path not changed by this bundle. Meets DEFERRAL DISCIPLINE (a): AC1's promote to Jira.
-status: open
+status: done 2026-11-09
+resolution: resolved by sweep bundle dw-approve-cross-process-hardening
 
 ### DW-193: A paused sweep bundle's `wip:` spec commit stays on the sweep's PR branch; the operator must drop it by hand before a host-leg re-run can mark the PR ready
 origin: operator session 2026-11-08 (the fourth sweep, run q-run-sweep-20261108T093348Z-f76978: bundle playable-judge-sandbox-hygiene paused at a CRITICAL escalation 12:55Z; the engine committed `wip: sweep bundle dw-playable-judge-sandbox-hygiene paused` (37a6532d, the blocked spec alone) and skipped the leg)
@@ -1643,7 +1648,8 @@ source_spec: `handoff-phase1-loop-2026-10-09.md` 2026-11-08 day-8z update; Story
 location: apps/supervisor/src/sweep.ts (the paused sweep's close-out: the WIP commit, the leg skipped, the PR left draft); apps/supervisor/src/hostleg.ts (`POST /runs/{id}/verify {ready: true}` re-runs the leg at the branch tip as it stands and marks the PR ready on green)
 severity: low
 reason: The operator path for a paused sweep is "do not resume; the landed bundles stay on the draft PR; the next sweep re-queues the bundle from the ledger" — but the WIP commit carries the paused bundle's spec into the PR, so the ready override would merge a spec for work that never landed. On 2026-11-08 the operator removed it by a plain commit (c58958f6) before the re-run. Fix to make: when the operator marks a paused sweep ready (or declines the resume), the re-run drops the `wip:` commit (a revert of it, or the WIP never commits the spec onto the PR branch — it stays in the run workspace for the resume), so the branch tip is the landed bundles only; a test born from a paused sweep with one WIP commit and a ready override.
-status: open
+status: done 2026-11-09
+resolution: resolved by sweep bundle dw-paused-sweep-wip-off-pr
 
 ### DW-194: A story that tightens what a run worktree requires of its checkout reaches only the shared fixture; the end-to-end fixtures that build checkouts with `gitInit` break on the host leg alone, the sandbox gate running no supervisor test (hole 117)
 origin: Story 38.5's close-out 2026-11-08 18:00Z (run q-run-epic-38-20261108T151649Z-12bae3): CAP-14 made `materialise` refuse a run worktree whose checkout has no `.bmad-loop/policy.toml` and gave `gitRepo` the untracked `FIXTURE_POLICY`; `enginemcp.test.ts`'s `project()` builds its checkout with `gitInit` directly, so its two drained-flagged-run tests were refused at the worktree step; fixed on the run branch by ea1b97bc (test-only) and one leg re-run
@@ -1684,7 +1690,8 @@ source_spec: `spec-dw-68-playable-judge-deny-profile.md`
 location: apps/supervisor/src/hostverify.ts judgeDenyRules
 severity: medium
 reason: Review pass 1 (blind hunter): `judgeDenyRules` skips `.bmad-loop` wholesale; only the media chain `.bmad-loop/runs/<engine>/playable/` must stay open. The bundle intent enumerates plugins/apps/_bmad-output and the project's code folders only, so denying run state siblings level by level along the media path is beyond this bundle. Deferral class (a): DW-68's read-only rule.
-status: open
+status: done 2026-11-09
+resolution: resolved by sweep bundle dw-judge-profile-run-state-deny
 
 ### DW-199: The judge profile also leaves `.bmad-loop/` writable by the Write/Edit tools, so the judge could overwrite the engine run's state (transcripts, tasks, journal) beside the media.
 origin: spec-deferred 0a806c96b78e
@@ -1692,7 +1699,8 @@ source_spec: `spec-dw-68-playable-judge-deny-profile.md`
 location: apps/supervisor/src/hostverify.ts judgeDenyRules
 severity: medium
 reason: Review pass 2 (blind hunter): `judgeDenyRules` skips `.bmad-loop` wholesale, so no `Edit(...)`/`Write(...)` rule covers the run folder's siblings of `playable/`. Same root as the read-side deferral; denying siblings level by level along the media path is beyond the bundle intent's enumerated folders. The half about rewriting the profile itself is moot: `--settings` is loaded at session start. Deferral class (a): DW-68's read-only rule.
-status: open
+status: done 2026-11-09
+resolution: resolved by sweep bundle dw-judge-profile-run-state-deny
 
 ### DW-200: Story 38.4's decision sink runs only inside the Atlassian sync-back tick, a shipped job tk-studio never declared, so an answered sweep decision is never ingested and every later triage skips it as "already asked" (hole 120)
 origin: operator session 2026-11-09 00:1xZ: the owner answered TKSTUDIO-257/258/259 at 20:27 to 20:31Z (`DW-185:A`, `DW-186: A`, `DW-188: A`, moved to Block Resolved); the fifth sweep's triage (20:32Z) and sink (00:05Z) skipped the ids as already asked; no `_bmad-output/tracking/inbox.json`, `answers` empty, no `q-sync…` run ever in the queue

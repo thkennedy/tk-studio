@@ -49,6 +49,7 @@ import config as configlib
 import ledger
 import plansync
 import registry as registrylib
+import stagelog
 
 MEASUREMENTS_DIR = "measurements"
 
@@ -234,7 +235,7 @@ def stage_payload(entry: dict, project: str | None) -> dict:
 
     def cell(name):
         value = row.get(name)
-        return None if value in (None, "", plansync.NO_VALUE) else value
+        return None if value in (None, "", stagelog.NO_VALUE) else value
 
     def number(name):
         value = cell(name)
@@ -272,7 +273,7 @@ def _harvest_rows(rows: list[dict], project: str | None, qualifier: str | None,
     `<qualifier>:<sha12>` (non-studio registry roots, never a studio
     checkout)."""
     for entry in rows:
-        if entry["row"]["ended"] == plansync.NO_VALUE:
+        if entry["row"]["ended"] == stagelog.NO_VALUE:
             continue
         if qualifier:
             entry = dict(entry, key=f"{qualifier}:{entry['key']}")

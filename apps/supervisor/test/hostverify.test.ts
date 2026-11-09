@@ -9,7 +9,9 @@ import {
   FRAMES_DIR, gitUsrBin, JUDGE_DENY_PROFILE, judgeDenyRules, guardInconclusive, hostVerify, inconclusiveReason, isInconclusive, isRed, LEG_SUITES, legGuard, legHistory, legVerdict, pathKey, playableConfig, prSection, redReason, splitCommand, suiteDurations, tail,
   redSuites, TOOL_WALL_MARGIN_S, verdictLines, verifyCommand, wallClockTrip, type HostVerifyRan, type PlayableJudge,
 } from "../src/hostverify";
-import { studioRunDir } from "../src/sandbox";
+import { hostname } from "node:os";
+import { Queue, type Owner } from "../src/queue";
+import { pinRecordPath, studioRunDir } from "../src/sandbox";
 import { toVmPath, validateDenyProfile } from "../src/server";
 import { fakeBin, gitRepo, testGit } from "./fakes";
 import { SLICE_REPORT, sliceRecorder } from "./helpers/slice";
@@ -1139,6 +1141,13 @@ describe("Story 34.3: the playable-verify step runs after a green engine gate", 
     const fx = fixture(config);
     mkdirSync(join(fx.wt, "src"), { recursive: true });
     writeFileSync(join(fx.wt, "project.godot"), "[gd]\n", "utf-8");
+    // DW-198/DW-199: run state beside the media chain, at each level
+    const eng = join(fx.wt, ".bmad-loop", "runs", "20261027-eng");
+    mkdirSync(join(fx.wt, ".bmad-loop", "tasks"), { recursive: true });
+    writeFileSync(join(fx.wt, ".bmad-loop", "journal.jsonl"), "{}\n", "utf-8");
+    mkdirSync(join(fx.wt, ".bmad-loop", "runs", "other"), { recursive: true });
+    mkdirSync(join(eng, "transcripts"), { recursive: true });
+    writeFileSync(join(eng, "tasks.yaml"), "x: 1\n", "utf-8");
     const { calls, spawner } = judgeSpawner();
     const { run } = recorder(config, [0, 0]);
     await hostVerify(fx.run, 60, { env: legEnv().env, run: run as any, route, sbx: pinOk as any, spawner }) as HostVerifyRan;
@@ -1149,32 +1158,225 @@ describe("Story 34.3: the playable-verify step runs after a green engine gate", 
     const deny = validateDenyProfile(profile).deny;
     const all3 = (t: string) => [`Edit(${t})`, `Read(${t})`, `Write(${t})`];
     // the worktree's own top level: `.git` (a worktree's file), `.gitignore`, `.tk-studio/` (the config), `src/`, `project.godot`
-    const targets = ["./.git", "./.gitignore", "./.tk-studio/**", "./_bmad-output/**", "./apps/**", "./plugins/**", "./project.godot", "./src/**"].sort();
+    // plus (DW-198/DW-199) the siblings along the media chain
+    const targets = ["./.git", "./.gitignore", "./.tk-studio/**", "./_bmad-output/**", "./apps/**", "./plugins/**", "./project.godot", "./src/**",
+      "./.bmad-loop/tasks/**", "./.bmad-loop/journal.jsonl", "./.bmad-loop/runs/other/**",
+      "./.bmad-loop/runs/20261027-eng/transcripts/**", "./.bmad-loop/runs/20261027-eng/tasks.yaml"].sort();
     expect(deny).toEqual(targets.flatMap(all3));
     expect(existsSync(join(fx.wt, ".bmad-loop", "runs", "20261027-eng", "playable", JUDGE_DENY_PROFILE))).toBe(false); // beside, not inside
   }, 30_000);
+
+  /** DW-69: a real queue holding an ended sbx run on `tk-sbx` (pinned once and released before: the earlier pin
+   * episode), plus a `running` run on the same sandbox when `holder`. `me`: a live owner (another supervisor process
+   * on a peer host, so `selfOwner()` never reads it as its own dead predecessor). */
+  function endedRun(holder = false) {
+    const me: Owner = { pid: process.pid, host: `${hostname()}-dw69-peer`, nonce: "hostverify-dw69" };
+    const q = new Queue(":memory:", { ownerAlive: (o) => o.nonce === me.nonce, engineLive: async () => ({ live: false }) });
+    const defn = { id: "launch-27", trigger: "one-shot", target: { skill: "tk-studio-launch" } };
+    const r = q.enqueue({ jobId: "launch-27", root: tempDir("tk-sup-dw69-root-"), projectId: "acme", definition: defn, tier: "sbx", sandbox: "tk-sbx" }).run;
+    q.note(r.run_id, "pinned", { sandbox: "tk-sbx" });
+    q.end(r.run_id, "complete", null);
+    q.note(r.run_id, "pin-released", { sandbox: "tk-sbx", stop: { ok: true } });
+    let other: string | null = null;
+    if (holder) {
+      other = q.enqueue({ jobId: "other-job", root: tempDir("tk-sup-dw69-other-"), projectId: "acme", definition: defn, owner: me, tier: "sbx", sandbox: "tk-sbx" }).run.run_id;
+      q.db.run("UPDATE runs SET state = 'running' WHERE run_id = ?", [other]);
+    }
+    return { q, runId: r.run_id, other, me };
+  }
+  /** DW-69: an `sbx` fake recording every argv (`ls`, the pin, the stop), all exit 0. */
+  function sbxLog() {
+    const log: string[] = [];
+    return { log, sbx: { run: async (_bin: string, args: string[]) => { log.push(args.join(" ")); return { exit: 0, stdout: "", stderr: "" }; } } };
+  }
+  const kindsAfterEnd = (q: Queue, runId: string) => q.events(runId).map((e) => e.kind).slice(q.events(runId).findIndex((e) => e.kind === "pin-released") + 1);
+
+  test("DW-69: a re-run's judge, sole holder of its ended run's sandbox — pinned through the pin record and `pinned`, judged, then `sbx stop` and `pin-released`, the record gone", async () => {
+    const config = base + PLAYABLE;
+    const { q, runId } = endedRun();
+    const { env } = legEnv();
+    const record = pinRecordPath("tk-sbx", env);
+    const { log, sbx } = sbxLog();
+    let recordAtJudge: Record<string, unknown> | null = null;
+    const { calls, spawner } = judgeSpawner();
+    const judging = async (bin: string, args: string[]) => {
+      if (args.includes("-p") && existsSync(record)) recordAtJudge = JSON.parse(readFileSync(record, "utf-8"));
+      log.push(`spawn ${args[0]}`);
+      return spawner(bin, args);
+    };
+    const { run } = recorder(config, [0, 0]);
+    const v = await hostVerify({ ...fixture(config).run, run_id: runId }, 60, { env, run: run as any, route, sbx: sbx as any, spawner: judging, queue: q }) as HostVerifyRan;
+    expect(calls.some((a) => a.includes("-p"))).toBe(true); // the judge ran
+    expect(log.indexOf("run -d --name tk-sbx")).toBeGreaterThanOrEqual(0);
+    expect(log.indexOf("run -d --name tk-sbx")).toBeLessThan(log.indexOf("spawn exec")); // pinned before any exec
+    expect(log.at(-1)).toBe("stop tk-sbx"); // released after the judge
+    expect(recordAtJudge).toMatchObject({ sandbox: "tk-sbx", run_id: runId });
+    expect(existsSync(record)).toBe(false);
+    expect(kindsAfterEnd(q, runId)).toEqual(["pinned", "pin-released"]);
+    expect(q.events(runId).find((e) => e.kind === "pinned" && e.seq > q.events(runId).find((x) => x.kind === "pin-released")!.seq)?.detail).toEqual({ sandbox: "tk-sbx" });
+    expect(q.events(runId).at(-1)!.detail).toEqual({ sandbox: "tk-sbx", stop: { ok: true } });
+    expect(v.playable?.verdict).toBe("inconclusive"); // the fake worker answers no status block: the release never sways it
+  }, 30_000);
+
+  test("DW-69: a re-run's judge while another run holds the sandbox running — pinned and judged, no `sbx stop`, a fresh `pin-kept` naming it", async () => {
+    const config = base + PLAYABLE;
+    const { q, runId, other } = endedRun(true);
+    const { env } = legEnv();
+    const { log, sbx } = sbxLog();
+    const { calls, spawner } = judgeSpawner();
+    const { run } = recorder(config, [0, 0]);
+    await hostVerify({ ...fixture(config).run, run_id: runId }, 60, { env, run: run as any, route, sbx: sbx as any, spawner, queue: q });
+    expect(calls.some((a) => a.includes("-p"))).toBe(true);
+    expect(log).toContain("run -d --name tk-sbx");
+    expect(log).not.toContain("stop tk-sbx");
+    expect(existsSync(pinRecordPath("tk-sbx", env))).toBe(true); // kept: the record stands with the pin
+    expect(kindsAfterEnd(q, runId)).toEqual(["pinned", "pin-kept"]);
+    expect(q.events(runId).at(-1)!.detail).toEqual({ sandbox: "tk-sbx", held_by: [other] });
+  }, 30_000);
+
+  test("DW-69: a second ended run on the sandbox with a live host-leg re-run (its verify-leg lease) — this judge pins without a restart and never releases: no `sbx stop`, `pinned`, no `pin-released`", async () => {
+    const config = base + PLAYABLE;
+    const { q, runId, me } = endedRun();
+    const defn = { id: "launch-28", trigger: "one-shot", target: { skill: "tk-studio-launch" } };
+    const other = q.enqueue({ jobId: "launch-28", root: tempDir("tk-sup-dw69-peer-"), projectId: "acme", definition: defn, tier: "sbx", sandbox: "tk-sbx" }).run.run_id;
+    q.end(other, "complete", null);
+    expect(q.takeVerifyLeg(other, me)).toBe(true);
+    expect(q.verifyLegLive(other)).toBe(true);
+    const { env } = legEnv();
+    // `tk-sbx` listed running and its login probe logged out: a restart's conditions, but for the peer leg.
+    const log: string[] = [];
+    const sbx = { run: async (_bin: string, args: string[]) => {
+      log.push(args.join(" "));
+      if (args[0] === "ls") return { exit: 0, stdout: "NAME STATUS\ntk-sbx running\n", stderr: "" };
+      if (args.includes("auth")) return { exit: 0, stdout: JSON.stringify({ loggedIn: false }), stderr: "" };
+      return { exit: 0, stdout: "", stderr: "" };
+    } };
+    const { calls, spawner } = judgeSpawner();
+    const { run } = recorder(config, [0, 0]);
+    await hostVerify({ ...fixture(config).run, run_id: runId }, 60, { env, run: run as any, route, sbx: sbx as any, spawner, queue: q });
+    expect(calls.some((a) => a.includes("-p"))).toBe(true); // the judge ran
+    expect(log).toContain("run -d --name tk-sbx");
+    expect(log).not.toContain("stop tk-sbx"); // neither a restart's stop nor the release's
+    expect(log.filter((l) => l === "run -d --name tk-sbx")).toHaveLength(1); // no restart's second start
+    expect(kindsAfterEnd(q, runId)).toEqual(["pinned"]);
+    expect(q.events(runId).some((e) => e.kind === "pin-restart")).toBe(false);
+    expect(existsSync(pinRecordPath("tk-sbx", env))).toBe(true); // the pin stands for the peer leg's judge to release
+  }, 30_000);
+
+  test("DW-69: without a queue (the close-out) the judge keeps the bare pin — no `sbx ls`, no events, no stop, no record", async () => {
+    const config = base + PLAYABLE;
+    const { q, runId } = endedRun();
+    const before = q.events(runId).length;
+    const { env } = legEnv();
+    const { log, sbx } = sbxLog();
+    const { calls, spawner } = judgeSpawner();
+    const { run } = recorder(config, [0, 0]);
+    await hostVerify({ ...fixture(config).run, run_id: runId }, 60, { env, run: run as any, route, sbx: sbx as any, spawner });
+    expect(calls.some((a) => a.includes("-p"))).toBe(true);
+    expect(log).toEqual(["run -d --name tk-sbx"]);
+    expect(q.events(runId)).toHaveLength(before);
+    expect(existsSync(pinRecordPath("tk-sbx", env))).toBe(false);
+  }, 30_000);
+
+  test("DW-69: a re-run's pin that fails (`sbx run -d` exits 1) — no exec, `pin-failed` noted, `inconclusive` (`infrastructure: pin: …`), no record", async () => {
+    const config = base + PLAYABLE;
+    const { q, runId } = endedRun();
+    const { env } = legEnv();
+    const log: string[] = [];
+    const sbx = { run: async (_bin: string, args: string[]) => {
+      log.push(args.join(" "));
+      return args[0] === "run" ? { exit: 1, stdout: "", stderr: "no such sandbox" } : { exit: 0, stdout: "", stderr: "" };
+    } };
+    const { calls, spawner } = judgeSpawner();
+    const { run } = recorder(config, [0, 0]);
+    const v = await hostVerify({ ...fixture(config).run, run_id: runId }, 60, { env, run: run as any, route, sbx: sbx as any, spawner, queue: q }) as HostVerifyRan;
+    expect(calls).toEqual([]); // never an exec (preflight or worker) into the stopped sandbox
+    expect(log).toContain("run -d --name tk-sbx");
+    expect(log).not.toContain("stop tk-sbx"); // the release finds no pin outstanding: a no-op
+    expect(kindsAfterEnd(q, runId)).toEqual(["pin-failed"]);
+    expect(q.events(runId).at(-1)!.detail).toEqual({ sandbox: "tk-sbx", error: "sbx pin failed: sbx run -d --name tk-sbx exited 1: no such sandbox" });
+    expect(v.playable?.verdict).toBe("inconclusive");
+    expect(v.playable!.reason).toStartWith("infrastructure: pin:");
+    expect(isRed(v)).toBe(false);
+    expect(existsSync(pinRecordPath("tk-sbx", env))).toBe(false);
+  }, 30_000);
+
+  test("DW-69: a re-run's judge whose worker throws after the pin — still released (`sbx stop`, `pin-released`), `inconclusive` through the `sbx` infra path", async () => {
+    const config = base + PLAYABLE;
+    const { q, runId } = endedRun();
+    const { env } = legEnv();
+    const { log, sbx } = sbxLog();
+    const { calls, spawner } = judgeSpawner();
+    const throwing = async (bin: string, args: string[]) => {
+      if (args.includes("-p")) { calls.push(args); throw new Error("worker exploded"); }
+      return spawner(bin, args);
+    };
+    const { run } = recorder(config, [0, 0]);
+    const v = await hostVerify({ ...fixture(config).run, run_id: runId }, 60, { env, run: run as any, route, sbx: sbx as any, spawner: throwing, queue: q }) as HostVerifyRan;
+    expect(calls.some((a) => a.includes("-p"))).toBe(true); // the worker was reached (the auth preflight passed)
+    expect(log.indexOf("run -d --name tk-sbx")).toBeGreaterThanOrEqual(0);
+    expect(log.at(-1)).toBe("stop tk-sbx"); // released in the finally
+    expect(kindsAfterEnd(q, runId)).toEqual(["pinned", "pin-released"]);
+    expect(q.events(runId).at(-1)!.detail).toEqual({ sandbox: "tk-sbx", stop: { ok: true } });
+    expect(existsSync(pinRecordPath("tk-sbx", env))).toBe(false);
+    expect(v.playable?.verdict).toBe("inconclusive");
+    expect(v.playable!.reason).toStartWith("infrastructure: sbx: ");
+    expect(v.playable!.reason).toContain("worker exploded");
+  }, 30_000);
+
+  /** DW-198/DW-199: does the rule `r` (`Tool(./x/**)` or `Tool(./x)`) cover the POSIX path `p` (`./…`)? */
+  function covers(r: string, p: string): boolean {
+    const t = r.slice(r.indexOf("(") + 1, -1);
+    return t.endsWith("/**") ? p === t.slice(0, -3) || p.startsWith(t.slice(0, -2)) : p === t;
+  }
+  const MEDIA_CHAIN = ["./.bmad-loop", "./.bmad-loop/runs", "./.bmad-loop/runs/e1", "./.bmad-loop/runs/e1/playable",
+    "./.bmad-loop/runs/e1/playable/report.json", "./.bmad-loop/runs/e1/playable/frames/tick-000000.png"];
 
   test("DW-68: the judge's own Bash, frame Reads and answer Write stay permitted: no Bash rule, no bare Edit/Write/Read, no rule over the media", () => {
     const wt = tempDir("tk-sup-dw68-");
     mkdirSync(join(wt, ".bmad-loop", "runs", "e1", "playable"), { recursive: true });
     mkdirSync(join(wt, "src"), { recursive: true });
-    const deny = judgeDenyRules(wt);
+    const deny = judgeDenyRules(wt, ".bmad-loop/runs/e1/playable");
     expect(deny.some((r) => r === "Bash" || r.startsWith("Bash("))).toBe(false);
     expect(deny).not.toContain("Edit");
     expect(deny).not.toContain("Write");
     expect(deny).not.toContain("Read");
-    expect(deny.every((r) => /^(Edit|Read|Write)\(\.\/[^/*]+(\/\*\*)?\)$/.test(r))).toBe(true); // every rule scoped to one top-level entry
-    expect(deny.filter((r) => r.includes(".bmad-loop") || r.includes("**/") || r.endsWith("(./**)"))).toEqual([]);
+    expect(deny.every((r) => /^(Edit|Read|Write)\(\.\/[^*]+(\/\*\*)?\)$/.test(r))).toBe(true); // every rule one scoped entry
+    expect(deny.filter((r) => r.includes("**/") || r.endsWith("(./**)"))).toEqual([]);
+    expect(deny.filter((r) => MEDIA_CHAIN.some((p) => covers(r, p)))).toEqual([]); // no rule covers the media chain
   });
 
   test("DW-68: judgeDenyRules covers a top-level dir (`./<d>/**`) and file (`./<f>`), always the fixed three, never `.bmad-loop`", () => {
     const wt = tempDir("tk-sup-dw68-");
-    mkdirSync(join(wt, ".bmad-loop"), { recursive: true });
+    mkdirSync(join(wt, ".bmad-loop", "runs", "e1", "playable"), { recursive: true });
     mkdirSync(join(wt, "game"), { recursive: true });
     mkdirSync(join(wt, "apps"), { recursive: true });
     writeFileSync(join(wt, "project.godot"), "", "utf-8");
-    expect(judgeDenyRules(wt)).toEqual(["./_bmad-output/**", "./apps/**", "./game/**", "./plugins/**", "./project.godot"]
+    expect(judgeDenyRules(wt, ".bmad-loop/runs/e1/playable")).toEqual(["./_bmad-output/**", "./apps/**", "./game/**", "./plugins/**", "./project.godot"]
       .flatMap((t) => [`Edit(${t})`, `Read(${t})`, `Write(${t})`]));
+  });
+
+  test("DW-198/DW-199: judgeDenyRules denies the run state beside the media, level by level (dir and file forms), never the media chain", () => {
+    const wt = tempDir("tk-sup-dw198-");
+    const bl = join(wt, ".bmad-loop");
+    mkdirSync(join(bl, "tasks"), { recursive: true });
+    writeFileSync(join(bl, "journal.jsonl"), "{}\n", "utf-8");
+    mkdirSync(join(bl, "runs", "other"), { recursive: true });
+    mkdirSync(join(bl, "runs", "e1", "transcripts"), { recursive: true });
+    writeFileSync(join(bl, "runs", "e1", "tasks.yaml"), "x: 1\n", "utf-8");
+    mkdirSync(join(bl, "runs", "e1", "playable", "frames"), { recursive: true });
+    writeFileSync(join(bl, "runs", "e1", "playable", "report.json"), "{}", "utf-8");
+    writeFileSync(join(wt, "project.godot"), "", "utf-8");
+    const expected = ["./.bmad-loop/journal.jsonl", "./.bmad-loop/runs/e1/tasks.yaml", "./.bmad-loop/runs/e1/transcripts/**",
+      "./.bmad-loop/runs/other/**", "./.bmad-loop/tasks/**", "./_bmad-output/**", "./apps/**", "./plugins/**", "./project.godot"]
+      .sort().flatMap((t) => [`Edit(${t})`, `Read(${t})`, `Write(${t})`]);
+    expect(judgeDenyRules(wt, ".bmad-loop/runs/e1/playable")).toEqual(expected);
+    expect(judgeDenyRules(wt, ".bmad-loop\\runs\\e1\\playable")).toEqual(expected); // a Windows-joined media path
+    const deny = judgeDenyRules(wt, ".bmad-loop/runs/e1/playable");
+    for (const r of deny) for (const p of MEDIA_CHAIN) expect([r, p, covers(r, p)]).toEqual([r, p, false]);
+    expect(deny.some((r) => r === "Bash" || r.startsWith("Bash(") || r === "Edit" || r === "Read" || r === "Write")).toBe(false);
+    // an unlistable level throws (the default judge's catch: `inconclusive`, `infrastructure: sbx: …`)
+    expect(() => judgeDenyRules(wt, ".bmad-loop/runs/missing/playable")).toThrow();
   });
 
   test("DW-68: a deny profile that cannot be written is the judge's infrastructure (`inconclusive`, `infrastructure: sbx: …`); the worker never starts", async () => {

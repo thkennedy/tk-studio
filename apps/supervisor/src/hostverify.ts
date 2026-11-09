@@ -64,7 +64,14 @@
  *            read back from `<media>/judge.json`. DW-68: the default judge runs under a scoped deny-only profile
  *            written to `.bmad-loop/runs/<engine run id>/judge-deny.settings.json` (beside the media) and passed as
  *            `--settings`: `Edit`/`Read`/`Write` denied for `plugins`, `apps`, `_bmad-output` and every top-level
- *            entry but `.bmad-loop`; Bash stays open (best effort, not a seal). Recorded as `playable: {verdict: pass | fail | skipped | inconclusive, reason?,
+ *            entry but `.bmad-loop`, and (DW-198/DW-199) every sibling at each level along the media chain
+ *            (`.bmad-loop/`, `runs/`, `<engine run id>/`: the run state beside the media) as listed when the profile
+ *            is written (a snapshot; entries created later stay open); Bash stays open (best effort, not a seal). DW-69: handed the queue (`deps.queue`,
+ *            only `hostleg.ts runLeg` does) and a run id, the default judge pins through `pinWithRestart` (the pin
+ *            record written, `pinned`/`pin-failed` noted on the run) and afterwards `releasePin`s it (best effort: a
+ *            terminal run's sandbox stopped unless another run holds it, `pin-kept`; while another run on the same
+ *            sandbox has a live host-leg re-run, no restart under it and no release: that leg's judge releases); without a queue (the close-out)
+ *            it keeps the bare `pinSandbox`, no events, no release. Recorded as `playable: {verdict: pass | fail | skipped | inconclusive, reason?,
  *            exit?, status?, failed?, duration_ms?, store?, media?, judge?, findings?, frames?}`. Skip reasons: `no
  *            playable`, `playable is malformed: <field>`, `no verify.engine` (Story 35.6: a declared `playable`
  *            with no `verify.engine`), `engine gate not green`. On a configured project every
@@ -141,7 +148,7 @@ import { pluginRoot, studioHome } from "./env";
 import { leaseClock } from "./liveleg";
 import { showAtBase } from "./gitshow";
 import { resolveRoute } from "./route";
-import { pinSandbox, studioRunDir } from "./sandbox";
+import { pinSandbox, pinWithRestart, releasePin, studioRunDir, type SandboxDeps } from "./sandbox";
 import type { WorktreeDeps } from "./worktree";
 
 /** The leg's result: what ran (`green` decides), or why it was skipped. */
@@ -224,6 +231,8 @@ export type PlayableRoute = (root: string, projectId: string) => Promise<Record<
 /** `sbx`: the seam the default judge's pin (`sbx run -d --name <sb>`) runs through; `spawner`: the default judge's
  * `invokeSkill` spawner (its preflight and worker; default `runProcess`). */
 type Deps = Pick<WorktreeDeps, "env" | "run" | "sbx"> & { judge?: PlayableJudge; route?: PlayableRoute; spawner?: Spawner;
+  /** DW-69: the queue (only `runLeg` passes it): the default judge's pin is recorded and released through it. */
+  queue?: Queue;
   /** Story 38.1: the guard key every step's trip names (set by `hostVerify` from `opts.guardKey`). */
   guardKey?: GuardKey };
 
@@ -770,21 +779,30 @@ async function rubricIds(
 export const JUDGE_DENY_PROFILE = "judge-deny.settings.json";
 /** DW-68: the folders the judge's profile always denies, present or not. */
 const JUDGE_DENY_FIXED = ["plugins", "apps", "_bmad-output"];
-/** DW-68: the media's ancestor under the served root, never denied (the judge reads its frames and writes its answer there). */
-const JUDGE_MEDIA_TOP = ".bmad-loop";
-
-/** DW-68: the judge's deny rules over the served root `root`: `Edit(t)`, `Read(t)` and `Write(t)` per target `t` — the
- * fixed folders and every top-level entry except `.bmad-loop` (a directory as `./<name>/**`, a file as `./<name>`),
- * sorted and deduped. POSIX rule strings (resolved by Claude Code against the session cwd), never `path.join`ed.
- * Never denies Bash, nor a bare `Edit`/`Read`/`Write` (a bare `Edit` deny also denies the Write tool, blocking the
- * judge's `answer.json`). Throws when the root cannot be listed. */
-export function judgeDenyRules(root: string): string[] {
+/** DW-68/DW-198/DW-199: the judge's deny rules over the served root `root`, `media` the media folder relative to
+ * `root` (split on `/` and `\`):`Edit(t)`, `Read(t)` and `Write(t)` per target `t`, level by level along the media
+ * path. Level 0 (the root): the fixed folders and every entry but the media's first component; each deeper level `L`
+ * (the media's first `k` components, down to the media folder's parent): every entry of `root/L` but component
+ * `k+1` — a directory as `./L/<name>/**`, a file (or dangling link) as `./L/<name>`. So the run state beside the media
+ * (`.bmad-loop/tasks`, the journal, other runs, the run's transcripts and tasks) is denied while the media chain itself
+ * is never covered (deny beats allow). The siblings are those listed at call time (a snapshot: `--settings` is read
+ * once at session start, so entries created later are not covered — best effort, like Bash). Sorted and deduped; POSIX rule strings (resolved by Claude Code against the
+ * session cwd), built by concatenation, never `path.join`ed. Never denies Bash, nor a bare `Edit`/`Read`/`Write` (a
+ * bare `Edit` deny also denies the Write tool, blocking the judge's `answer.json`). Throws when any level cannot be
+ * listed. */
+export function judgeDenyRules(root: string, media: string): string[] {
+  const parts = media.split(/[\\/]+/).filter((p) => p && p !== ".");
   const targets = new Set(JUDGE_DENY_FIXED.map((n) => `./${n}/**`));
-  for (const name of readdirSync(root)) {
-    if (name === JUDGE_MEDIA_TOP) continue;
-    let dir = false;
-    try { dir = statSync(join(root, name)).isDirectory(); } catch { /* a dangling link: denied as a file */ }
-    targets.add(dir ? `./${name}/**` : `./${name}`);
+  for (let k = 0; k < parts.length; k++) {
+    const level = parts.slice(0, k);
+    const prefix = level.length ? `./${level.join("/")}/` : "./";
+    const dir = join(root, ...level);
+    for (const name of readdirSync(dir)) {
+      if (name === parts[k]) continue;
+      let isDir = false;
+      try { isDir = statSync(join(dir, name)).isDirectory(); } catch { /* a dangling link: denied as a file */ }
+      targets.add(isDir ? `${prefix}${name}/**` : `${prefix}${name}`);
+    }
   }
   return [...targets].sort().flatMap((t) => [`Edit(${t})`, `Read(${t})`, `Write(${t})`]);
 }
@@ -793,7 +811,7 @@ export function judgeDenyRules(root: string): string[] {
  * `root`); answers its absolute path. Throws on any failure (the leg's judge `catch`: `inconclusive`, cause `sbx`). */
 function writeJudgeDenyProfile(root: string, media: string): string {
   const path = join(root, dirname(media), JUDGE_DENY_PROFILE);
-  const body = JSON.stringify({ permissions: { deny: judgeDenyRules(root) } }, null, 2) + "\n";
+  const body = JSON.stringify({ permissions: { deny: judgeDenyRules(root, media) } }, null, 2) + "\n";
   mkdirSync(dirname(path), { recursive: true });
   const tmp = `${path}.tk-studio-${process.pid}.tmp`;
   try {
@@ -805,13 +823,43 @@ function writeJudgeDenyProfile(root: string, media: string): string {
 
 /** The default judge: `invokeSkill` with the sandbox pinned first (`sbx run -d --name <sb>`), so a re-run on an
  * ended run (its sandbox stopped) never `sbx exec`s into a stopped sandbox; a pin failure is a `blocked` block.
- * DW-68: under a scoped deny profile (`--settings`, best effort, not a seal: Bash stays open). */
-const defaultJudge = (deps: Deps): PlayableJudge => async (root, args) =>
-  invokeSkill(root, PLAYABLE_JUDGE_SKILL, { ...args, deny_profile: writeJudgeDenyProfile(root, args.payload.media) },
-    deps.spawner ?? runProcess, {
-      vmHostRoot: root,
-      pin: (sb) => pinSandbox(sb, { ...(deps.env ? { env: deps.env } : {}), ...(deps.sbx ?? {}) }),
-    });
+ * DW-68: under a scoped deny profile (`--settings`, best effort, not a seal: Bash stays open).
+ * DW-69: with `deps.queue` and `runId`, the pin goes through `pinWithRestart` (its pin record written) and is noted
+ * `pinned {sandbox}` or `pin-failed {sandbox, error}` on the run; once the invoke returns or throws, `releasePin`
+ * (only a terminal run: `sbx stop` with no other holder, else `pin-kept`), best effort, never thrown into the leg.
+ * While another run recording the same sandbox has a live host-leg re-run (`queue.verifyLegLive`), that leg's judge
+ * owns the sandbox: this pin never restarts it (`restarted` seeded with it) and, asked again at release time, this
+ * judge skips its `releasePin` (that leg's own judge releases; were both to finish before either lease closes, both
+ * skip and the sandbox stays pinned until the next `releasePin`).
+ * Without a queue (the close-out callers) the bare `pinSandbox`, no events, no release. */
+const defaultJudge = (deps: Deps, runId?: string): PlayableJudge => async (root, args) => {
+  const sbxDeps: SandboxDeps = { ...(deps.env ? { env: deps.env } : {}), ...(deps.sbx ?? {}) };
+  const queue = deps.queue;
+  if (!queue || !runId) {
+    return invokeSkill(root, PLAYABLE_JUDGE_SKILL, { ...args, deny_profile: writeJudgeDenyProfile(root, args.payload.media) },
+      deps.spawner ?? runProcess, { vmHostRoot: root, pin: (sb) => pinSandbox(sb, sbxDeps) });
+  }
+  // Another run on `sb` with a live host-leg re-run: its judge owns the sandbox's restart and release. Never throws.
+  const peerLegLive = (sb: string): boolean => {
+    try { return queue.runs().some((r) => r.sandbox === sb && r.run_id !== runId && queue.verifyLegLive(r.run_id)); }
+    catch { return false; }
+  };
+  const pin = async (sb: string): Promise<string | null> => {
+    const failed = await pinWithRestart(queue, runId, sb, sbxDeps, peerLegLive(sb) ? { restarted: new Set([sb]) } : {});
+    try { queue.note(runId, failed ? "pin-failed" : "pinned", failed ? { sandbox: sb, error: failed } : { sandbox: sb }); }
+    catch { /* the run is gone: the pin's answer still stands */ }
+    return failed;
+  };
+  try {
+    return await invokeSkill(root, PLAYABLE_JUDGE_SKILL, { ...args, deny_profile: writeJudgeDenyProfile(root, args.payload.media) },
+      deps.spawner ?? runProcess, { vmHostRoot: root, pin });
+  } finally {
+    try {
+      const sb = queue.get(runId)?.sandbox;
+      if (!sb || !peerLegLive(sb)) await releasePin(queue, runId, sbxDeps);
+    } catch { /* best effort: the leg's verdict ignores the release */ }
+  }
+};
 const defaultRoute: PlayableRoute = (root, projectId) => resolveRoute(root, projectId);
 
 /** The `playable-verify` leg's `{model, effort}` from the project's route, or the shipped default (a route without
@@ -980,7 +1028,7 @@ async function playableStep(
   if ("error" in rubric) return infra(judgeBase, "rubric", rubric.error);
   let res: Record<string, unknown>;
   try {
-    res = await (deps.judge ?? defaultJudge(deps))(cwd, { tier: "sbx", sandbox, model, effort, timeout_s: guardS, payload: { media: mediaRel } });
+    res = await (deps.judge ?? defaultJudge(deps, run.run_id))(cwd, { tier: "sbx", sandbox, model, effort, timeout_s: guardS, payload: { media: mediaRel } });
   } catch (e) { return infra(judgeBase, "sbx", message(e)); }
   const cost = typeof res?.total_cost_usd === "number" && Number.isFinite(res.total_cost_usd) && res.total_cost_usd >= 0 ? res.total_cost_usd : undefined;
   const sb = res?.status_block as Record<string, unknown> | undefined;

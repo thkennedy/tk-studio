@@ -3369,6 +3369,12 @@ class DriverContractTestCase(unittest.TestCase):
         for phrase in ("B3, B4 and B5", "DW-136, DW-137, DW-138, DW-139, DW-144",
                        "**The ready flip (B3):**", "`held: <bundle>[, <bundle>…] not landed`", "`held: no triage recorded`",
                        "a `wip:` commit", "`{}` or `{ready?: boolean}`", "`400 SchemaError`", "`rerun.ready_override: true`",
+                       "On a sweep run (DW-193) `ready: true` first reverts a cut tip that is a `wip: sweep bundle …` "
+                       "commit and pushes the revert to the run branch (never forced) before the leg, recording "
+                       "`rerun.wip_drop {wip, subject, revert, pushed}`",
+                       "a failed drop (`rerun.wip_drop: \"error: …\"`) runs the leg at the cut tip and holds the flip, "
+                       "`held: the WIP commit not dropped (<error>)`, with no `ready_override`",
+                       "the PR body is not filtered (its commits list the WIP and its revert)",
                        "**The ledger wait's bound (B4):**", "`SWEEP_LEDGER_WAIT_MS` (60 min)",
                        "checked before the unchanged-fingerprint skip",
                        "`ledger-resolve {…, waiting: false, settled: true, ended: \"wait\", pending}`",
@@ -3928,7 +3934,14 @@ class DriverContractTestCase(unittest.TestCase):
                        "`unreadable: true`", "no ok `queued` and no `PrClosed` refusal after it",
                        "a cancelled, absent or never-approved holder releases",
                        "its newest ok `pr` of any cycle, with no ok `queued` and no `PrClosed` refusal after it, "
-                       "still answers `OPEN` — an earlier approve PR open after a revise", "— additive) |"):
+                       "still answers `OPEN` — an earlier approve PR open after a revise", "— additive) |",
+                       "before a kept worktree of an earlier cycle whose push never landed is removed, from that "
+                       "worktree (DW-192), a failed drop there failing `append` (`DropFailed`/`DropRefused`) and "
+                       "keeping that worktree",
+                       "(DW-190) the wait check and a starting cycle's `append` through `commit` run under a "
+                       "per-project lockfile, `<TK_SUPERVISOR_WORK>/worktrees/<project>/approve.lock`, so the "
+                       "check-then-append holds across supervisor processes; a pass finding it held elsewhere "
+                       "records nothing and retries next pass"):
             self.assertIn(phrase, clause)
         track_row = next(line for line in self.text.splitlines() if line.startswith("| `tk-studio-track`"))
         self.assertIn("0.1.34 (DW-51), verb `drop`", track_row)

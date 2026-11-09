@@ -163,8 +163,9 @@ export const SANDBOX_HOLDING_STATES = ["queued", "running", "paused", "external"
  * another holder, `pin-kept` — and no `pin-released` since), so the last holder to end stops it even when it
  * never pinned itself (a queued run cancelled before its claim, a `pin-failed` end). Never while another
  * queued/running/paused/external run records the same sandbox, nor while an ended run's engine (this one's
- * included) is still alive after its kill (DW-3) — else a `pin-kept` event naming them. Never throws;
- * answers what it did. */
+ * included) is still alive after its kill (DW-3) — else a `pin-kept` event naming them, once per pin episode (DW-69:
+ * once since the run's latest `pinned`, so a host-leg re-run's fresh pin on an ended run reports its own `pin-kept`;
+ * a run with no `pinned` counts all its events). Never throws; answers what it did. */
 /** The runs that hold sandbox `sb` besides `runId`: every other run recording it in one of `states`, plus every ended
  * run recording it whose engine is still alive after its kill (`runId`'s own included — DW-3). Story 33.3: extracted
  * from `releasePin` (its rule unchanged) so the pin's restart refuses to stop a sandbox a live run holds. Story 38.3
@@ -200,8 +201,11 @@ export async function releasePin(queue: Queue, runId: string, deps: SandboxDeps 
     if (!queue.pinOutstanding(sb)) return "none";
     const holders = await sandboxHolders(queue, sb, runId);
     if (holders.length) {
-      // Named once per run (a later release of the same run finds it kept already).
-      const own = queue.events(runId).filter((e) => e.kind === "pin-kept" || e.kind === "pin-released");
+      // Named once per pin episode (a later release after the same pin finds it kept already). DW-69: only events
+      // after the run's latest `pinned` count (none: all of them), so a re-run's fresh pin names its own `pin-kept`.
+      const events = queue.events(runId);
+      const since = events.findLastIndex((e) => e.kind === "pinned");
+      const own = events.slice(since + 1).filter((e) => e.kind === "pin-kept" || e.kind === "pin-released");
       if (!own.length) queue.note(runId, "pin-kept", { sandbox: sb, held_by: holders, ...engineMcp });
       return "kept";
     }
