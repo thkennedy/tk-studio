@@ -212,6 +212,9 @@ DRIFT: requestReady takes the inbox reader as a parameter (type-only import of I
 | review | 1 | 2026-11-10T05:14:00Z | 2026-11-10T05:36:55Z | 32b80ace-ef5b-4689-8721-49f11a69ad62 | claude-opus-5-5 | medium | 8046374 | 54424 | 5.4860 | completed |
 | review | 2 | 2026-11-10T05:36:55Z | 2026-11-10T05:55:24Z | 57efbeeb-9963-41b9-824f-23283696b87a | claude-opus-5-5 | medium | 8123437 | 70812 | 5.5980 | completed |
 | gate | 1 | 2026-11-10T05:55:24Z | 2026-11-10T05:58:03Z | 5e7b8f27-0f23-4618-acff-b42f430603d1 | claude-opus-5-5 | medium | 1794207 | 10864 | 1.3433 | completed |
+| host-leg | 1 | 2026-11-10T05:58:36Z | 2026-11-10T07:12:22Z | — | — | — | — | — | — | green |
+| close-out | 1 | 2026-11-10T07:12:22Z | 2026-11-10T07:12:30Z | — | — | — | — | — | — | PR |
+| merge | — | 2026-11-10T07:12:56Z | 2026-11-10T07:12:56Z | — | — | — | — | — | — | merged |
 
 ## Auto Run Result
 
