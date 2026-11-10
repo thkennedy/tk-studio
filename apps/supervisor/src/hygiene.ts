@@ -42,7 +42,7 @@ import { cpSync, copyFileSync, existsSync, mkdirSync, readdirSync } from "node:f
 import { basename, dirname, join, posix, win32 } from "node:path";
 import { notifier, supervisorOrigin, underBunTest, WorkDirMissing, workDir, type Notifier } from "./env";
 import { canonicalPr } from "./planseams";
-import type { Queue, QueueRun } from "./queue";
+import { STUDIO_CHAT_JOB, type Queue, type QueueRun } from "./queue";
 import { LOGIN_WARN_MS, SANDBOX_LOGIN_CHECK, type LoginState, type SandboxLoginReading } from "./sandbox";
 import { lastJsonObject, runProcess, type RunResult } from "./server";
 import { isSweep, sweepNotice, sweepSummary } from "./sweep";
@@ -388,7 +388,12 @@ export async function endHygiene(queue: Queue, run: QueueRun, deps: HygieneDeps 
 
 type Note = (kind: string, detail: Record<string, unknown>) => void;
 
+/** Story 39.3: why a `studio-chat` run's end sends no notifier line (recorded as `notify-skipped`). */
+export const STUDIO_CHAT_QUIET = "a studio-chat turn answers in the page (Story 39.3)";
+
 async function notifyEnd(queue: Queue, run: QueueRun, env: Env, note: Note, fetchFn?: Fetch): Promise<void> {
+  // Story 39.3: a studio-chat turn's end is answered in the page (the reply, or the pass's failure reply): no line.
+  if (run.job_id === STUDIO_CHAT_JOB) { note("notify-skipped", { why: STUDIO_CHAT_QUIET }); return; }
   let selected: Notifier | undefined;
   try { selected = notifier(env); }
   catch (e) { note("notify-failed", { error: message(e) }); } // a named error: it names the variable, never a value

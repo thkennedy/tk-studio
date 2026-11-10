@@ -211,7 +211,18 @@
     spec folder; the engine resolves it by the glob
     `39-7-messages-both-ways-and-the-check-in-*.md`, and a file named
     `39-7-messages-both-ways-and-the-check-in.md` is read as pending (loop deficiency 1,
-    story 21-6).
+    story 21-6). Replan (39-3 gate, 2026-11-10): 39.3's `ProposalNotYet` refusal of
+    `stop-after-story`/`open-studio` lives in three seams, not only `src/chat/*`:
+    `plugins/tk-studio/lib/studiochat.py` (`NOT_YET`; `KIND_FIELDS` gives both kinds no
+    fields, so `stop-after-story`'s optional `engagement` is added there),
+    `apps/supervisor/src/studiochat.ts` `NOT_YET_KINDS` (refused in `api.ts` `POST /chat
+    {pressed}`) and web `src/chat/model.ts` `NOT_YET_KINDS`/`NOT_YET_TEXT`; lift it in
+    all three (the two studiochat files join Files, not a deviation). Record those two
+    presses through `POST /chat {pressed}` as `answer`/`engagement` do (it refuses a
+    `queue` proposal with `409 ProposalViaJobs`; the cookie `POST /jobs` gate writes
+    `queue` press lines itself under `studio-chat.lock`). `message` items read lines via
+    `readStudioChat`; a press line may carry `unqueued: true` (a failed `queue` submit,
+    marked in place, seq kept): title it as not queued, never as a press.
 
 - id: "39-8-model-and-effort-in-the-owners-hands"
   title: "Model and Effort in the Owner's Hands"

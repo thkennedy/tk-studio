@@ -84,6 +84,23 @@
  *   GET  /engagements/{id}   {ok, project, engagement, chat {route, path, last_seq}} ([?project=<id>] skips the registry
  *                            scan); 400 BadEngagement, 404 UnknownEngagement, 409 AmbiguousEngagement {engagement,
  *                            projects[]} (no `?project=` and more than one holder), 500 EngagementRecordInvalid
+ *   POST /chat               Story 39.3 (0.1.35 additive, `studiochat.ts`): the studio chat — `{project, text}` (a non-blank
+ *                            line of at most 4,000 characters) appends the owner's line to the served root's
+ *                            `_bmad-output/tracking/studio-chat.jsonl`, writes the turn's reads file
+ *                            (`studio-chat-reads/<seq>.json`), queues one `studio-chat` run (host, the planner leg, `stack`
+ *                            on the lane `<lock checkout>#studio-chat`) and records `chat-queued {chat: "studio", project, seq,
+ *                            run_id, model, effort, behind}`; 200 {ok, project, seq, run_id, behind, note} (`note` "Queued
+ *                            behind the reply to '<excerpt>'" while another turn is pending, else null). `{project, pressed:
+ *                            {seq, index}}` records a press line `pressed: <label>` (no run; `run_id: null`); a `queue` proposal's press is
+ *                            the cookie `POST /jobs` with `proposal` only. 400
+ *                            MalformedJson | SchemaError | LineTooLong {limit, length}, 403 CsrfRefused, 404 UnknownProject |
+ *                            UnknownProposal, 409 ProposalNotYet {kind} | ProposalAlreadyPressed {seq, index, pressed_seq}
+ *                            (one press per proposal) | ProposalViaJobs {kind} (a `queue` proposal not yet pressed: nothing
+ *                            written), 500 ChatJobUnresolved | ChatQueueFailed, 503 ChatBusy
+ *   GET  /chat?project=<id>[&since=<seq>]  {ok, project, since, last_seq, lines}; with `Accept: text/event-stream`
+ *                            `retry: 5000`, the `id: <seq>` / `event: chat` frames, `event: chat-delta {run_id, reply_to, from,
+ *                            text}` frames (no `id:`) of a running turn's streamed reply, and `: heartbeat`; 400
+ *                            ProjectRequired | SchemaError, 404 UnknownProject
  *   POST /engagements/{id}/input  {verb, …} (`answer`, `go`, `revise`, `question`, `approve`, `cancel`, each typed): one
  *                            row of `TRANSITIONS`, logged in `inputs[]` with its source (`bearer` | `cookie`), then the
  *                            `engagement` service event {id, project, state, from, verb, source}; 200 {ok, engagement,
@@ -128,6 +145,13 @@
  * `POST /runs/{id}/cancel`, (Story 31.6) `POST /inbox/{key}/reply` and (Story 32.1) `POST /engagements` and
  * `POST /engagements/{id}/input` with the page's CSRF token (else 403 CsrfRefused); never `POST /jobs`. Story 39.2:
  * `GET /sandbox/login` (its answer carries `X-CSRF-Token`), and `POST /sandbox/login/start` and `/code` with CSRF.
+ * Story 39.3: `GET /chat` and `POST /chat` with CSRF; and `POST /jobs` only as a studio chat press — exactly `{project,
+ * job, proposal: {chat, seq, index}}` with CSRF, the reply `seq` of `chat`'s studio chat holding a `queue` proposal at
+ * `index` with the same `{project, job}` and no press line for it yet (else 403 ProposalRefused {detail}, "already
+ * pressed" once pressed). The gate itself records the press line (`pressed: <label>`, under `studio-chat.lock`,
+ * atomically with the check; 503 ChatBusy) before the submit, and marks it `unqueued: true` in place (its seq kept,
+ * never reused) when the submit is not 2xx or throws, so the proposal reads unpressed again; the
+ * submit then sees `{project, job}` only. A cookie `POST /jobs` without `proposal` stays 401.
  * `GET /` with no auth is the 401 HTML sign-in page (account creation while no account exists); so is a
  * `GET /app[/…]` (Story 30.2) and an HTML `GET /status` (Story 30.6; a non-HTML one stays 401 JSON), their forms
  * carrying the requested path and query as `next`, where a successful
@@ -153,7 +177,7 @@ import {
 } from "./auth";
 import { boardFor, ledgerPath, type BoardAnswer } from "./board";
 import { appendChatLineHeld, ChatBusy, chatSince, checkChatBody, dropChatLineHeld, mintChatTurn, prepareChatTurn, recordIsJsonText, withChatLockAsync, type ChatDeps, type ChatLine } from "./chat";
-import { afterEngagementInput, CancelRaced, cancelRun, chatDeps, ExternalRunRefused, resumeRun, StartError, submitProject, type AgentsOption } from "./cli";
+import { afterEngagementInput, CancelRaced, cancelRun, chatDeps, ExternalRunRefused, resumeRun, StartError, studioChatDeps, submitProject, type AgentsOption } from "./cli";
 import { ResumeRefused, type ResumeAnswer } from "./closeout";
 import { rerunHostLeg, VerifyRefused, type HostLegStarted } from "./hostleg";
 import { apiBind, apiPort, apiToken, checkTlsFiles, notifier, oauthLeftovers, sessionSecret, supervisorOrigin, tlsConfig } from "./env";
@@ -172,6 +196,10 @@ import { registryShow } from "./server";
 import { ApiBindRefused, checkBind } from "./bind";
 import { isTerminal, Queue, RunTerminal, type QueueEvent, type QueueRun } from "./queue";
 import { loadSupervisorConfig, type SupervisorConfig } from "./config";
+import {
+  appendStudioLineHeld, behindNote, checkStudioChatBody, deltaFrame, dropStudioLineHeld, findProposal, lastStudioSeq, markUnqueuedHeld, mintStudioTurn, NOT_YET_KINDS,
+  pendingTurns, readStream, readStudioChat, removeReads, StudioChatBusy, studioChatSince, turnRunId, withStudioLockAsync, writeReads, type StudioLine,
+} from "./studiochat";
 import {
   configuredSandboxes, LOGIN_CODE_RE, LOGIN_ID_RE, loginMemory, readSandboxLogin, SANDBOX_NAME_RE, sendSandboxLoginCode, startSandboxLogin, type LoginDeps,
 } from "./sandbox";
@@ -247,6 +275,9 @@ export interface ApiDeps {
   /** Story 32.2: the chat route's turn — the `engagement-chat` definition for a served root and its checkout (default
    * `chatDeps()`: `validate`'s resolve and `resolveCheckout`). */
   chat?: ChatDeps;
+  /** Story 39.3: the studio chat route's turn — the `studio-chat` definition for a served root and its checkout (default
+   * `studioChatDeps()`). */
+  studioChat?: ChatDeps;
   /** Story 32.3: run after an applied `answer` or `go` (Story 32.4: or `revise`; Story 32.6: or `approve`, and `go`
    * from `partial`) on `POST /engagements/{id}/input`, fire-and-forget (its errors swallowed; default
    * `afterEngagementInput`: the questions pass, the scope pass, then the approve and engagement-run passes, for that
@@ -429,6 +460,7 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
   }));
   const reply = deps.reply ?? ((key: string, body: ReplyBody) => postReply(key, body, { registry, env: deps.env }));
   const chat = deps.chat ?? chatDeps();
+  const studioChat = deps.studioChat ?? studioChatDeps();
   const afterInput = deps.afterEngagementInput ?? ((root: string, id: string) => afterEngagementInput(queue, root, id));
 
   /** Constant time: both sides hashed to one length before `timingSafeEqual`. The scheme
@@ -742,6 +774,243 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
       cancel() { cleanup(); },
     });
     return new Response(body, { status: 200, headers: { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" } });
+  }
+
+  // ---------------------------------------------------------- the studio chat (Story 39.3)
+
+  /** Settled shape 12: the turn's reads, composed from the routes' own functions before the post's lock; a part that
+   * throws is `{error}` (redacted) and never fails the post. Holds what the routes already answer a cookie. */
+  async function composeReads(project: string): Promise<Record<string, unknown>> {
+    const part = async (fn: () => unknown): Promise<unknown> => {
+      try { return await fn(); } catch (e) { return { error: redact(e instanceof Error ? e.message : String(e)) }; }
+    };
+    const pick = (r: QueueRun) => ({ run_id: r.run_id, job_id: r.job_id, state: r.state, reason: r.reason, created: r.created, updated: r.updated });
+    const ledgerFile = ledgerPath(deps.env ?? process.env, deps.ledger);
+    return {
+      at: new Date(clock()).toISOString(), project,
+      board: await part(() => board(project)),
+      office: await part(() => {
+        const snap = officeSnapshot();
+        return { runs: snap.runs.filter((r) => r.project === project), agents: snap.agents.filter((a) => a.project === project), last_run: snap.last_run?.[project] ?? null };
+      }),
+      status: await part(() => {
+        const runs = queue.runs();
+        return { counts: stateCounts(runs), live: runs.filter((r) => !isTerminal(r.state)).map(pick) };
+      }),
+      runs: await part(() => queue.runs().filter((r) => r.project_id === project)
+        .sort((a, b) => (a.created < b.created ? 1 : a.created > b.created ? -1 : 0)).slice(0, 10)
+        .map((r) => ({ ...pick(r), studio_run_id: r.studio_run_id, cost_usd: r.studio_run_id ? runCost(ledgerFile, r.studio_run_id) : null }))),
+      inbox: await part(async () => {
+        const file = await inbox(project);
+        return file ? { generated_at: file.generated_at, items: file.items } : { error: "UnknownProject" };
+      }),
+    };
+  }
+
+  /** `POST /chat`: an owner line (the turn queued) or a press (a line, no run). Under `studio-chat.lock`, with no
+   * await between: the line appended, the reads file written, the run minted, `chat-queued` recorded — a failure drops
+   * the line and the reads file again (500 ChatQueueFailed). */
+  async function postStudioChatRoute(req: Request): Promise<Response> {
+    let raw: unknown;
+    try { raw = JSON.parse(await req.text()); }
+    catch (e) { return fail(400, "MalformedJson", { detail: `the body is not JSON: ${e instanceof Error ? e.message : String(e)}` }); }
+    const checked = checkStudioChatBody(raw);
+    if (!checked.ok) {
+      if (checked.error === "LineTooLong") return fail(400, "LineTooLong", { limit: checked.limit, length: checked.length, detail: checked.detail });
+      return fail(400, "SchemaError", { detail: checked.detail });
+    }
+    const project = checked.project;
+    const served = await servedRootOf(project);
+    if (served instanceof Response) return served;
+    const root = served.root;
+    type Turned = Response | { seq: number; run_id: string | null; behind: { seq: number; run_id: string | null } | null; note: string | null };
+    let turned: Turned;
+    try {
+      if (checked.kind === "pressed") {
+        const { seq, index } = checked.pressed;
+        turned = await withStudioLockAsync(root, (): Turned => {
+          const lines = readStudioChat(root);
+          const proposal = findProposal(lines, seq, index);
+          if (!proposal) return fail(404, "UnknownProposal", { project, seq, index });
+          const kind = String(proposal.kind);
+          if (NOT_YET_KINDS.includes(kind)) return fail(409, "ProposalNotYet", { kind, detail: `${kind} lands in Story 39.7` });
+          const prior = pressLine(lines, seq, index);
+          if (prior) return fail(409, "ProposalAlreadyPressed", { project, seq, index, pressed_seq: prior.seq, detail: `reply ${seq} proposal ${index} is already pressed (line ${prior.seq})` });
+          // a `queue` press is recorded by the cookie `POST /jobs` gate only (with the submit): a press line here
+          // would make that gate refuse it forever
+          if (kind === "queue") return fail(409, "ProposalViaJobs", { project, seq, index, kind, detail: "a queue proposal is pressed by the cookie POST /jobs with `proposal: {chat, seq, index}`, not POST /chat" });
+          const label = typeof proposal.label === "string" ? proposal.label : kind;
+          const line = appendStudioLineHeld(root, { at: new Date(clock()).toISOString(), author: "owner", body: `pressed: ${label}`, pressed: { seq, index, kind } });
+          return { seq: line.seq, run_id: null, behind: null, note: null };
+        });
+      } else {
+        let prepared: Awaited<ReturnType<typeof prepareChatTurn>>;
+        try { prepared = await prepareChatTurn(studioChat, root); }
+        catch (e) { return fail(500, "ChatJobUnresolved", { project, detail: redact(e instanceof Error ? e.message : String(e)) }); }
+        const reads = await composeReads(project);
+        const text = checked.text;
+        turned = await withStudioLockAsync(root, (): Turned => {
+          const ahead = pendingTurns(readStudioChat(root)).at(-1);
+          const behind = ahead ? { seq: ahead.seq, run_id: turnRunId(queue, project, ahead.seq) } : null;
+          const line = appendStudioLineHeld(root, { at: new Date(clock()).toISOString(), author: "owner", body: text });
+          try {
+            writeReads(root, line.seq, reads);
+            const minted = mintStudioTurn(queue, prepared, { project, root, seq: line.seq, behind: behind?.run_id ?? null });
+            return { seq: line.seq, run_id: minted.run_id, behind, note: ahead ? behindNote(ahead.body) : null };
+          } catch (e) {
+            let detail = redact(e instanceof Error ? e.message : String(e));
+            removeReads(root, line.seq);
+            try { dropStudioLineHeld(root, line.seq); }
+            catch (d) { detail += `; the owner line seq ${line.seq} could not be removed: ${redact(d instanceof Error ? d.message : String(d))}`; }
+            return fail(500, "ChatQueueFailed", { project, detail });
+          }
+        });
+      }
+    } catch (e) {
+      if (e instanceof StudioChatBusy) return fail(503, "ChatBusy", { project, detail: e.message });
+      throw e;
+    }
+    if (turned instanceof Response) return turned;
+    return json(200, { ok: true, project, ...turned });
+  }
+
+  /** `GET /chat?project=<id>[&since=<seq>]`: the lines after `since` (JSON), or with `text/event-stream` the stream. */
+  async function readStudioChatRoute(req: Request, url: URL): Promise<Response> {
+    const project = url.searchParams.get("project")?.trim();
+    if (!project) return fail(400, "ProjectRequired", { detail: "the studio chat needs ?project=<id>" });
+    const stream = (req.headers.get("accept") ?? "").includes("text/event-stream");
+    const lastId = req.headers.get("last-event-id");
+    const raw = stream && lastId !== null && /^\d+$/.test(lastId.trim()) ? lastId : url.searchParams.get("since")?.trim() || "0";
+    if (!/^\d+$/.test(raw.trim())) return fail(400, "SchemaError", { detail: `'since' must be a chat seq (a non-negative integer), got '${raw}'` });
+    const since = Number(raw.trim());
+    const served = await servedRootOf(project);
+    if (served instanceof Response) return served;
+    if (!stream) return json(200, { ok: true, project, since, last_seq: lastStudioSeq(served.root), lines: studioChatSince(served.root, since) });
+    return studioChatSse(req, served.root, project, since);
+  }
+
+  /** The studio chat stream (a fourth handler, beside `sse()`, `officeSse()` and `chatSse()`, never factored with
+   * them): `retry: 5000`, the `id: <seq>` / `event: chat` frames (the replay after `since`, then each new line), the
+   * `event: chat-delta` frames of each running turn's stream file from the length this connection last sent (none once
+   * its reply landed or the run ended), and a `: heartbeat` every `heartbeatMs`. Reads only. */
+  function studioChatSse(req: Request, root: string, project: string, since: number): Response {
+    const enc = new TextEncoder();
+    let last = since, closed = false;
+    const sent = new Map<string, number>();
+    let timer: ReturnType<typeof setTimeout> | undefined, heartbeat: ReturnType<typeof setInterval> | undefined;
+    const frame = (l: StudioLine) => `id: ${l.seq}\nevent: chat\ndata: ${JSON.stringify(l)}\n\n`;
+    const cleanup = () => {
+      closed = true;
+      if (timer) { clearTimeout(timer); timer = undefined; }
+      if (heartbeat) { clearInterval(heartbeat); heartbeat = undefined; }
+    };
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const stop = () => {
+          if (closed) return;
+          cleanup();
+          try { controller.close(); } catch { /* already closed */ }
+        };
+        const send = (text: string) => {
+          if (closed) return;
+          try { controller.enqueue(enc.encode(text)); } catch { stop(); }
+        };
+        req.signal?.addEventListener("abort", stop);
+        if (req.signal?.aborted) { stop(); return; }
+        const tick = () => {
+          if (closed) return;
+          try {
+            const all = readStudioChat(root);
+            const fresh = all.filter((l) => l.seq > last);
+            if (fresh.length) {
+              send(fresh.map(frame).join(""));
+              last = Math.max(last, ...fresh.map((l) => l.seq));
+            }
+            const replied = new Set(all.filter((l) => l.author === "planner" && l.seq <= last && typeof l.run_id === "string").map((l) => l.run_id as string));
+            let deltas = "";
+            for (const ev of queue.serviceEvents("chat-queued")) {
+              const d = ev.detail ?? {};
+              if (d.chat !== "studio" || d.project !== project || typeof d.run_id !== "string" || typeof d.seq !== "number") continue;
+              if (replied.has(d.run_id) || queue.get(d.run_id)?.state !== "running") continue;
+              const text = readStream(root, d.run_id);
+              let from = sent.get(d.run_id) ?? 0;
+              if (text === null) continue;
+              // a stream file shorter than what was sent no longer extends it: resend from 0 (a `from: 0` delta
+              // replaces the page's text, as after a reconnect)
+              if (text.length < from) from = 0;
+              if (text.length <= from) continue;
+              deltas += deltaFrame({ run_id: d.run_id, reply_to: d.seq, from, text: text.slice(from) });
+              sent.set(d.run_id, text.length);
+            }
+            if (deltas) send(deltas);
+          } catch { stop(); return; }
+          timer = setTimeout(tick, pollMs);
+        };
+        send("retry: 5000\n\n");
+        tick();
+        heartbeat = setInterval(() => send(": heartbeat\n\n"), heartbeatMs);
+      },
+      cancel() { cleanup(); },
+    });
+    return new Response(body, { status: 200, headers: { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" } });
+  }
+
+  /** The press line already recorded for reply `seq`'s proposal `index`, if any (one press per proposal); a line
+   * marked `unqueued` (its submit failed) is no press. */
+  function pressLine(lines: readonly StudioLine[], seq: number, index: number): StudioLine | undefined {
+    return lines.find((l) => l.author === "owner" && l.pressed?.seq === seq && l.pressed?.index === index && l.unqueued !== true);
+  }
+
+  /** Settled shape 11: a cookie `POST /jobs` carrying `proposal` — exactly `{project, job, proposal: {chat, seq, index}}`,
+   * the recorded `queue` proposal matching and not yet pressed — records the press line, then runs the submit with
+   * `{project, job}` only (a non-2xx or thrown submit marks the press line `unqueued: true` in place, its seq kept, so
+   * the proposal is pressable again); anything else 403 ProposalRefused, the lock
+   * held past its wait 503 ChatBusy. */
+  async function proposalJob(raw: Record<string, unknown>): Promise<Response> {
+    const refuse = (detail: string) => fail(403, "ProposalRefused", { detail });
+    for (const k of Object.keys(raw)) if (!["project", "job", "proposal"].includes(k)) return refuse(`unknown field '${k}' (a press is exactly {project, job, proposal})`);
+    const { project, job, proposal } = raw;
+    if (typeof project !== "string" || !project.trim() || typeof job !== "string" || !job.trim()) return refuse("project and job must be non-empty strings");
+    const p = proposal && typeof proposal === "object" && !Array.isArray(proposal) ? proposal as Record<string, unknown> : null;
+    if (!p) return refuse("proposal must be an object {chat, seq, index}");
+    for (const k of Object.keys(p)) if (!["chat", "seq", "index"].includes(k)) return refuse(`unknown field 'proposal.${k}' (allowed: chat, seq, index)`);
+    if (typeof p.chat !== "string" || !p.chat.trim() || typeof p.seq !== "number" || !Number.isInteger(p.seq) || typeof p.index !== "number" || !Number.isInteger(p.index)) {
+      return refuse("proposal must be {chat: <project>, seq: <reply seq>, index: <proposal index>}");
+    }
+    const served = await registryRoot(p.chat, registry);
+    if (!served?.root) return refuse(`'${p.chat}' is not a served project`);
+    const lines = readStudioChat(served.root);
+    const recorded = findProposal(lines, p.seq, p.index);
+    if (!recorded || recorded.kind !== "queue") return refuse(`the studio chat of '${p.chat}' holds no queue proposal at reply ${p.seq} index ${p.index}`);
+    if (recorded.project !== project || recorded.job !== job) return refuse("the body's {project, job} differ from the recorded proposal's");
+    // The press line is recorded here, atomically with the check (under `studio-chat.lock`), before the submit: a
+    // second press (another tab, a reload after a failed client step) finds it and is refused. A submit that does not
+    // answer 2xx marks the line `unqueued` in place: never removed, since a reader may already have streamed its seq
+    // and the next append must not reuse it.
+    const root = served.root, seq = p.seq, index = p.index;
+    let held: Response | StudioLine;
+    try {
+      held = await withStudioLockAsync(root, (): Response | StudioLine => {
+        const prior = pressLine(readStudioChat(root), seq, index);
+        if (prior) return refuse(`reply ${seq} proposal ${index} is already pressed (line ${prior.seq})`);
+        const label = typeof recorded.label === "string" ? recorded.label : "queue";
+        return appendStudioLineHeld(root, { at: new Date(clock()).toISOString(), author: "owner", body: `pressed: ${label}`, pressed: { seq, index, kind: "queue" } });
+      });
+    } catch (e) {
+      if (e instanceof StudioChatBusy) return fail(503, "ChatBusy", { project: p.chat, detail: e.message });
+      throw e;
+    }
+    if (held instanceof Response) return held;
+    const line = held;
+    const rollback = async () => {
+      try { await withStudioLockAsync(root, () => markUnqueuedHeld(root, line.seq)); }
+      catch { /* best effort: the line stays unmarked, so the proposal reads pressed (never a double submit) */ }
+    };
+    let res: Response;
+    try { res = await postJobs(new Request("http://localhost/jobs", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ project, job }) })); }
+    catch (e) { await rollback(); throw e; }
+    if (res.status < 200 || res.status >= 300) await rollback();
+    return res;
   }
 
   function status(): Response {
@@ -1191,14 +1460,24 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
     const readRoute = path === "/" || path === "/jobs" || path === "/status" || path === "/events" || path === "/agents"
       || path === "/board" || path === "/inbox" || path === "/office" || path === "/office/events" || /^\/runs\/[^/]+$/.test(path)
       || path === "/engagements" || /^\/engagements\/[^/]+$/.test(path) || /^\/chat\/[^/]+$/.test(path)
-      || path === "/sandbox/login" || path === "/app" || path.startsWith("/app/");
+      || path === "/sandbox/login" || path === "/chat" || path === "/app" || path.startsWith("/app/");
     if (method === "GET" && readRoute) return await route(req, url, path, method, csrf, "cookie");
     if (method === "POST" && (/^\/runs\/[^/]+\/cancel$/.test(path) || /^\/inbox\/[^/]+\/reply$/.test(path)
       || path === "/engagements" || /^\/engagements\/[^/]+\/input$/.test(path) || /^\/chat\/[^/]+$/.test(path)
-      || path === "/sandbox/login/start" || path === "/sandbox/login/code")) {
+      || path === "/sandbox/login/start" || path === "/sandbox/login/code" || path === "/chat")) {
       const given = await csrfGiven(req);
       if (!given || !safeEqual(given, csrf)) return fail(403, "CsrfRefused");
       return await route(req, url, path, method, undefined, "cookie");
+    }
+    // Story 39.3 (Settled shape 11): a studio chat press may submit a job — only a body carrying `proposal` (else 401, as
+    // before), only with CSRF, only a recorded matching `queue` proposal, and only `{project, job}`.
+    if (method === "POST" && path === "/jobs") {
+      let raw: unknown;
+      try { raw = JSON.parse(await req.clone().text()); } catch { return fail(401, "Unauthorized"); }
+      if (!raw || typeof raw !== "object" || Array.isArray(raw) || !("proposal" in raw)) return fail(401, "Unauthorized");
+      const given = await csrfGiven(req);
+      if (!given || !safeEqual(given, csrf)) return fail(403, "CsrfRefused");
+      return await proposalJob(raw as Record<string, unknown>);
     }
     return fail(401, "Unauthorized");
   }
@@ -1307,6 +1586,12 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
         if (method !== "GET") return allow("GET");
         const id = decodeId(engMatch[1]);
         return id === null || !ENGAGEMENT_ID_RE.test(id) ? fail(400, "BadEngagement", { engagement: id ?? engMatch[1] }) : await readEngagementRoute(url, id);
+      }
+      // Story 39.3: the studio chat (contract 0.1.35 additive), before the engagement chat's `/chat/{id}`.
+      if (path === "/chat") {
+        if (method === "POST") return await postStudioChatRoute(req);
+        if (method === "GET") return await readStudioChatRoute(req, url);
+        return allow("GET, POST");
       }
       // Story 32.2: the engagement's chat (contract 0.1.27 additive).
       const chatMatch = /^\/chat\/([^/]+)$/.exec(path);

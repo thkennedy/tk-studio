@@ -5,7 +5,7 @@ import { hostname } from "node:os";
 import { join, resolve } from "node:path";
 import { cancelRun, mirror, resolveCheckout, restartResumer, studioOps, studioRunFinder, watchCertificate } from "../src/cli";
 import {
-  canonicalPath, checkoutKey, defaultOwnerAlive, END_LEASE_STALE_MS, ENGAGEMENT_CHAT_JOB, lockKeyOf, launchStatusProbe, NOTIFIED_BEFORE, ORPHANED_REASON, processStartTime, Queue, QueueDbMissing, QueueDbPlacementRefused,
+  canonicalPath, checkoutKey, defaultOwnerAlive, END_LEASE_STALE_MS, ENGAGEMENT_CHAT_JOB, STUDIO_CHAT_JOB, lockKeyOf, launchStatusProbe, NOTIFIED_BEFORE, ORPHANED_REASON, processStartTime, Queue, QueueDbMissing, QueueDbPlacementRefused,
   queueDbPath, REQUEUED_REASON, runPowerShell, RunTerminal, selfOwner, type EngineProbe, type Owner, type Probes,
 } from "../src/queue";
 import { filetimeToIso, processCreationTime } from "../src/winproc";
@@ -1810,6 +1810,42 @@ describe("Story 32.2: enqueue's opt-in stack and the per-run payload", () => {
         .run(checkoutKey(fx.checkout), fx.checkout, now, now)).not.toThrow();
       expect(() => q.db.query(`INSERT INTO runs (run_id, job_id, checkout, root, state, created, updated) VALUES ('x2', 'studio-health', ?, ?, 'queued', ?, ?)`)
         .run(checkoutKey(fx.checkout), fx.checkout, now, now)).toThrow(/UNIQUE/);
+    } finally { q.close(); }
+  });
+});
+
+describe("Story 39.3: studio-chat stacks on its own lane", () => {
+  const STUDIO = { id: STUDIO_CHAT_JOB, trigger: "one-shot", target: { skill: "tk-studio-engage", payload: { verb: "studio-reply" } } };
+
+  test("stack mints a studio-chat run behind a live one on the `#studio-chat` lane; the second waits on the first, never on another lock", async () => {
+    const fx = fixture();
+    const lane = `${checkoutKey(fx.checkout)}#studio-chat`;
+    const first = fx.queue.enqueue({ jobId: STUDIO_CHAT_JOB, root: fx.checkout, definition: STUDIO, stack: true, lockCheckout: lane, payload: { project: "p", seq: 1 } });
+    expect(first.minted).toBe(true);
+    expect(lockKeyOf(first.run)).toBe(lane);
+    // another job holds the plain checkout lock: the studio-chat lane never waits on it
+    const other = fx.enqueue();
+    expect((await fx.queue.claim(other.run.run_id, A)).claimed).toBe(true);
+    expect((await fx.queue.claim(first.run.run_id, A)).claimed).toBe(true);
+    const second = fx.queue.enqueue({ jobId: STUDIO_CHAT_JOB, root: fx.checkout, definition: STUDIO, stack: true, lockCheckout: lane, payload: { project: "p", seq: 3 } });
+    expect(second.minted).toBe(true);
+    expect(fx.queue.runPayload(second.run.run_id)).toEqual({ project: "p", seq: 3 });
+    const waited = await fx.queue.claim(second.run.run_id, B);
+    expect(waited).toMatchObject({ claimed: false, why: "lock" });
+    expect(waited).toMatchObject({ holder: { run_id: first.run.run_id } });
+  });
+
+  test("a queue file whose live-run index predates the studio-chat exclusion is widened on open", () => {
+    const fx = fixture();
+    fx.queue.db.exec("DROP INDEX runs_one_live; CREATE UNIQUE INDEX runs_one_live ON runs (job_id, checkout) WHERE state IN ('queued','running','paused','external') AND job_id <> 'engagement-chat'");
+    fx.queue.close();
+    const q = track(new Queue(fx.db, fakeProbes(new Set([A.pid])).probes));
+    try {
+      const sql = (q.db.query("SELECT sql FROM sqlite_master WHERE name = 'runs_one_live'").get() as { sql: string }).sql;
+      expect(sql).toContain(`'${ENGAGEMENT_CHAT_JOB}'`);
+      expect(sql).toContain(`'${STUDIO_CHAT_JOB}'`);
+      q.enqueue({ jobId: STUDIO_CHAT_JOB, root: fx.checkout, definition: STUDIO, stack: true });
+      expect(q.enqueue({ jobId: STUDIO_CHAT_JOB, root: fx.checkout, definition: STUDIO, stack: true }).minted).toBe(true);
     } finally { q.close(); }
   });
 });

@@ -2682,3 +2682,374 @@ describe("Story 39.2: GET /sandbox/login, POST /sandbox/login/start and /code (c
     expect(fx.queue.serviceEvents("sandbox-login").map((e) => e.detail!.result ?? "open")).toEqual(["open", "failed"]);
   });
 });
+
+describe("Story 39.3: the studio chat (contract 0.1.35 additive)", () => {
+  const SECRET = "s".repeat(48);
+  const TRACK = join("_bmad-output", "tracking");
+  const STUDIO_JOB = {
+    job_schema_version: 1, id: "studio-chat", trigger: "one-shot", target: { skill: "tk-studio-engage", payload: { verb: "studio-reply" } },
+    requires: { tier: "host" }, guards: { max_turns: 40, max_wall_clock_seconds: 600 }, stop: { until: "9999-12-31T23:59:59Z" },
+  };
+  function studio(o: Partial<ApiDeps> = {}) {
+    const root = tempDir("tk-sup-studio-root-");
+    mkdirSync(join(root, ".bmad-loop"), { recursive: true });
+    writeFileSync(join(root, ".bmad-loop", "routing.current.json"), JSON.stringify({ planner: { model: "claude-opus-5-5", effort: "high" } }));
+    const alive = new Set<number>();
+    const queue = track(new Queue(join(tempDir("tk-sup-studio-q-"), "q.db"), { ownerAlive: (w) => alive.has(w.pid), engineLive: async () => ({ live: false }) }));
+    let t = Date.parse("2026-11-10T05:00:00.000Z");
+    const submitted: SubmitBody[] = [];
+    const handler = createApi({
+      queue, token: TOKEN, session: { secret: SECRET }, now: () => (t += 1000),
+      submit: async (b) => { submitted.push(b); return { ok: true, run_id: "run-press-1", state: "queued" }; },
+      registry: async () => ({ projects: { p: { root } } }), env: { TK_STUDIO_HOME: tempDir("tk-sup-studio-home-") },
+      board: async (project) => ({ ok: true, project, built_at: "x", plan: null, epics: [], triage: {} } as any),
+      inbox: async () => ({ generated_at: "2026-11-10T00:00:00Z", items: [{ key: "TKS-1" }] } as any),
+      studioChat: { resolveJob: async (r) => ({ projectId: "p", root: r, definition: structuredClone(STUDIO_JOB), target: "skill" }) },
+      pollMs: 20, heartbeatMs: 40,
+      ...o,
+    });
+    const cookie = `${SESSION_COOKIE}=${signSession(SECRET, "token", Date.now())}`;
+    const csrf = csrfToken(SECRET, cookie.slice(SESSION_COOKIE.length + 1));
+    const call = (method: string, path: string, headers: Record<string, string> = { authorization: `Bearer ${TOKEN}` }, body?: unknown) =>
+      handler(new Request(`${BASE}${path}`, { method, headers: { ...(body !== undefined ? { "content-type": "application/json" } : {}), ...headers }, ...(body !== undefined ? { body: typeof body === "string" ? body : JSON.stringify(body) } : {}) }));
+    const chatLines = () => { try { return readFileSync(join(root, TRACK, "studio-chat.jsonl"), "utf-8").trim().split("\n").map((l) => JSON.parse(l)); } catch { return []; } };
+    const appendLine = (line: Record<string, unknown>) => {
+      const path = join(root, TRACK, "studio-chat.jsonl");
+      mkdirSync(join(root, TRACK), { recursive: true });
+      writeFileSync(path, (existsSync(path) ? readFileSync(path, "utf-8") : "") + JSON.stringify(line) + "\n");
+    };
+    const studioRuns = () => queue.runs().filter((r) => r.job_id === "studio-chat");
+    return { root, queue, alive, handler, call, cookie, csrf, chatLines, appendLine, studioRuns, submitted };
+  }
+  const reply = (seq: number, replyTo: number, runId: string, proposals: Record<string, unknown>[] = []) =>
+    ({ seq, at: "2026-11-10T05:01:00.000Z", author: "planner", body: "Two runs are live.", run_id: runId, reply_to: replyTo, proposals });
+
+  test("post: the owner line appended, one studio-chat run (host, the planner leg, stacked on the #studio-chat lane), the reads file, chat-queued, 200 {ok, project, seq, run_id, behind: null, note: null}", async () => {
+    const fx = studio();
+    const res = await fx.call("POST", "/chat", undefined, { project: "p", text: "what is running" });
+    expect(res.status).toBe(200);
+    const [run] = fx.studioRuns();
+    expect(await res.json()).toEqual({ ok: true, project: "p", seq: 1, run_id: run!.run_id, behind: null, note: null });
+    expect(fx.chatLines()).toEqual([{ seq: 1, at: fx.chatLines()[0].at, author: "owner", body: "what is running" }]);
+    expect(run).toMatchObject({ state: "queued", tier: "host", model: "claude-opus-5-5", effort: "high", project_id: "p" });
+    expect(run!.lock_checkout!.endsWith("#studio-chat")).toBe(true);
+    expect(fx.queue.runPayload(run!.run_id)).toEqual({ project: "p", project_root: fx.root, seq: 1 });
+    expect(fx.queue.serviceEvents("chat-queued").map((e) => e.detail)).toEqual([
+      { chat: "studio", project: "p", seq: 1, run_id: run!.run_id, model: "claude-opus-5-5", effort: "high", behind: null },
+    ]);
+    const reads = JSON.parse(readFileSync(join(fx.root, TRACK, "studio-chat-reads", "1.json"), "utf-8"));
+    expect(Object.keys(reads).sort()).toEqual(["at", "board", "inbox", "office", "project", "runs", "status"]);
+    expect(reads.project).toBe("p");
+    expect(reads.inbox).toEqual({ generated_at: "2026-11-10T00:00:00Z", items: [{ key: "TKS-1" }] });
+    expect(reads.board).toMatchObject({ project: "p" });
+    expect(Object.keys(reads.office).sort()).toEqual(["agents", "last_run", "runs"]);
+    // composed before the lock: this turn's own run is not in it yet; the next turn's reads show it
+    expect(reads.status).toEqual({ counts: {}, live: [] });
+    expect(reads.runs).toEqual([]);
+    expect(JSON.stringify(reads)).not.toContain(TOKEN);
+    await fx.call("POST", "/chat", undefined, { project: "p", text: "and now?" });
+    const next = JSON.parse(readFileSync(join(fx.root, TRACK, "studio-chat-reads", "2.json"), "utf-8"));
+    expect(next.status.live.map((r: any) => r.run_id)).toEqual([run!.run_id]);
+    expect(next.runs[0]).toMatchObject({ run_id: run!.run_id, job_id: "studio-chat", state: "queued", studio_run_id: null, cost_usd: null });
+  });
+
+  test("queueing: a second line while the first is pending answers behind {seq, run_id} and the note; the run waits on its lane", async () => {
+    const fx = studio();
+    const first = await (await fx.call("POST", "/chat", undefined, { project: "p", text: "  plan   an epic\nfor the   export pipeline and the nightly report  " })).json() as any;
+    const me: Owner = { pid: 930001, host: hostname(), nonce: "studio-api-a" };
+    fx.alive.add(me.pid);
+    expect((await fx.queue.claim(first.run_id, me)).claimed).toBe(true);
+    const second = await (await fx.call("POST", "/chat", undefined, { project: "p", text: "what is running" })).json() as any;
+    expect(second).toMatchObject({ ok: true, seq: 2, behind: { seq: 1, run_id: first.run_id } });
+    expect(second.note).toBe("Queued behind the reply to 'plan an epic for the export pipeline and…'");
+    expect(fx.studioRuns()).toHaveLength(2);
+    expect(fx.queue.serviceEvents("chat-queued").at(-1)!.detail).toMatchObject({ seq: 2, behind: first.run_id });
+    expect(await fx.queue.claim(second.run_id, me)).toMatchObject({ claimed: false, why: "lock" });
+    // once the first is answered, a third line queues behind the second only
+    fx.appendLine(reply(3, 1, first.run_id));
+    const third = await (await fx.call("POST", "/chat", undefined, { project: "p", text: "and now?" })).json() as any;
+    expect(third).toMatchObject({ seq: 4, behind: { seq: 2, run_id: second.run_id }, note: "Queued behind the reply to 'what is running'" });
+  });
+
+  test("LineTooLong at 4,001 code points (by name, nothing appended); 4,000 accepted; schema refusals", async () => {
+    const fx = studio();
+    const tooLong = await fx.call("POST", "/chat", undefined, { project: "p", text: "😀".repeat(4001) });
+    expect(tooLong.status).toBe(400);
+    expect(await tooLong.json()).toMatchObject({ ok: false, error: "LineTooLong", limit: 4000, length: 4001 });
+    expect(fx.chatLines()).toEqual([]);
+    expect(fx.studioRuns()).toHaveLength(0);
+    const ok = await fx.call("POST", "/chat", undefined, { project: "p", text: "😀".repeat(4000) });
+    expect(ok.status).toBe(200);
+    for (const body of [{ project: "p" }, { project: "p", text: "   " }, { project: "p", text: "x", pressed: { seq: 1, index: 0 } }, { project: "p", text: "x", extra: 1 }, { text: "x" }]) {
+      const res = await fx.call("POST", "/chat", undefined, body);
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as any).error).toBe("SchemaError");
+    }
+    expect((await fx.call("POST", "/chat", undefined, "{nope")).status).toBe(400);
+    expect(((await (await fx.call("POST", "/chat", undefined, { project: "q", text: "x" })).json()) as any).error).toBe("UnknownProject");
+    expect((await fx.call("PUT", "/chat")).status).toBe(405);
+  });
+
+  test("the cookie: GET reads, POST needs CSRF (403 CsrfRefused without), the bearer needs none", async () => {
+    const fx = studio();
+    const noCsrf = await fx.call("POST", "/chat", { cookie: fx.cookie }, { project: "p", text: "hello" });
+    expect(noCsrf.status).toBe(403);
+    expect(await noCsrf.json()).toEqual({ ok: false, error: "CsrfRefused" });
+    expect(fx.chatLines()).toEqual([]);
+    const withCsrf = await fx.call("POST", "/chat", { cookie: fx.cookie, "x-csrf-token": fx.csrf }, { project: "p", text: "hello" });
+    expect(withCsrf.status).toBe(200);
+    const read = await fx.call("GET", "/chat?project=p", { cookie: fx.cookie });
+    expect(read.status).toBe(200);
+    expect(await read.json()).toMatchObject({ ok: true, project: "p", since: 0, last_seq: 1, lines: [{ seq: 1, author: "owner", body: "hello" }] });
+    expect((await fx.call("POST", "/chat", {}, { project: "p", text: "x" })).status).toBe(401);
+  });
+
+  test("the press: a press line `pressed: <label>` with run_id null; UnknownProposal; ProposalNotYet for the 39.7 kinds; a queue proposal 409 ProposalViaJobs, nothing written", async () => {
+    const fx = studio();
+    await fx.call("POST", "/chat", undefined, { project: "p", text: "what is running" });
+    const runId = fx.studioRuns()[0]!.run_id;
+    fx.appendLine(reply(2, 1, runId, [
+      { kind: "queue", label: "Queue run-epic-38", project: "p", job: "run-epic-38" },
+      { kind: "stop-after-story", label: "Stop after this story" },
+      { kind: "open", label: "Open the board", route: "/app/board/p" },
+    ]));
+    const viaJobs = await fx.call("POST", "/chat", undefined, { project: "p", pressed: { seq: 2, index: 0 } });
+    expect(viaJobs.status).toBe(409);
+    expect(await viaJobs.json()).toMatchObject({ ok: false, error: "ProposalViaJobs", project: "p", seq: 2, index: 0, kind: "queue" });
+    expect(fx.chatLines()).toHaveLength(2);
+    const pressed = await fx.call("POST", "/chat", undefined, { project: "p", pressed: { seq: 2, index: 2 } });
+    expect(pressed.status).toBe(200);
+    expect(await pressed.json()).toEqual({ ok: true, project: "p", seq: 3, run_id: null, behind: null, note: null });
+    expect(fx.chatLines()[2]).toMatchObject({ seq: 3, author: "owner", body: "pressed: Open the board", pressed: { seq: 2, index: 2, kind: "open" } });
+    expect(fx.studioRuns()).toHaveLength(1);
+    // the queue proposal is still pressable through the cookie POST /jobs gate (no press line blocks it)
+    const gate = await fx.call("POST", "/jobs", { cookie: fx.cookie, "x-csrf-token": fx.csrf }, { project: "p", job: "run-epic-38", proposal: { chat: "p", seq: 2, index: 0 } });
+    expect(gate.status).toBe(200);
+    expect(fx.submitted).toEqual([{ project: "p", job: "run-epic-38" }]);
+    expect(fx.chatLines()[3]).toMatchObject({ seq: 4, pressed: { seq: 2, index: 0, kind: "queue" } });
+    const unknown = await fx.call("POST", "/chat", undefined, { project: "p", pressed: { seq: 2, index: 5 } });
+    expect(unknown.status).toBe(404);
+    expect(((await unknown.json()) as any).error).toBe("UnknownProposal");
+    expect((await fx.call("POST", "/chat", undefined, { project: "p", pressed: { seq: 1, index: 0 } })).status).toBe(404);
+    const notYet = await fx.call("POST", "/chat", undefined, { project: "p", pressed: { seq: 2, index: 1 } });
+    expect(notYet.status).toBe(409);
+    expect(await notYet.json()).toMatchObject({ ok: false, error: "ProposalNotYet", kind: "stop-after-story" });
+    expect(fx.chatLines()).toHaveLength(4);
+  });
+
+  test("a duplicate press of the same {seq, index} is 409 ProposalAlreadyPressed and records no second press line", async () => {
+    const fx = studio();
+    await fx.call("POST", "/chat", undefined, { project: "p", text: "what is running" });
+    fx.appendLine(reply(2, 1, fx.studioRuns()[0]!.run_id, [
+      { kind: "open", label: "Open the office", route: "/app/office" },
+      { kind: "open", label: "Open the board", route: "/app/board/p" },
+    ]));
+    expect((await fx.call("POST", "/chat", undefined, { project: "p", pressed: { seq: 2, index: 0 } })).status).toBe(200);
+    const again = await fx.call("POST", "/chat", undefined, { project: "p", pressed: { seq: 2, index: 0 } });
+    expect(again.status).toBe(409);
+    expect(await again.json()).toMatchObject({ ok: false, error: "ProposalAlreadyPressed", project: "p", seq: 2, index: 0, pressed_seq: 3 });
+    expect(fx.chatLines()).toHaveLength(3);
+    // another proposal of the same reply is still pressable
+    expect((await fx.call("POST", "/chat", undefined, { project: "p", pressed: { seq: 2, index: 1 } })).status).toBe(200);
+    expect(fx.chatLines()).toHaveLength(4);
+  });
+
+  test("GET /chat JSON: since, last_seq, lines; ProjectRequired; a bad since", async () => {
+    const fx = studio();
+    for (const m of ["one", "two"]) await fx.call("POST", "/chat", undefined, { project: "p", text: m });
+    expect(await (await fx.call("GET", "/chat?project=p&since=1")).json()).toMatchObject({ ok: true, project: "p", since: 1, last_seq: 2, lines: [{ seq: 2, body: "two" }] });
+    expect(((await (await fx.call("GET", "/chat")).json()) as any).error).toBe("ProjectRequired");
+    expect(((await (await fx.call("GET", "/chat?project=p&since=x")).json()) as any).error).toBe("SchemaError");
+    expect(((await (await fx.call("GET", "/chat?project=q")).json()) as any).error).toBe("UnknownProject");
+  });
+
+  test("the stream: chat frames, then a chat-delta frame from a running turn's stream file (no id:), more from where it left off, from 0 when the file no longer extends it, none once its reply landed", async () => {
+    const fx = studio();
+    await fx.call("POST", "/chat", undefined, { project: "p", text: "what is running" });
+    const runId = fx.studioRuns()[0]!.run_id;
+    const me: Owner = { pid: 930002, host: hostname(), nonce: "studio-api-b" };
+    fx.alive.add(me.pid);
+    expect((await fx.queue.claim(runId, me)).claimed).toBe(true);
+    const streamDir = join(fx.root, TRACK, "studio-chat-stream");
+    mkdirSync(streamDir, { recursive: true });
+    writeFileSync(join(streamDir, `${runId}.txt`), "Two runs ");
+    const ctl = new AbortController();
+    const res = await fx.handler(new Request(`${BASE}/chat?project=p`, { headers: { authorization: `Bearer ${TOKEN}`, accept: "text/event-stream" }, signal: ctl.signal }));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("text/event-stream");
+    const reader = res.body!.getReader();
+    const dec = new TextDecoder();
+    let text = "";
+    const readUntil = async (needle: string) => {
+      const deadline = Date.now() + 5000;
+      while (!text.includes(needle) && Date.now() < deadline) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        text += dec.decode(value);
+      }
+    };
+    await readUntil("event: chat-delta");
+    expect(text.startsWith("retry: 5000\n\n")).toBe(true);
+    expect(text).toContain(`id: 1\nevent: chat\ndata: ${JSON.stringify(fx.chatLines()[0])}\n\n`);
+    expect(text).toContain(`event: chat-delta\ndata: ${JSON.stringify({ run_id: runId, reply_to: 1, from: 0, text: "Two runs " })}\n\n`);
+    expect(text).not.toMatch(/id: [^\n]*\nevent: chat-delta/);
+    writeFileSync(join(streamDir, `${runId}.txt`), "Two runs are live.");
+    await readUntil(`"from":9`);
+    expect(text).toContain(`event: chat-delta\ndata: ${JSON.stringify({ run_id: runId, reply_to: 1, from: 9, text: "are live." })}\n\n`);
+    // a stream file shorter than what was sent no longer extends it: resent from 0 (the page replaces its text)
+    writeFileSync(join(streamDir, `${runId}.txt`), "Rewritten");
+    await readUntil(`"text":"Rewritten"`);
+    expect(text).toContain(`event: chat-delta\ndata: ${JSON.stringify({ run_id: runId, reply_to: 1, from: 0, text: "Rewritten" })}\n\n`);
+    fx.appendLine(reply(2, 1, runId));
+    await readUntil("id: 2\n");
+    const at = text.length;
+    writeFileSync(join(streamDir, `${runId}.txt`), "Two runs are live. More text after the record.");
+    await readUntil(": heartbeat\n\n");
+    await Bun.sleep(80);
+    const { value } = await Promise.race([reader.read(), Bun.sleep(100).then(() => ({ value: undefined }))]) as { value?: Uint8Array };
+    if (value) text += dec.decode(value);
+    expect(text.slice(at)).not.toContain("chat-delta");
+    ctl.abort();
+    await reader.cancel();
+  });
+
+  test("the cookie POST /jobs gate: admitted with a matching recorded queue proposal and CSRF (the submit sees {project, job} only); ProposalRefused on a mismatch or an extra field; 401 without `proposal`", async () => {
+    const fx = studio();
+    await fx.call("POST", "/chat", undefined, { project: "p", text: "queue 38" });
+    fx.appendLine(reply(2, 1, fx.studioRuns()[0]!.run_id, [
+      { kind: "queue", label: "Queue run-epic-38", project: "p", job: "run-epic-38" },
+      { kind: "open", label: "Open the board", route: "/app/board/p" },
+    ]));
+    const cookieCall = (body: unknown, csrf = true) => fx.call("POST", "/jobs", { cookie: fx.cookie, ...(csrf ? { "x-csrf-token": fx.csrf } : {}) }, body);
+    const press = { project: "p", job: "run-epic-38", proposal: { chat: "p", seq: 2, index: 0 } };
+    const ok = await cookieCall(press);
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toMatchObject({ ok: true, run_id: "run-press-1" });
+    expect(fx.submitted).toEqual([{ project: "p", job: "run-epic-38" }]);
+    for (const body of [
+      { ...press, job: "run-epic-39" },
+      { ...press, proposal: { chat: "p", seq: 2, index: 1 } },
+      { ...press, proposal: { chat: "p", seq: 9, index: 0 } },
+      { ...press, proposal: { chat: "q", seq: 2, index: 0 } },
+      { ...press, tier: "sbx" },
+      { ...press, model: "claude-opus-5-5" },
+      { ...press, proposal: { chat: "p", seq: 2, index: 0, extra: true } },
+    ]) {
+      const res = await cookieCall(body);
+      expect(res.status).toBe(403);
+      expect(((await res.json()) as any).error).toBe("ProposalRefused");
+    }
+    expect((await cookieCall(press, false)).status).toBe(403);
+    const plain = await cookieCall({ project: "p", job: "run-epic-38" });
+    expect(plain.status).toBe(401);
+    expect(await plain.json()).toEqual({ ok: false, error: "Unauthorized" });
+    expect(fx.submitted).toHaveLength(1);
+    // the bearer's POST /jobs is unchanged: `proposal` is an unknown field there
+    const bearer = await fx.call("POST", "/jobs", undefined, press);
+    expect(bearer.status).toBe(400);
+    expect(((await bearer.json()) as any).error).toBe("SchemaError");
+  });
+
+  test("the cookie POST /jobs gate refuses a proposal already pressed: 403 ProposalRefused naming 'already pressed', no second submit", async () => {
+    const fx = studio();
+    await fx.call("POST", "/chat", undefined, { project: "p", text: "queue 38" });
+    fx.appendLine(reply(2, 1, fx.studioRuns()[0]!.run_id, [{ kind: "queue", label: "Queue run-epic-38", project: "p", job: "run-epic-38" }]));
+    const press = { project: "p", job: "run-epic-38", proposal: { chat: "p", seq: 2, index: 0 } };
+    const cookieCall = () => fx.call("POST", "/jobs", { cookie: fx.cookie, "x-csrf-token": fx.csrf }, press);
+    expect((await cookieCall()).status).toBe(200);
+    // the gate recorded the press line itself: a later `POST /chat {pressed}` for it is the duplicate
+    const dup = await fx.call("POST", "/chat", { cookie: fx.cookie, "x-csrf-token": fx.csrf }, { project: "p", pressed: { seq: 2, index: 0 } });
+    expect(dup.status).toBe(409);
+    expect(((await dup.json()) as any).error).toBe("ProposalAlreadyPressed");
+    const second = await cookieCall();
+    expect(second.status).toBe(403);
+    const body = await second.json() as any;
+    expect(body.error).toBe("ProposalRefused");
+    expect(body.detail).toContain("already pressed");
+    expect(fx.submitted).toHaveLength(1);
+    expect(fx.chatLines().filter((l: any) => l.pressed)).toHaveLength(1);
+  });
+
+  test("the cookie POST /jobs gate records the press line itself, under the lock, before the submit", async () => {
+    let fx!: ReturnType<typeof studio>;
+    let seenAtSubmit: unknown[] = [];
+    fx = studio({ submit: async (b) => { seenAtSubmit = fx.chatLines(); fx.submitted.push(b); return { ok: true, run_id: "run-press-1", state: "queued" }; } });
+    await fx.call("POST", "/chat", undefined, { project: "p", text: "queue 38" });
+    fx.appendLine(reply(2, 1, fx.studioRuns()[0]!.run_id, [{ kind: "queue", label: "Queue run-epic-38", project: "p", job: "run-epic-38" }]));
+    const res = await fx.call("POST", "/jobs", { cookie: fx.cookie, "x-csrf-token": fx.csrf }, { project: "p", job: "run-epic-38", proposal: { chat: "p", seq: 2, index: 0 } });
+    expect(res.status).toBe(200);
+    const line = { seq: 3, at: fx.chatLines()[2].at, author: "owner", body: "pressed: Queue run-epic-38", pressed: { seq: 2, index: 0, kind: "queue" } };
+    expect(fx.chatLines()[2]).toEqual(line);
+    expect(seenAtSubmit.at(-1)).toEqual(line);
+    expect(existsSync(join(fx.root, TRACK, "studio-chat.lock"))).toBe(false);
+  });
+
+  test("the cookie POST /jobs gate marks its press line unqueued in place when the submit is not 2xx: the seq is never reused, the proposal stays pressable", async () => {
+    let fail = true;
+    const submitted: unknown[] = [];
+    const fx = studio({ submit: async (b) => { if (fail) throw new Error("UnknownJob: run-epic-38"); submitted.push(b); return { ok: true, run_id: "run-press-1", state: "queued" }; } });
+    await fx.call("POST", "/chat", undefined, { project: "p", text: "queue 38" });
+    fx.appendLine(reply(2, 1, fx.studioRuns()[0]!.run_id, [{ kind: "queue", label: "Queue run-epic-38", project: "p", job: "run-epic-38" }]));
+    const press = { project: "p", job: "run-epic-38", proposal: { chat: "p", seq: 2, index: 0 } };
+    const cookieCall = () => fx.call("POST", "/jobs", { cookie: fx.cookie, "x-csrf-token": fx.csrf }, press);
+    const refused = await cookieCall();
+    expect(refused.status).toBeGreaterThanOrEqual(400);
+    expect(fx.chatLines()).toHaveLength(3);
+    expect(fx.chatLines()[2]).toEqual({ seq: 3, at: fx.chatLines()[2].at, author: "owner", body: "pressed: Queue run-epic-38", pressed: { seq: 2, index: 0, kind: "queue" }, unqueued: true });
+    expect(existsSync(join(fx.root, TRACK, "studio-chat.lock"))).toBe(false);
+    // the next line takes seq 4: seq 3 (which a stream may already have sent) is never reused
+    const next = await fx.call("POST", "/chat", undefined, { project: "p", text: "why did that fail?" });
+    expect(((await next.json()) as any).seq).toBe(4);
+    // a marked press line is no press: POST /chat {pressed} still names the gate, and the gate admits the re-press
+    const viaChat = await fx.call("POST", "/chat", undefined, { project: "p", pressed: { seq: 2, index: 0 } });
+    expect(((await viaChat.json()) as any).error).toBe("ProposalViaJobs");
+    fail = false;
+    expect((await cookieCall()).status).toBe(200);
+    expect(submitted).toHaveLength(1);
+    expect(fx.chatLines().filter((l: any) => l.pressed).map((l: any) => [l.seq, l.unqueued ?? false])).toEqual([[3, true], [5, false]]);
+    // and pressed once more, it is refused
+    expect((await cookieCall()).status).toBe(403);
+  });
+
+  test("the cookie POST /jobs gate: two presses together submit once (the second 403 ProposalRefused)", async () => {
+    const fx = studio({ submit: async (b) => { await Bun.sleep(30); fx.submitted.push(b); return { ok: true, run_id: "run-press-1", state: "queued" }; } });
+    await fx.call("POST", "/chat", undefined, { project: "p", text: "queue 38" });
+    fx.appendLine(reply(2, 1, fx.studioRuns()[0]!.run_id, [{ kind: "queue", label: "Queue run-epic-38", project: "p", job: "run-epic-38" }]));
+    const press = { project: "p", job: "run-epic-38", proposal: { chat: "p", seq: 2, index: 0 } };
+    const cookieCall = () => fx.call("POST", "/jobs", { cookie: fx.cookie, "x-csrf-token": fx.csrf }, press);
+    const [a, b] = await Promise.all([cookieCall(), cookieCall()]);
+    expect([a.status, b.status].sort()).toEqual([200, 403]);
+    expect(((await (a.status === 403 ? a : b).json()) as any).detail).toContain("already pressed");
+    expect(fx.submitted).toHaveLength(1);
+    expect(fx.chatLines().filter((l: any) => l.pressed)).toHaveLength(1);
+  });
+
+  test("the cookie POST /jobs gate: studio-chat.lock held past the wait is 503 ChatBusy, nothing submitted, no press line", async () => {
+    const fx = studio();
+    await fx.call("POST", "/chat", undefined, { project: "p", text: "queue 38" });
+    fx.appendLine(reply(2, 1, fx.studioRuns()[0]!.run_id, [{ kind: "queue", label: "Queue run-epic-38", project: "p", job: "run-epic-38" }]));
+    writeFileSync(join(fx.root, TRACK, "studio-chat.lock"), "");
+    const res = await fx.call("POST", "/jobs", { cookie: fx.cookie, "x-csrf-token": fx.csrf }, { project: "p", job: "run-epic-38", proposal: { chat: "p", seq: 2, index: 0 } });
+    expect(res.status).toBe(503);
+    expect(((await res.json()) as any).error).toBe("ChatBusy");
+    expect(fx.submitted).toEqual([]);
+    expect(fx.chatLines()).toHaveLength(2);
+  }, 15_000);
+
+  test("a failed mint leaves no owner line and no reads file: 500 ChatQueueFailed; a resolve failure 500 ChatJobUnresolved", async () => {
+    const fx = studio();
+    (fx.queue as any).enqueue = () => { throw new Error(`database is locked ${TOKEN}`); };
+    const res = await fx.call("POST", "/chat", undefined, { project: "p", text: "hello" });
+    expect(res.status).toBe(500);
+    const body = await res.json() as any;
+    expect(body.error).toBe("ChatQueueFailed");
+    expect(JSON.stringify(body)).not.toContain(TOKEN);
+    expect(fx.chatLines()).toEqual([]);
+    expect(existsSync(join(fx.root, TRACK, "studio-chat-reads", "1.json"))).toBe(false);
+    const broken = studio({ studioChat: { resolveJob: async () => { throw new Error("resolve: unknown job studio-chat"); } } });
+    const r2 = await broken.call("POST", "/chat", undefined, { project: "p", text: "hello" });
+    expect(r2.status).toBe(500);
+    expect(((await r2.json()) as any).error).toBe("ChatJobUnresolved");
+    expect(broken.chatLines()).toEqual([]);
+  });
+});

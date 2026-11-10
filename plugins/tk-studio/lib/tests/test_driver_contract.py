@@ -1058,12 +1058,13 @@ class DriverContractTestCase(unittest.TestCase):
         manifest = json.loads((PLUGIN_ROOT / "contracts" / "conformance"
                                / "manifest.json").read_text(encoding="utf-8"))
         drives = manifest["surfaces"]["tk-studio-engage"]["drives"]
-        # relaxed only to admit Story 35.6's closeout drive after it
+        # relaxed only to admit Story 35.6's closeout drive after it (and,
+        # Story 39.3, the studio chat's UnknownLine drive after that)
         self.assertEqual([(d["argv"][:2], d["expect"], d["status"],
                            d["marker"]) for d in drives[:1]],
                          [(["lib/engage.py", "reply"], "status-block",
                            "blocked", "UnknownEngagement")])
-        self.assertEqual([(d["assertion"], d["argv"], d["expect"]) for d in drives[1:]],
+        self.assertEqual([(d["assertion"], d["argv"], d["expect"]) for d in drives[1:2]],
                          [("headless-clean", ["contracts/conformance/e2e_closeout_media.py"], "ok")])
 
     # --- Story 32.3: the same 0.1.27 entry adds the clarifying questions —
@@ -4124,13 +4125,15 @@ class DriverContractTestCase(unittest.TestCase):
         self.assertEqual(header.count("0.1.35 (Story 39.2, additive)"), 1)
         self.assertLess(header.index("0.1.35 (Story 39.1, additive)"),
                         header.index("0.1.35 (Story 39.2, additive)"))
-        clause = " ".join(header[header.index("0.1.35 (Story 39.2, additive)"):].split())
+        # bounded at 39.3's clause (Story 39.3 re-bound this slice)
+        clause = " ".join(header[header.index("0.1.35 (Story 39.2, additive)"):
+                                 header.index("0.1.35 (Story 39.3, additive)")].split())
         for phrase in ("the sandbox login's clock", "`GET /sandbox/login`", "`POST /sandbox/login/start`",
                        "`POST /sandbox/login/code`", "the `sandbox-login` lease and event",
                        "the `sandbox-login-check` event", "the claim gate's `sandbox-login:<sb>` refusal",
                        "`track.py block|close --source owner --task sandbox-login`"):
             self.assertIn(phrase, clause)
-        self.assertTrue(clause.endswith("— additive) |"))
+        self.assertTrue(clause.endswith("— additive;"))
         rulings = next(line for line in self.text.splitlines() if line.startswith("| Story / rulings"))
         self.assertRegex(rulings, r"Story 38\.7 \(Epic 38\), Story 39\.1(, Story 39\.\d+)* \(Epic 39\)")
         self.assertIn("Story 39.2", rulings)
@@ -4138,8 +4141,8 @@ class DriverContractTestCase(unittest.TestCase):
         title = "**0.1.35 (Story 39.2, additive).**"
         self.assertEqual(flat.count(title), 1)
         self.assertLess(flat.index("**0.1.35 (Story 39.1, additive).**"), flat.index(title))
-        note = flat[flat.index(title):]
-        note = note[:note.index("## 8. Conformance")]
+        # bounded at 39.3's paragraph (Story 39.3 re-bound this slice)
+        note = flat[flat.index(title):flat.index("**0.1.35 (Story 39.3, additive).**")]
         subs = ("**The read:**", "**The renewal:**", "**The lease and the events:**", "**The Task:**",
                 "**The serve process:**")
         self.assertEqual([note.index(s) for s in subs], sorted(note.index(s) for s in subs))
@@ -4187,6 +4190,74 @@ class DriverContractTestCase(unittest.TestCase):
         row = next(line for line in runbook.splitlines() if "(hole 69)" in line)
         self.assertIn("; fixed (Story 39.2): the clock and the renewal are on the Settings page, `/app/settings`", row)
         self.assertIn("TKSTUDIO-233 (the renewal due before 2026-11-24 10:00Z) is the last manual one |", row)
+
+    def test_0_1_35_story_39_3_the_studio_chat(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.35**", header)
+        self.assertNotIn("**0.1.36**", header)
+        self.assertEqual(header.count("0.1.35 (Story 39.3, additive)"), 1)
+        self.assertLess(header.index("0.1.35 (Story 39.2, additive)"),
+                        header.index("0.1.35 (Story 39.3, additive)"))
+        clause = " ".join(header[header.index("0.1.35 (Story 39.3, additive)"):].split())
+        for phrase in ("the studio chat", "`POST /chat`", "`GET /chat` (`chat-delta`)",
+                       "`chat-queued` `{chat: \"studio\", …}`", "the `studio-chat` job", "`studio-reply`",
+                       "the cookie's proposal-bound `POST /jobs`"):
+            self.assertIn(phrase, clause)
+        self.assertTrue(clause.endswith("— additive) |"))
+        rulings = next(line for line in self.text.splitlines() if line.startswith("| Story / rulings"))
+        self.assertRegex(rulings, r"Story 38\.7 \(Epic 38\), Story 39\.1(, Story 39\.\d+)* \(Epic 39\)")
+        self.assertIn("Story 39.3", rulings)
+        flat = " ".join(self.text.split())
+        title = "**0.1.35 (Story 39.3, additive).**"
+        self.assertEqual(flat.count(title), 1)
+        self.assertLess(flat.index("**0.1.35 (Story 39.2, additive).**"), flat.index(title))
+        note = flat[flat.index(title):]
+        note = note[:note.index("## 8. Conformance")]
+        subs = ("**The job:**", "**The record:**", "**The routes:**", "**The stream:**", "**The press:**",
+                "**The session:**", "**The serve process:**")
+        self.assertEqual([note.index(s) for s in subs], sorted(note.index(s) for s in subs))
+        for phrase in ("`stop.until: 9999-12-31T23:59:59Z` (never `max_runs`: each line is one run of the job)",
+                       "`--output-format stream-json --verbose --include-partial-messages`",
+                       "`{seq, at, author: \"planner\", body, run_id, reply_to, proposals[]}`",
+                       "`400 LineTooLong", "`Queued behind the reply to '<excerpt>'`", "`event: chat-delta`",
+                       "`{run_id, reply_to, from, text}`",
+                       "`{chat: \"studio\", project, seq, run_id, model, effort, behind}`",
+                       "`ProposalNotYet`", "`409 ProposalAlreadyPressed", "`403 ProposalRefused",
+                       "`<lock checkout>#studio-chat`",
+                       "`notify-skipped`", "`studio-chat-reads/<seq>.json`",
+                       "`{\"ok\": true, **orchestrate.resolve(root)}`",
+                       "Every other field, kind and route is unchanged.",
+                       # the review pass: the gate records a queue press; an answer note holds no decision line
+                       "the cookie `POST /jobs` press records the press line itself",
+                       "appends the press line under `studio-chat.lock` atomically with that check",
+                       "marks the press line `unqueued: true` in place when the submit is not 2xx or throws",
+                       "a marked line is no press, so the proposal is pressable again), so two presses submit once",
+                       # the follow-up review pass: a queue press is the gate's only; a seq is never reused
+                       "then a `queue` proposal `409 ProposalViaJobs {project, seq, index, kind, detail}`, nothing written",
+                       "a `queue` press line whose submit failed adds `unqueued: true`",
+                       "a stream file shorter than what a connection sent is resent `from: 0`",
+                       "the `note` holding no line `sweepdecisions.py parse_answers` reads as a decision",
+                       "remembered per project in the tab's `sessionStorage`"):
+            self.assertIn(phrase, note)
+        lines = self.text.splitlines()
+        rows = [line for line in lines if line.startswith("| the studio chat (Story 39.3, 0.1.35) |")]
+        self.assertIn("A `queue` proposal's press line is recorded by the cookie `POST /jobs` gate itself", rows[0])
+        self.assertIn("marked `unqueued: true` in place, its `seq` kept and never reused", rows[0])
+        self.assertIn("`409 ProposalViaJobs {project, seq, index, kind, detail}`", rows[0])
+        self.assertNotIn("dropped again", rows[0])
+        self.assertEqual([r.split(" | ")[1] for r in rows],
+                         ["`POST /chat`", "`GET /chat?project=<id>&since=<seq>`"])
+        engagement_get = next(i for i, line in enumerate(lines)
+                              if line.startswith("| the engagement's chat (Story 32.2, 0.1.27) | `GET /chat/"))
+        self.assertTrue(lines[engagement_get + 1].startswith("| the studio chat (Story 39.3, 0.1.35) | `POST /chat`"))
+        engage_row = next(line for line in lines if line.startswith("| `tk-studio-engage`"))
+        self.assertIn("or `studio-reply`, 0.1.35, Story 39.3: `project_root` as `--directory`; `seq`; `run_id`; "
+                      "`body`; `proposals?`", engage_row)
+        self.assertIn("`lib/studiochat.py context` and `lib/studiochat.py reply` (Story 39.3)", engage_row)
+        self.assertIn("- **The shipped `studio-chat` job (0.1.35, Story 39.3):**", self.text)
+        self.assertLess(self.text.index("- **The shipped `engagement-chat` job (0.1.27, Story 32.2):**"),
+                        self.text.index("- **The shipped `studio-chat` job (0.1.35, Story 39.3):**"))
 
     def test_story_35_7_the_skill_sweep_waits_540_s_inside_the_bash_cap(self):
         # the skill's one sweep call must print its block inside the Bash tool's 600 s cap

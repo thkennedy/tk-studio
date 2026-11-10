@@ -130,11 +130,11 @@ describe("the route table (Story 39.1)", () => {
   });
 
   // Story 39.2: the Settings screen is built (the Sandbox login card); its placeholder now names 39.8's part.
+  // Story 39.3: `/app/chat` is the studio chat, so `chat` is no longer a placeholder.
   it("the placeholders name the story that builds each screen", () => {
     expect(PLACEHOLDER).toEqual({
       story: "Not built yet: Story 39.4",
       run: "Not built yet: Story 39.5",
-      chat: "Not built yet: Story 39.3",
       checkin: "Not built yet: Story 39.7",
       settings: "Not built yet: Story 39.8",
     });
@@ -326,9 +326,12 @@ describe("the project of a project-less address (Story 39.1)", () => {
     expect(chatProjectCheck("p", [], null)).toBe("reset");
   });
 
-  it("chatOpenState: an address engagement opens under its own project only (null waits), /app/chat opens none", () => {
+  // Story 39.3: `/app/chat` now mounts the studio chat (`StudioChatScreen`), not `ChatScreen`; the null case is
+  // ChatScreen's own: no engagement ref keeps the project and opens none.
+  it("chatOpenState: an address engagement opens under its own project only (null waits), no engagement ref keeps the project and opens none", () => {
     expect(chatOpenState({ id: "ENG-001", project: "q" }, "p")).toEqual({ project: "q", id: "ENG-001" });
     expect(chatOpenState({ id: "ENG-001", project: null }, "p")).toEqual({ project: null, id: "ENG-001" });
+    // no engagement ref keeps the project and opens none
     expect(chatOpenState(null, "p")).toEqual({ project: "p", id: null });
   });
 });

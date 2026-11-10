@@ -261,6 +261,7 @@ describe("the refusals' rendering", () => {
     expect(refusalText({ status: 409, name: "EngagementClosed" })).toBe("EngagementClosed: the engagement is closed; nothing more can be sent");
     expect(refusalText({ status: 403, name: "CsrfRefused" })).toBe("CsrfRefused: the page's token was refused; reload the page");
     expect(refusalText({ status: 409, name: "AmbiguousEngagement" })).toBe("AmbiguousEngagement: that id is in more than one project");
+    expect(refusalText({ status: 409, name: "ProposalAlreadyPressed" })).toBe("ProposalAlreadyPressed: already pressed");
     expect(refusalText({ status: 502, name: null })).toBe("answered 502");
     expect(refusalText({ status: 400, name: "SchemaError", detail: "field 'cap' must be a number > 0" })).toBe("SchemaError: answered 400 (field 'cap' must be a number > 0)");
   });
@@ -404,5 +405,254 @@ describe("the list, the state's words, the nav count and the remembered engageme
     expect(merged.map((l: ChatLine) => [l.seq, l.body])).toEqual([[1, a.body], [2, b.body], [3, c.body]]);
     const same = [a];
     expect(mergeLines(same, [a])).toBe(same);
+  });
+});
+
+// ------------------------------------------------------------ Story 39.3: the studio chat
+// The delta assembly (in order, from 0 after a reconnect, an overlap, a gap ignored, the record replacing the stream),
+// the proposal mapping (every kind to its request, the answer body with and without a note, both 39.7 kinds
+// disabled), the pending label at positions 1 and 3, and the excerpt fixtures (the supervisor's `excerpt` pins the same).
+import {
+  answerBody, applyDelta, CURSOR, isDecisionLine, rememberedSent, rememberSent, excerpt, fetchStudioChat, LINE_MAX_CHARS, NOT_YET_TEXT, pendingLabel, pendingTurns, PENDING_TEXT, postJob, postPress,
+  postStudioLine, press, pressedKeys, proposalAction, proposalOfStudio, sentUnrecordedText, studioButtons, studioChatUrl, withDelta, withoutAnswered,
+  type StudioLine, type StudioProposal, type Streams,
+} from "./model";
+
+const owner = (seq: number, body: string, extra: Partial<StudioLine> = {}): StudioLine => ({ seq, at: "t", author: "owner", body, ...extra });
+const reply = (seq: number, reply_to: number, proposals: unknown[] = []): StudioLine =>
+  ({ seq, at: "t", author: "planner", body: `reply to ${reply_to}`, run_id: `r${reply_to}`, reply_to, proposals });
+
+describe("the studio chat: the excerpt (fixtures shared with the supervisor's studiochat.test.ts)", () => {
+  it("collapses whitespace, trims, and cuts past 40 code points with …", () => {
+    expect(excerpt("what is running")).toBe("what is running");
+    expect(excerpt("  what \n\t is   running  ")).toBe("what is running");
+    expect(excerpt("a".repeat(40))).toBe("a".repeat(40));
+    expect(excerpt("a".repeat(41))).toBe(`${"a".repeat(40)}…`);
+    expect(excerpt("queue 38.2 after the docs PR lands, then tell me what it cost")).toBe("queue 38.2 after the docs PR lands, then…");
+    // code points, not code units: 41 emoji are cut at 40
+    expect(excerpt("😀".repeat(41))).toBe(`${"😀".repeat(40)}…`);
+  });
+});
+
+describe("the studio chat: the delta assembly", () => {
+  it("applyDelta: in order, from 0 after a reconnect, an overlap, a gap ignored", () => {
+    let t = "";
+    t = applyDelta(t, { from: 0, text: "Two runs " });
+    t = applyDelta(t, { from: 9, text: "are live." });
+    expect(t).toBe("Two runs are live.");
+    expect(applyDelta(t, { from: 0, text: "Two runs are" })).toBe("Two runs are"); // a reconnect starts at 0
+    expect(applyDelta(t, { from: 4, text: "runs are live now." })).toBe("Two runs are live now."); // an overlap
+    expect(applyDelta(t, { from: 99, text: "x" })).toBe(t); // a gap: ignored
+    expect(applyDelta(t, { from: t.length, text: "!" })).toBe(`${t}!`);
+  });
+
+  it("withDelta / withoutAnswered: streams by reply_to; the record replaces the stream", () => {
+    const lines = [owner(1, "what is running")];
+    let s: Streams = {};
+    s = withDelta(s, { run_id: "r1", reply_to: 1, from: 0, text: "Two " }, lines);
+    s = withDelta(s, { run_id: "r1", reply_to: 1, from: 4, text: "runs" }, lines);
+    s = withDelta(s, { run_id: "r1", reply_to: 1, from: 50, text: "gap" }, lines);
+    expect(s).toEqual({ 1: { run_id: "r1", text: "Two runs" } });
+    const landed = [...lines, reply(2, 1)];
+    expect(withoutAnswered(s, landed)).toEqual({});
+    // a late delta for an answered line is dropped
+    expect(withDelta({}, { run_id: "r1", reply_to: 1, from: 0, text: "late" }, landed)).toEqual({});
+    // a gap with nothing streamed yet is ignored too
+    expect(withDelta({}, { run_id: "r1", reply_to: 1, from: 3, text: "x" }, lines)).toEqual({});
+    expect(CURSOR).toBe("▍");
+  });
+});
+
+describe("the studio chat: the proposal mapping", () => {
+  const queue: StudioProposal = { kind: "queue", label: "Queue run-epic-38", project: "tk-studio", job: "run-epic-38" };
+  const answer: StudioProposal = { kind: "answer", label: "Answer DW-87 with A", id: "DW-87", letter: "A", note: "", issue: "TKSTUDIO-240" };
+
+  it("reads each recorded kind back; anything malformed is no button", () => {
+    expect(proposalOfStudio(queue)).toEqual(queue);
+    expect(proposalOfStudio(answer)).toEqual(answer);
+    expect(proposalOfStudio({ kind: "open", label: "Open the board", route: "/app/board/tk-studio" })).toEqual({ kind: "open", label: "Open the board", route: "/app/board/tk-studio" });
+    expect(proposalOfStudio({ kind: "engagement", label: "Start", title: "Plan an epic for X" })).toEqual({ kind: "engagement", label: "Start", title: "Plan an epic for X" });
+    expect(proposalOfStudio({ kind: "stop-after-story", label: "Stop" })).toEqual({ kind: "stop-after-story", label: "Stop" });
+    expect(proposalOfStudio({ kind: "open-studio", label: "Open up" })).toEqual({ kind: "open-studio", label: "Open up" });
+    expect(proposalOfStudio({ ...queue, job: "Run Epic" })).toBeNull();
+    expect(proposalOfStudio({ kind: "open", label: "x", route: "https://evil.example/app" })).toBeNull();
+    expect(proposalOfStudio({ ...answer, letter: "AB" })).toBeNull();
+    expect(proposalOfStudio({ kind: "wat", label: "x" })).toBeNull();
+    expect(proposalOfStudio({ ...queue, label: "x".repeat(81) })).toBeNull();
+  });
+
+  it("every kind to its request", () => {
+    expect(proposalAction("tk-studio", 4, 0, queue)).toEqual({ kind: "request", url: "/jobs", body: { project: "tk-studio", job: "run-epic-38", proposal: { chat: "tk-studio", seq: 4, index: 0 } } });
+    expect(proposalAction("tk-studio", 4, 1, answer)).toEqual({ kind: "request", url: "/inbox/TKSTUDIO-240/reply", body: { project: "tk-studio", body: "DW-87: A" } });
+    expect(proposalAction("tk-studio", 4, 2, { kind: "open", label: "o", route: "/app/run/abc" })).toEqual({ kind: "navigate", route: "/app/run/abc" });
+    expect(proposalAction("tk studio", 4, 3, { kind: "engagement", label: "e", title: "Plan X" })).toEqual({ kind: "request", url: "/engagements?project=tk%20studio", body: { project: "tk studio", request: "Plan X" } });
+    expect(proposalAction("p", 4, 4, { kind: "stop-after-story", label: "s" })).toEqual({ kind: "disabled", note: NOT_YET_TEXT });
+    expect(proposalAction("p", 4, 5, { kind: "open-studio", label: "o" })).toEqual({ kind: "disabled", note: "Not built yet: Story 39.7" });
+  });
+
+  it("the answer body: the note on its own line, never on the answer line", () => {
+    expect(answerBody("DW-87", "A", "")).toBe("DW-87: A");
+    expect(answerBody("DW-87", "A", "   ")).toBe("DW-87: A");
+    expect(answerBody("DW-87", "B", "  ship it after the docs PR \n")).toBe("DW-87: B\nship it after the docs PR");
+    expect(proposalAction("p", 1, 0, { ...answer, note: "why" })).toMatchObject({ body: { body: "DW-87: A\nwhy" } });
+  });
+
+  it("the answer body drops a note line `sweepdecisions.py parse_answers` would read as a decision", () => {
+    const note = "ship it\nall: B\n  DW-88: C.\n- default\n[~accountid:abc] dw-9 = d\nDefault!\nDW-88: C because docs";
+    expect(answerBody("DW-87", "A", note)).toBe("DW-87: A\nship it\nDW-88: C because docs");
+    expect(answerBody("DW-87", "A", "all: B")).toBe("DW-87: A");
+    expect(isDecisionLine("allow: B")).toBe(false);
+  });
+
+  it("the buttons: both 39.7 kinds disabled with the note, a pressed one disabled, a malformed one dropped", () => {
+    const r = reply(4, 3, [queue, { kind: "stop-after-story", label: "Stop" }, { kind: "nope" }, { kind: "open-studio", label: "Open" }, answer]);
+    const lines = [owner(3, "q"), r, owner(5, "pressed: Answer DW-87 with A", { pressed: { seq: 4, index: 4, kind: "answer" } })];
+    const buttons = studioButtons("p", r, pressedKeys(lines));
+    expect(buttons.map((b) => [b.index, b.enabled, b.note])).toEqual([
+      [0, true, null],
+      [1, false, NOT_YET_TEXT],
+      [3, false, NOT_YET_TEXT],
+      [4, false, "Pressed"],
+    ]);
+  });
+
+  it("pressedKeys ignores a press line marked unqueued (its submit failed): the queue button is live again", () => {
+    const r = reply(4, 3, [queue]);
+    const marked = owner(5, "pressed: Queue", { pressed: { seq: 4, index: 0, kind: "queue" }, unqueued: true });
+    expect(pressedKeys([owner(3, "q"), r, marked]).has("4:0")).toBe(false);
+    expect(studioButtons("p", r, pressedKeys([owner(3, "q"), r, marked]))[0]!.enabled).toBe(true);
+    const again = owner(6, "pressed: Queue", { pressed: { seq: 4, index: 0, kind: "queue" } });
+    expect(pressedKeys([owner(3, "q"), r, marked, again]).has("4:0")).toBe(true);
+  });
+});
+
+describe("the studio chat: the pending label", () => {
+  it("position 1 is the turn being answered; position 3 names the previous pending line and its position", () => {
+    const lines = [
+      owner(1, "what is running"), reply(2, 1),
+      owner(3, "what did 38.1 cost"),
+      owner(4, "pressed: Queue", { pressed: { seq: 2, index: 0, kind: "queue" } }),
+      owner(5, "  queue 38.2 after the docs PR lands, then tell me what it cost "),
+      owner(6, "answer DW-87 with A"),
+    ];
+    expect(pendingTurns(lines).map((l) => l.seq)).toEqual([3, 5, 6]);
+    expect(pendingLabel(lines, 3)).toBe(PENDING_TEXT);
+    expect(PENDING_TEXT).toBe("Waiting for the planner's reply (about a minute)");
+    expect(pendingLabel(lines, 6)).toBe("Waiting for the planner's reply (about a minute) — queued behind the reply to 'queue 38.2 after the docs PR lands, then…' (position 3)");
+    expect(pendingLabel(lines, 5)).toBe("Waiting for the planner's reply (about a minute) — queued behind the reply to 'what did 38.1 cost' (position 2)");
+    expect(pendingLabel(lines, 1)).toBeNull(); // answered
+    expect(pendingLabel(lines, 4)).toBeNull(); // a press queues nothing
+  });
+});
+
+describe("the studio chat: the reads and the posts", () => {
+  it("studioChatUrl and fetchStudioChat", async () => {
+    expect(studioChatUrl("p q")).toBe("/chat?project=p%20q");
+    expect(studioChatUrl("p", 7)).toBe("/chat?project=p&since=7");
+    const { f, calls } = recording(200, { ok: true, project: "p", since: 0, last_seq: 2, lines: [owner(1, "hi"), reply(2, 1), { seq: "x" }] });
+    const r = await fetchStudioChat("p", 0, f);
+    expect(calls[0]!.url).toBe("/chat?project=p");
+    expect(r.ok && r.lines.map((l) => l.seq)).toEqual([1, 2]);
+    expect(r.ok && r.last_seq).toBe(2);
+  });
+
+  it("postStudioLine: {project, text} with the CSRF header; the answer's behind and note", async () => {
+    const { f, calls } = recording(200, { ok: true, project: "p", seq: 3, run_id: "r3", behind: { seq: 1, run_id: "r1" }, note: "Queued behind the reply to 'what is running'" });
+    const r = await postStudioLine("p", "what did 38.1 cost", "tok", f);
+    expect(calls[0]!.url).toBe("/chat");
+    expect(JSON.parse(String(calls[0]!.init!.body))).toEqual({ project: "p", text: "what did 38.1 cost" });
+    expect((calls[0]!.init!.headers as Record<string, string>)["x-csrf-token"]).toBe("tok");
+    expect(r).toEqual({ ok: true, seq: 3, run_id: "r3", behind: { seq: 1, run_id: "r1" }, note: "Queued behind the reply to 'what is running'" });
+  });
+
+  it("a LineTooLong refusal is named", async () => {
+    const { f } = recording(400, { ok: false, error: "LineTooLong", limit: 4000, length: 4001 });
+    const r = await postStudioLine("p", "x".repeat(4001), "tok", f);
+    expect(r.ok).toBe(false);
+    expect(!r.ok && r.refusal?.name).toBe("LineTooLong");
+    expect(!r.ok && r.error).toContain("LineTooLong: the line is over 4,000 characters");
+    expect(LINE_MAX_CHARS).toBe(4000);
+  });
+
+  it("postPress and postJob bodies", async () => {
+    const a = recording(200, { ok: true, project: "p", seq: 9, run_id: null, behind: null, note: null });
+    expect(await postPress("p", 4, 1, "tok", a.f)).toEqual({ ok: true, seq: 9, run_id: null, behind: null, note: null });
+    expect(JSON.parse(String(a.calls[0]!.init!.body))).toEqual({ project: "p", pressed: { seq: 4, index: 1 } });
+    const b = recording(200, { ok: true });
+    expect(await postJob("q", "run-epic-38", { chat: "p", seq: 4, index: 0 }, "tok", b.f)).toEqual({ ok: true });
+    expect(b.calls[0]!.url).toBe("/jobs");
+    expect(JSON.parse(String(b.calls[0]!.init!.body))).toEqual({ project: "q", job: "run-epic-38", proposal: { chat: "p", seq: 4, index: 0 } });
+  });
+
+  it("press: the request, then on a 2xx the press line; a refusal posts no press line; never throws", async () => {
+    const ok = recording(200, { ok: true, project: "p", seq: 9, run_id: null, behind: null, note: null });
+    const act = proposalAction("p", 4, 0, { kind: "queue", label: "Q", project: "p", job: "run-epic-38" });
+    // a `queue` press posts no press line: the supervisor's POST /jobs gate records it with the submit
+    expect(await press("p", 4, 0, act, "tok", ok.f)).toEqual({ ok: true, seq: null, run_id: null, behind: null, note: null, sent: true });
+    expect(ok.calls.map((c) => c.url)).toEqual(["/jobs"]);
+    const ans = recording(200, { ok: true, project: "p", seq: 9, run_id: null, behind: null, note: null });
+    const answerAct = proposalAction("p", 4, 1, { kind: "answer", label: "A", id: "DW-87", letter: "A", note: "", issue: "TKS-1" });
+    expect((await press("p", 4, 1, answerAct, "tok", ans.f)).ok).toBe(true);
+    expect(ans.calls.map((c) => c.url)).toEqual(["/inbox/TKS-1/reply", "/chat"]);
+    const nav = recording(200, { ok: true, project: "p", seq: 9, run_id: null, behind: null, note: null });
+    await press("p", 4, 2, { kind: "navigate", route: "/app/office" }, "tok", nav.f);
+    expect(nav.calls.map((c) => c.url)).toEqual(["/chat"]);
+    const refused = recording(403, { ok: false, error: "ProposalRefused" });
+    const r = await press("p", 4, 0, act, "tok", refused.f);
+    expect(!r.ok && r.refusal?.name).toBe("ProposalRefused");
+    expect(refused.calls).toHaveLength(1);
+    expect((await press("p", 4, 0, act, "tok", failing)).ok).toBe(false);
+    expect((await press("p", 4, 1, { kind: "disabled", note: NOT_YET_TEXT }, "tok", failing)).ok).toBe(false);
+  });
+
+  it("press: `sent` marks a request answered 2xx, so a failed press line after it keeps the button from repeating the request", async () => {
+    const act = proposalAction("p", 4, 0, { kind: "engagement", label: "E", title: "Plan X" });
+    const ok = recording(200, { ok: true, project: "p", seq: 9, run_id: null, behind: null, note: null });
+    expect(await press("p", 4, 0, act, "tok", ok.f)).toMatchObject({ ok: true, sent: true });
+    // the engagement's 2xx, then the press line refused: a failure that says the request went out
+    const calls: string[] = [];
+    const lineFails: Parameters<typeof press>[5] = async (url) => {
+      calls.push(url);
+      return url !== "/chat"
+        ? { ok: true, status: 200, json: async () => ({ ok: true, engagement: "ENG-001" }), headers: { get: () => null } }
+        : { ok: false, status: 503, json: async () => ({ ok: false, error: "ChatBusy" }), headers: { get: () => null } };
+    };
+    const r = await press("p", 4, 0, act, "tok", lineFails);
+    expect(calls).toEqual(["/engagements?project=p", "/chat"]);
+    // a `queue` press never meets that case: its only request is the gate, which recorded the line or refused
+    const queueAct = proposalAction("p", 4, 0, { kind: "queue", label: "Q", project: "p", job: "run-epic-38" });
+    calls.length = 0;
+    expect(await press("p", 4, 0, queueAct, "tok", lineFails)).toMatchObject({ ok: true, sent: true });
+    expect(calls).toEqual(["/jobs"]);
+    expect(r.ok).toBe(false);
+    expect(r.sent).toBe(true);
+    expect(!r.ok && sentUnrecordedText(r.error)).toContain("The request was sent, but its press line was not recorded: ");
+    // the screen adds `<seq>:<index>` to the pressed set: the button is disabled ("Pressed")
+    const [button] = studioButtons("p", reply(4, 3, [{ kind: "queue", label: "Q", project: "p", job: "run-epic-38" }]), new Set(["4:0"]));
+    expect(button).toMatchObject({ enabled: false, note: "Pressed" });
+    // a refused request, a disabled kind and `open` (no request) are not sent: the button stays pressable
+    expect((await press("p", 4, 0, act, "tok", recording(403, { ok: false, error: "ProposalRefused" }).f)).sent).toBe(false);
+    expect((await press("p", 4, 0, act, "tok", failing)).sent).toBe(false);
+    expect((await press("p", 4, 1, { kind: "disabled", note: NOT_YET_TEXT }, "tok", failing)).sent).toBe(false);
+    expect((await press("p", 4, 2, { kind: "navigate", route: "/app/office" }, "tok", failing)).sent).toBe(false);
+  });
+});
+
+describe("the studio chat: the sent presses, per project, in sessionStorage", () => {
+  it("remembered per project; absent, malformed or a throwing storage is empty", () => {
+    const mem = new Map<string, string>();
+    const storage: StorageLike = { getItem: (k) => mem.get(k) ?? null, setItem: (k, v) => void mem.set(k, v) };
+    expect([...rememberedSent("p", storage)]).toEqual([]);
+    rememberSent("p", new Set(["4:1", "6:0"]), storage);
+    expect([...rememberedSent("p", storage)]).toEqual(["4:1", "6:0"]);
+    expect([...rememberedSent("q", storage)]).toEqual([]);
+    mem.set("tk-studio.web.studio-chat.sent.q", "{nope");
+    expect([...rememberedSent("q", storage)]).toEqual([]);
+    mem.set("tk-studio.web.studio-chat.sent.q", JSON.stringify(["1:0", 7, "x"]));
+    expect([...rememberedSent("q", storage)]).toEqual(["1:0"]);
+    const throwing: StorageLike = { getItem: () => { throw new Error("denied"); }, setItem: () => { throw new Error("denied"); } };
+    expect([...rememberedSent("p", throwing)]).toEqual([]);
+    expect(() => rememberSent("p", ["4:1"], throwing)).not.toThrow();
+    expect([...rememberedSent("p", null)]).toEqual([]);
   });
 });

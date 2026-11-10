@@ -19,12 +19,16 @@
 // yet show "Not built yet: Story 39.N", and `/app/chat` keeps the engagement Chat screen under that strip. The two
 // remembered keys (`tk-studio.web.screen`, `tk-studio.web.issue`) are migrated once at load and never written again.
 // Story 39.2: `/app/settings` mounts the Settings screen (the Sandbox login card first, then 39.8's named placeholder).
+// Story 39.3: `/app/chat` mounts the studio chat (`StudioChatScreen`) in place of the placeholder strip and the
+// engagement Chat screen; `/app/chat/<id>` keeps the engagement Chat screen. An `open` proposal navigates through the
+// router.
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { createOfficeStore, LIVE_RUN_STATES } from "./live/store";
 import { openOfficeStream } from "./live/stream";
 import { BoardScreen } from "./board/BoardScreen";
 import { ChatScreen } from "./chat/ChatScreen";
 import { chatNavCount, rememberedEngagement } from "./chat/model";
+import { StudioChatScreen } from "./chat/StudioChatScreen";
 import { InboxScreen, useInbox } from "./inbox/InboxScreen";
 import { navCount } from "./inbox/model";
 import { IssueScreen } from "./issue/IssueScreen";
@@ -78,15 +82,10 @@ export function App() {
         <InboxScreen rows={inbox.rows} errors={inbox.errors} loaded={inbox.loaded} onOpen={openIssue} />
       ) : route.name === "issue" ? (
         <IssueRoute route={route} rows={inbox.rows} errors={inbox.errors} loaded={inbox.loaded} />
-      ) : route.name === "chat" || route.name === "engagement" ? (
-        <>
-          <ChatScreen engagements={live.view?.engagements} open={open} onOpen={(ref) => go({ name: "engagement", id: ref.id, project: ref.project })} onClose={(replace) => go({ name: "chat" }, replace)} />
-          {route.name === "chat" && (
-            <div style={{ position: "fixed", top: 8, left: "50%", transform: "translateX(-50%)", padding: "4px 8px", font, color: "#e0b040", background: "rgba(0, 0, 0, 0.6)", borderRadius: 4, zIndex: 2 }}>
-              {PLACEHOLDER.chat}
-            </div>
-          )}
-        </>
+      ) : route.name === "chat" ? (
+        <StudioChatScreen onNavigate={(path) => router.navigate(path)} />
+      ) : route.name === "engagement" ? (
+        <ChatScreen engagements={live.view?.engagements} open={open} onOpen={(ref) => go({ name: "engagement", id: ref.id, project: ref.project })} onClose={(replace) => go({ name: "chat" }, replace)} />
       ) : route.name === "status" ? (
         <StatusScreen store={officeStore} />
       ) : route.name === "settings" ? (

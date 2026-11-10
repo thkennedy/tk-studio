@@ -1,0 +1,22 @@
+{
+  "job_schema_version": 1,
+  "id": "studio-chat",
+  "description": "One turn of the studio chat (Story 39.3, design addendum 2026-11-07 §3.8, AD-11): the supervisor's chat route (`POST /chat {project, text}`) appends the owner's line to `_bmad-output/tracking/studio-chat.jsonl` and queues one run of this job per line on the host tier with the planner leg's model and effort (passed at enqueue) and the run's own payload `{project, project_root, seq}` (delivered with its queue `run_id`); the supervisor runs this job's worker as `claude -p` with the plugin and `--output-format stream-json`, streaming the reply text to the page. The tk-studio-engage session's `studio-reply` verb runs the tk-studio-orchestrator core headless (`orchestrate.py resolve`; the council shell only as presentation, when the line asks for the council) through `studiochat.py context`, answers from the reads the pages use, and writes one reply `{seq, at, author: planner, body, run_id, reply_to, proposals[]}` with `studiochat.py reply`. A proposal is a button the owner presses; the session moves no state, holds no bearer and no CSRF token. Shipped undeclared; the session commits nothing.",
+  "target": {
+    "skill": "tk-studio-engage",
+    "payload": {
+      "verb": "studio-reply"
+    }
+  },
+  "trigger": "one-shot",
+  "requires": {
+    "tier": "host"
+  },
+  "guards": {
+    "max_turns": 40,
+    "max_wall_clock_seconds": 600
+  },
+  "stop": {
+    "until": "9999-12-31T23:59:59Z"
+  }
+}

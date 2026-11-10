@@ -6,8 +6,9 @@
 // `POST /chat/{id}` — every engagement read and post carrying `?project=<id>` (a repeated id is 409
 // AmbiguousEngagement without it) and every post the CSRF token `GET /inbox?project=<id>` answered (Settled shape 2),
 // exactly as the Issue screen's reply. Fetches and posts never throw; a refusal is rendered by its error name.
+// Story 39.3: the studio chat's rules (`/app/chat`, `StudioChatScreen.tsx`) sit in their own section at the end.
 import type { FetchLike } from "../inbox/model";
-import { canAct, costText, type ActionGate } from "../issue/model";
+import { canAct, costText, replyUrl, type ActionGate } from "../issue/model";
 import { NONE, safeHref, type StorageLike } from "../office/model";
 import type { OfficeEngagement } from "../live/store";
 
@@ -340,6 +341,10 @@ export function refusalText(r: Refusal): string {
     case "ChatQueueFailed": return `ChatQueueFailed: the planner's turn could not be queued; no line was kept${tail}`;
     case "CsrfRefused": return "CsrfRefused: the page's token was refused; reload the page";
     case "AmbiguousEngagement": return "AmbiguousEngagement: that id is in more than one project";
+    // Story 39.3: the studio chat's refusals
+    case "LineTooLong": return `LineTooLong: the line is over ${LINE_MAX_CHARS.toLocaleString("en-US")} characters (your text is kept)`;
+    case "ProposalNotYet": return `ProposalNotYet: ${NOT_YET_TEXT}`;
+    case "ProposalAlreadyPressed": return "ProposalAlreadyPressed: already pressed";
     case null: return `answered ${r.status}`;
     default: return `${r.name}: answered ${r.status}${tail}`;
   }
@@ -546,4 +551,351 @@ export function createCostCache(fetchFn: FetchLike = defaultFetch, onChange: () 
       return p;
     },
   };
+}
+
+// ------------------------------------------------------------ the studio chat (Story 39.3)
+//
+// `/app/chat` is a conversation with the studio (addendum §3.8), not with an engagement: `GET /chat?project=` reads
+// the record `_bmad-output/tracking/studio-chat.jsonl`, `POST /chat {project, text}` queues one `studio-chat` run per
+// owner line, and the stream's `event: chat-delta` frames carry the reply text as the session produces it. Each
+// proposal is a button whose press sends a request the supervisor already knows (Settled shape 4); the press is then
+// recorded as the owner's line `pressed: <label>` (`POST /chat {project, pressed: {seq, index}}`).
+
+/** The owner's line limit, in code points (the supervisor's `LINE_MAX_CHARS`). */
+export const LINE_MAX_CHARS = 4000;
+/** The text box shows its count past this many characters. */
+export const LINE_COUNT_FROM = 3500;
+export const PENDING_TEXT = "Waiting for the planner's reply (about a minute)";
+export const NOT_YET_TEXT = "Not built yet: Story 39.7";
+export const PRESSED_TEXT = "Pressed";
+/** The streaming reply's trailing cursor (U+258D). */
+export const CURSOR = "▍";
+
+export const STUDIO_KINDS = ["queue", "answer", "open", "engagement", "stop-after-story", "open-studio"] as const;
+export type StudioKind = (typeof STUDIO_KINDS)[number];
+/** The two kinds Story 39.7 lands: rendered disabled until then. */
+export const NOT_YET_KINDS: ReadonlySet<string> = new Set(["stop-after-story", "open-studio"]);
+
+export type StudioProposal =
+  | { kind: "queue"; label: string; project: string; job: string }
+  | { kind: "answer"; label: string; id: string; letter: string; note: string; issue: string }
+  | { kind: "open"; label: string; route: string }
+  | { kind: "engagement"; label: string; title: string }
+  | { kind: "stop-after-story" | "open-studio"; label: string };
+
+/** One line of the studio chat: the owner's line, a press line (`pressed`), or the planner's reply (`reply_to`). */
+export interface StudioLine {
+  seq: number;
+  at: string;
+  author: "owner" | "planner";
+  body: string;
+  run_id?: string | null;
+  reply_to?: number;
+  proposals?: unknown[];
+  pressed?: { seq: number; index: number; kind?: string };
+  failed?: boolean;
+  /** A `queue` press line whose submit did not answer 2xx: kept, but no press (the proposal is pressable again). */
+  unqueued?: boolean;
+}
+
+/** An `event: chat-delta` frame's data: the reply text from `from` (a code-unit offset) on. */
+export interface ChatDelta { run_id: string; reply_to: number; from: number; text: string }
+
+const JOB_RE = /^[a-z][a-z0-9-]*$/;
+const ANSWER_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+const LETTER_RE = /^[A-Z]$/;
+const ISSUE_RE = /^[A-Z][A-Z0-9]+-\d+$/;
+const ROUTE_RE = /^\/app(\/[A-Za-z0-9._~%-]+)*$/;
+const nonEmpty = (v: unknown): v is string => typeof v === "string" && v.trim() !== "";
+
+/** A recorded proposal read back (Settled shape 3); anything else (an unknown kind, a missing field) is null and
+ * renders no button. */
+export function proposalOfStudio(v: unknown): StudioProposal | null {
+  if (!isObj(v) || !nonEmpty(v.label) || [...v.label].length > 80) return null;
+  const label = v.label;
+  switch (v.kind) {
+    case "queue":
+      return nonEmpty(v.project) && typeof v.job === "string" && JOB_RE.test(v.job) ? { kind: "queue", label, project: v.project, job: v.job } : null;
+    case "answer":
+      return typeof v.id === "string" && ANSWER_ID_RE.test(v.id) && typeof v.letter === "string" && LETTER_RE.test(v.letter) &&
+        typeof v.note === "string" && typeof v.issue === "string" && ISSUE_RE.test(v.issue)
+        ? { kind: "answer", label, id: v.id, letter: v.letter, note: v.note, issue: v.issue }
+        : null;
+    case "open":
+      return typeof v.route === "string" && ROUTE_RE.test(v.route) ? { kind: "open", label, route: v.route } : null;
+    case "engagement":
+      return nonEmpty(v.title) ? { kind: "engagement", label, title: v.title } : null;
+    case "stop-after-story":
+    case "open-studio":
+      return { kind: v.kind, label };
+    default:
+      return null;
+  }
+}
+
+/** What a press sends (Settled shape 4): a typed request, a navigation, or nothing (a 39.7 kind, disabled). */
+export type ProposalAction =
+  | { kind: "request"; url: string; body: Record<string, unknown> }
+  | { kind: "navigate"; route: string }
+  | { kind: "disabled"; note: string };
+
+// The decision lines `sweepdecisions.py parse_answers` ingests (its `ID_LINE_RE`, `ALL_LINE_RE`, `DEFAULT_LINE_RE`,
+// after a leading `- `/`* ` and `LEADING_MENTIONS_RE`): a note line shaped like one would record a decision the
+// button's label never named (`studiochat.py` refuses such a note; this drops it as defence in depth).
+const DECISION_LINE_RES = [/^(DW-\d+)\s*[:=]\s*([A-Z])\s*[.!]?$/i, /^all\s*[:=]\s*([A-Z])\s*[.!]?$/i, /^default\s*[.!]?$/i];
+const LEADING_MENTIONS_RE = /^(?:\[~accountid:[^\]\s]+\][\s,:]*)+/;
+/** A note line `parse_answers` would read as a decision. */
+export const isDecisionLine = (raw: string): boolean => {
+  const line = raw.trim().replace(/^[-*]\s*/, "").replace(LEADING_MENTIONS_RE, "");
+  return DECISION_LINE_RES.some((re) => re.test(line));
+};
+
+/** The answer line: `<id>: <letter>`, the note on its own line when it is not blank (a trailing text on the answer
+ * line is a qualified answer, never ingested: `sweepdecisions.py`'s `QUALIFIED_RE`); a note line shaped like a
+ * decision line is dropped. */
+export const answerBody = (id: string, letter: string, note: string): string => {
+  const kept = note.split(/\r?\n/).filter((l) => !isDecisionLine(l)).join("\n").trim();
+  return `${id}: ${letter}${kept ? `\n${kept}` : ""}`;
+};
+
+/** The press of proposal `index` of reply `seq` in `chat`'s studio chat. */
+export function proposalAction(chat: string, seq: number, index: number, p: StudioProposal): ProposalAction {
+  switch (p.kind) {
+    case "queue":
+      return { kind: "request", url: "/jobs", body: { project: p.project, job: p.job, proposal: { chat, seq, index } } };
+    case "answer":
+      return { kind: "request", url: replyUrl(p.issue), body: { project: chat, body: answerBody(p.id, p.letter, p.note) } };
+    case "open":
+      return { kind: "navigate", route: p.route };
+    case "engagement":
+      return { kind: "request", url: createUrl(chat), body: { project: chat, request: p.title } };
+    default:
+      return { kind: "disabled", note: NOT_YET_TEXT };
+  }
+}
+
+export interface StudioButton { index: number; label: string; proposal: StudioProposal; action: ProposalAction; enabled: boolean; note: string | null }
+
+/** The pressed proposals, as `<reply seq>:<index>` (from the press lines; one marked `unqueued` is no press). */
+export function pressedKeys(lines: readonly StudioLine[]): Set<string> {
+  const out = new Set<string>();
+  for (const l of lines) if (l.pressed && l.unqueued !== true && typeof l.pressed.seq === "number" && typeof l.pressed.index === "number") out.add(`${l.pressed.seq}:${l.pressed.index}`);
+  return out;
+}
+
+/** A reply's buttons: a 39.7 kind disabled with its note, a pressed one disabled ("Pressed"); an unreadable proposal
+ * keeps its index but renders nothing. */
+export function studioButtons(chat: string, reply: StudioLine, pressed: ReadonlySet<string>): StudioButton[] {
+  const out: StudioButton[] = [];
+  (reply.proposals ?? []).forEach((raw, index) => {
+    const proposal = proposalOfStudio(raw);
+    if (!proposal) return;
+    const action = proposalAction(chat, reply.seq, index, proposal);
+    const wasPressed = pressed.has(`${reply.seq}:${index}`);
+    out.push({
+      index, label: proposal.label, proposal, action,
+      enabled: action.kind !== "disabled" && !wasPressed,
+      note: action.kind === "disabled" ? action.note : wasPressed ? PRESSED_TEXT : null,
+    });
+  });
+  return out;
+}
+
+// --- the stream's assembly (Settled shape 6)
+
+/** The streamed text with a delta applied: `text.slice(0, from) + delta.text` when `from <= text.length` (in order,
+ * an overlap, or from 0 after a reconnect); a `from` past the end (a gap) is ignored. */
+export const applyDelta = (text: string, delta: Pick<ChatDelta, "from" | "text">): string =>
+  Number.isSafeInteger(delta.from) && delta.from >= 0 && delta.from <= text.length ? text.slice(0, delta.from) + delta.text : text;
+
+/** The streaming replies by the owner line they answer (`reply_to`). */
+export type Streams = Readonly<Record<number, { run_id: string; text: string }>>;
+
+const answered = (lines: readonly StudioLine[]): Set<number> => {
+  const out = new Set<number>();
+  for (const l of lines) if (l.author === "planner" && typeof l.reply_to === "number") out.add(l.reply_to);
+  return out;
+};
+
+/** A delta folded in; a delta for an owner line whose reply is already in the record is dropped (the record is
+ * authoritative). A delta of another run for the same line starts over. */
+export function withDelta(streams: Streams, delta: ChatDelta, lines: readonly StudioLine[]): Streams {
+  if (answered(lines).has(delta.reply_to)) return streams;
+  const had = streams[delta.reply_to];
+  const base = had && had.run_id === delta.run_id ? had.text : "";
+  if (delta.from > base.length) return streams; // a gap: ignored
+  const text = applyDelta(base, delta);
+  if (had && had.run_id === delta.run_id && text === had.text) return streams;
+  return { ...streams, [delta.reply_to]: { run_id: delta.run_id, text } };
+}
+
+/** The streams whose reply has landed dropped (an `event: chat` reply with `reply_to` R drops R's streaming text). */
+export function withoutAnswered(streams: Streams, lines: readonly StudioLine[]): Streams {
+  const done = answered(lines);
+  const keys = Object.keys(streams).map(Number).filter((k) => done.has(k));
+  if (!keys.length) return streams;
+  const out: Record<number, { run_id: string; text: string }> = { ...streams };
+  for (const k of keys) delete out[k];
+  return out;
+}
+
+export const isChatDelta = (v: unknown): v is ChatDelta =>
+  isObj(v) && typeof v.run_id === "string" && typeof v.reply_to === "number" && Number.isSafeInteger(v.reply_to) &&
+  typeof v.from === "number" && Number.isSafeInteger(v.from) && v.from >= 0 && typeof v.text === "string";
+
+// --- the pending turns and their label (Settled shapes 5, 10)
+
+/** A line's excerpt: whitespace runs collapsed to one space and trimmed; past 40 code points, cut to 40 and `…`. */
+export function excerpt(body: string): string {
+  const flat = body.replace(/\s+/g, " ").trim();
+  const cps = [...flat];
+  return cps.length > 40 ? `${cps.slice(0, 40).join("")}…` : flat;
+}
+
+/** The pending turns, by seq: owner lines with no `pressed` and no reply whose `reply_to` is their seq. */
+export function pendingTurns(lines: readonly StudioLine[]): StudioLine[] {
+  const done = answered(lines);
+  return lines.filter((l) => l.author === "owner" && !l.pressed && !done.has(l.seq)).sort((a, b) => a.seq - b.seq);
+}
+
+/** The pending label of owner line `seq` (null when it is not pending). Position 1 is the turn being answered; at
+ * position n ≥ 2 it names the previous pending line's excerpt and the position. */
+export function pendingLabel(lines: readonly StudioLine[], seq: number): string | null {
+  const pending = pendingTurns(lines);
+  const i = pending.findIndex((l) => l.seq === seq);
+  if (i < 0) return null;
+  if (i === 0) return PENDING_TEXT;
+  return `${PENDING_TEXT} — queued behind the reply to '${excerpt(pending[i - 1]!.body)}' (position ${i + 1})`;
+}
+
+/** The code points of a text (the supervisor's 4,000 is counted in code points). */
+export const codePoints = (text: string): number => [...text].length;
+
+// --- the reads and the posts
+
+export const studioChatUrl = (project: string, since = 0): string => `/chat?${q(project)}${since > 0 ? `&since=${since}` : ""}`;
+export const STUDIO_CHAT_URL = "/chat";
+export const JOBS_URL = "/jobs";
+
+const studioLineOf = (v: unknown): v is StudioLine => lineOf(v);
+
+export type StudioChatResult = { ok: true; lines: StudioLine[]; last_seq: number } | Failure;
+/** `GET /chat?project=<id>[&since=<seq>]`: the studio chat's lines after `since`. Never throws. */
+export async function fetchStudioChat(project: string, since = 0, fetchFn: FetchLike = defaultFetch): Promise<StudioChatResult> {
+  const url = studioChatUrl(project, since);
+  try {
+    const res = await fetchFn(url, GET);
+    if (!res.ok) return await failureOf(url, res);
+    const body = await res.json();
+    if (!isObj(body) || body.ok !== true || !Array.isArray(body.lines)) return malformed(url, "lines");
+    const lines = (body.lines as unknown[]).filter(studioLineOf);
+    return { ok: true, lines, last_seq: typeof body.last_seq === "number" ? body.last_seq : lines.reduce((m, l) => Math.max(m, l.seq), since) };
+  } catch (e) {
+    return thrown(url, e);
+  }
+}
+
+export type StudioPostResult = { ok: true; seq: number; run_id: string | null; behind: { seq: number; run_id: string } | null; note: string | null } | Failure;
+
+async function postStudio(project: string, payload: Record<string, unknown>, csrf: string | null, fetchFn: FetchLike): Promise<StudioPostResult> {
+  const url = STUDIO_CHAT_URL;
+  try {
+    const res = await fetchFn(url, post(csrf, { project, ...payload }));
+    if (!res.ok) return await failureOf(url, res);
+    const body = await res.json();
+    if (!isObj(body) || body.ok !== true || typeof body.seq !== "number") return malformed(url, "chat line");
+    const b = body.behind;
+    return {
+      ok: true, seq: body.seq,
+      run_id: typeof body.run_id === "string" ? body.run_id : null,
+      behind: isObj(b) && typeof b.seq === "number" && typeof b.run_id === "string" ? { seq: b.seq, run_id: b.run_id } : null,
+      note: typeof body.note === "string" ? body.note : null,
+    };
+  } catch (e) {
+    return thrown(url, e);
+  }
+}
+
+/** `POST /chat {project, text}`: the owner's line. Never throws; 400 LineTooLong and 503 ChatBusy are named. */
+export const postStudioLine = (project: string, text: string, csrf: string | null, fetchFn: FetchLike = defaultFetch): Promise<StudioPostResult> =>
+  postStudio(project, { text }, csrf, fetchFn);
+
+/** `POST /chat {project, pressed: {seq, index}}`: the press line (the supervisor writes `pressed: <label>`). */
+export const postPress = (project: string, seq: number, index: number, csrf: string | null, fetchFn: FetchLike = defaultFetch): Promise<StudioPostResult> =>
+  postStudio(project, { pressed: { seq, index } }, csrf, fetchFn);
+
+export type SendResult = { ok: true } | Failure;
+/** One proposal request (`POST` its body with the CSRF header). Never throws; a refusal is named. */
+export async function sendRequest(url: string, body: Record<string, unknown>, csrf: string | null, fetchFn: FetchLike = defaultFetch): Promise<SendResult> {
+  try {
+    const res = await fetchFn(url, post(csrf, body));
+    if (!res.ok) return await failureOf(url, res);
+    return { ok: true };
+  } catch (e) {
+    return thrown(url, e);
+  }
+}
+
+/** `POST /jobs {project, job, proposal: {chat, seq, index}}`: a `queue` press (the cookie is admitted only with a
+ * recorded matching proposal, Settled shape 11). */
+export const postJob = (project: string, job: string, proposal: { chat: string; seq: number; index: number }, csrf: string | null, fetchFn: FetchLike = defaultFetch): Promise<SendResult> =>
+  sendRequest(JOBS_URL, { project, job, proposal }, csrf, fetchFn);
+
+/** A press's result: the press line's result, and `sent` — the proposal's request was answered 2xx (a `queue`,
+ * `answer` or `engagement` press). A failure with `sent` true is a press line that failed after its request went
+ * out: the caller keeps that button disabled (pressing again would repeat the request). A `queue` press posts no
+ * press line: the supervisor's `POST /jobs` gate records it with the submit (`seq: null` here; the line arrives on
+ * the stream). */
+export type PressResult = (StudioPostResult | { ok: true; seq: null; run_id: null; behind: null; note: null }) & { sent: boolean };
+
+/** The error shown when the request went out but the press line failed (`press` → `{ok: false, sent: true}`). */
+export const sentUnrecordedText = (error: string): string => `The request was sent, but its press line was not recorded: ${error}`;
+
+/** A press: the action's request (none for `open`), then, on a 2xx, the press line — except a `queue` press
+ * (`POST /jobs`), whose press line the supervisor's gate records atomically with its check (one press per proposal
+ * held by the server, not this page). `open` posts the press line before the caller navigates. Never throws. */
+export async function press(chat: string, seq: number, index: number, action: ProposalAction, csrf: string | null, fetchFn: FetchLike = defaultFetch): Promise<PressResult> {
+  if (action.kind === "disabled") return { ok: false, error: action.note, refusal: null, retryable: false, sent: false };
+  const sent = action.kind === "request";
+  if (sent) {
+    const r = await sendRequest(action.url, action.body, csrf, fetchFn);
+    if (!r.ok) return { ...r, sent: false };
+    if (action.url === JOBS_URL) return { ok: true, seq: null, run_id: null, behind: null, note: null, sent: true };
+  }
+  return { ...(await postPress(chat, seq, index, csrf, fetchFn)), sent };
+}
+
+// ------------------------------------------------------------ the sent presses, per tab (Story 39.3)
+
+/** The `answer` and `engagement` presses whose request went out but whose press line failed (`<reply seq>:<index>`)
+ * have no server binding (a `queue` press does: its gate records the line): they are kept in this tab's
+ * `sessionStorage` per project, so a reload keeps those buttons disabled. */
+export const STUDIO_SENT_KEY = "tk-studio.web.studio-chat.sent";
+const sentKey = (project: string) => `${STUDIO_SENT_KEY}.${project}`;
+const sessionStore = (): StorageLike | null => {
+  try {
+    return (globalThis as { sessionStorage?: StorageLike }).sessionStorage ?? null;
+  } catch {
+    return null;
+  }
+};
+
+/** The remembered sent presses of `project` (empty when absent, malformed, or the storage throws). */
+export function rememberedSent(project: string, storage: StorageLike | null = sessionStore()): Set<string> {
+  try {
+    const raw = storage?.getItem(sentKey(project));
+    const v: unknown = raw ? JSON.parse(raw) : [];
+    return new Set(Array.isArray(v) ? v.filter((k): k is string => typeof k === "string" && /^\d+:\d+$/.test(k)) : []);
+  } catch {
+    return new Set();
+  }
+}
+
+/** Remember `project`'s sent presses (best effort: a storage that throws is ignored). */
+export function rememberSent(project: string, keys: Iterable<string>, storage: StorageLike | null = sessionStore()): void {
+  try {
+    storage?.setItem(sentKey(project), JSON.stringify([...keys]));
+  } catch {
+    /* best effort */
+  }
 }

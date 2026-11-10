@@ -4,8 +4,11 @@
 // after a capped backoff of 1–30 s. The browser's own reconnect resends `Last-Event-ID` (the last seq); a reopen of
 // ours cannot set that header on a fresh EventSource, so it asks `?since=<last seq>`, which the route reads the same
 // way. A line at or below the last seq (a replay's overlap) is ignored. The DOM pieces are injectable.
+// Story 39.3: with no `id` the stream is the studio chat's (`GET /chat?project=<id>[&since=<n>]`), and its
+// `event: chat-delta` frames (`{run_id, reply_to, from, text}`, no `id:` line) reach `onDelta`; a malformed delta is
+// ignored. The watchdog is unchanged.
 import { BACKOFF_MAX_MS, BACKOFF_MIN_MS, WATCHDOG_MS, type EventSourceCtor, type EventSourceLike, type VisibilitySource } from "../live/stream";
-import { chatUrl, type ChatLine } from "./model";
+import { chatUrl, isChatDelta, studioChatUrl, type ChatDelta, type ChatLine } from "./model";
 
 export { WATCHDOG_MS };
 
@@ -23,10 +26,13 @@ export interface ChatStreamDeps {
 
 export interface ChatStreamOptions {
   project: string;
-  id: string;
+  /** The engagement; absent, the studio chat (Story 39.3). */
+  id?: string;
   /** The last seq already shown (the `GET /chat/{id}` read's `last_seq`): the stream replays only after it. */
   since: number;
   onLine: (line: ChatLine) => void;
+  /** Story 39.3: the studio chat's `chat-delta` frames (the reply text as the session produces it). */
+  onDelta?: (delta: ChatDelta) => void;
   onStatus?: (status: ChatStreamStatus) => void;
 }
 
@@ -92,6 +98,17 @@ export function openChatStream(opts: ChatStreamOptions, deps: ChatStreamDeps = {
     last = data.seq;
     opts.onLine(data);
   };
+  const onDelta = (ev: MessageEvent) => {
+    armWatchdog();
+    setStatus("live");
+    let data: unknown;
+    try {
+      data = JSON.parse(String(ev.data));
+    } catch {
+      return;
+    }
+    if (isChatDelta(data)) opts.onDelta?.(data); // a malformed delta is ignored
+  };
   const onOpen = () => {
     if (closed || !source) return;
     backoff = BACKOFF_MIN_MS;
@@ -118,6 +135,7 @@ export function openChatStream(opts: ChatStreamOptions, deps: ChatStreamDeps = {
     const old = source;
     source = null;
     old.removeEventListener("chat", onChat);
+    old.removeEventListener("chat-delta", onDelta);
     old.removeEventListener("error", onError);
     old.removeEventListener("open", onOpen);
     old.close();
@@ -129,9 +147,10 @@ export function openChatStream(opts: ChatStreamOptions, deps: ChatStreamDeps = {
       setStatus("reconnecting");
       return;
     }
-    const es = new EventSource(chatUrl(opts.project, opts.id, last));
+    const es = new EventSource(opts.id === undefined ? studioChatUrl(opts.project, last) : chatUrl(opts.project, opts.id, last));
     source = es;
     es.addEventListener("chat", onChat);
+    es.addEventListener("chat-delta", onDelta);
     es.addEventListener("error", onError);
     es.addEventListener("open", onOpen);
     armWatchdog();
