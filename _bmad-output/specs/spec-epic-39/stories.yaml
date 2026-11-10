@@ -239,7 +239,15 @@
     spec folder; the engine resolves it by the glob
     `39-8-model-and-effort-in-the-owners-hands-*.md`, and a file named
     `39-8-model-and-effort-in-the-owners-hands.md` is read as pending (loop deficiency
-    1, story 21-6).
+    1, story 21-6). Replan (39-2 gate, 2026-11-09): 39.2 created
+    `apps/studio-web/src/settings/SettingsScreen.tsx`, mounted at `/app/settings`,
+    which renders `<LoginCard />` then `Model and effort: {PLACEHOLDER.settings}`;
+    `screen.ts` keeps `PLACEHOLDER.settings = "Not built yet: Story 39.8"`, pinned in
+    `screen.test.ts`. Replace that line with `<RoutingCard />` below the login card,
+    drop `settings` from `PLACEHOLDER` (and any remaining `settings` placeholder case in
+    `App.tsx`), flip the `screen.test.ts` `PLACEHOLDER` pin and name the flip in the
+    spec. Leave `login.ts` and `LoginCard.tsx` as they are; the login card writes no
+    `localStorage` key.
 
 - id: "39-9-the-records-are-whole"
   title: "The Records Are Whole"

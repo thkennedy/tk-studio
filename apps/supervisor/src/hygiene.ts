@@ -17,6 +17,13 @@
  *              Story 39.1: and, when the supervisor's origin resolves (`supervisorOrigin`: TK_SUPERVISOR_TLS_NAME,
  *              else the bind), the absolute URL of the page that answers it (`route_url`, `open: <url>`, the last
  *              line): `/app/run/<id>` for a run's end; a cap or close-out carries `/app/chat/<id>?project=<p>`.
+ *   login      Story 39.2: the sandbox login's Task pass (`sandboxLoginPass`, from `drainQueue`'s `finally`): per configured
+ *              sandbox, the login read (a running sandbox, at most every 6 h while `ok`, every 1 h otherwise, or right
+ *              after a `renewed` close) or derived from the last `sandbox-login-check` and the clock (no exec: the Task
+ *              does not wait for a run to start the sandbox); `expiring`/`expired` mints one `tk-studio-owner` Task per
+ *              `refresh_expires_at` (`track.py block --source owner --task sandbox-login`), an `ok` after it moves it to
+ *              Done (`track.py close …`). Each outcome is a `sandbox-login-check` service event (no token, no URL).
+ *              Hole 69's `max-login` claim-refusal line is unchanged.
  *   transcript every terminal host run's session transcript is copied to TK_SUPERVISOR_TRANSCRIPT_BACKUP
  *              in the nightly layout (`<backup>/<slug>/<sid>.jsonl` + `<sid>/subagents/`), so the
  *              Story 21.6 restore finds it; an sbx transcript is VM-resident (skipped, recorded).
@@ -36,7 +43,8 @@ import { basename, dirname, join, posix, win32 } from "node:path";
 import { notifier, supervisorOrigin, underBunTest, WorkDirMissing, workDir, type Notifier } from "./env";
 import { canonicalPr } from "./planseams";
 import type { Queue, QueueRun } from "./queue";
-import { runProcess, type RunResult } from "./server";
+import { LOGIN_WARN_MS, SANDBOX_LOGIN_CHECK, type LoginState, type SandboxLoginReading } from "./sandbox";
+import { lastJsonObject, runProcess, type RunResult } from "./server";
 import { isSweep, sweepNotice, sweepSummary } from "./sweep";
 import { claudeConfigDir, locateTranscript, subagentTranscripts, transcriptBackupRoot } from "./transcript";
 
@@ -428,4 +436,110 @@ export async function sweepEnds(queue: Queue, deps: HygieneDeps = {}, only?: rea
     } catch { /* an unfinished lease goes stale: a later sweep re-claims it */ }
   }
   return handled;
+}
+
+// ------------------------------------------------------------ Story 39.2: the sandbox login's Task pass
+
+export interface SandboxLoginPassDeps {
+  /** The configured sandboxes, in config order (`configuredSandboxes`). */
+  sandboxes: () => string[] | Promise<string[]>;
+  /** Settled shape 2's read (`readSandboxLogin`): a stopped sandbox answers `unknown`, `sandbox stopped`, with no exec. */
+  read: (sb: string) => Promise<SandboxLoginReading>;
+  /** The first configured, registered, Jira-bound project root placing on `sb`, else null. */
+  boundRoot: (sb: string) => Promise<string | null>;
+  /** `uv run track.py <args>` at `root` (timeout 120). */
+  track: (root: string, args: string[]) => Promise<RunResult>;
+  /** The supervisor's origin (`supervisorOrigin`), else null: the Task then carries the route path only. */
+  origin: () => string | null;
+  now?: () => number;
+}
+
+/** The read throttle: a running sandbox is read again after 6 h while its last check is `ok`, after 1 h otherwise. */
+export const LOGIN_READ_OK_MS = 6 * 3_600_000;
+export const LOGIN_READ_MS = 3_600_000;
+/** A failed or skipped Task call is tried again after this long (never every drain pass). */
+export const LOGIN_TASK_RETRY_MS = 3_600_000;
+
+type Check = { seq: number; at: string; detail: Record<string, any> };
+
+/** Story 39.2 (Settled shape 7): the sandbox login's Task pass, per configured sandbox. Never throws. */
+export async function sandboxLoginPass(queue: Queue, deps: SandboxLoginPassDeps): Promise<void> {
+  let sandboxes: string[];
+  try { sandboxes = await deps.sandboxes(); } catch { return; }
+  for (const sb of sandboxes) {
+    try { await loginPassOne(queue, sb, deps); } catch { /* the next pass */ }
+  }
+}
+
+async function loginPassOne(queue: Queue, sb: string, deps: SandboxLoginPassDeps): Promise<void> {
+  const nowMs = (deps.now ?? Date.now)();
+  const checks: Check[] = queue.serviceEvents(SANDBOX_LOGIN_CHECK).filter((e) => e.detail?.sandbox === sb) as Check[];
+  const renewals = queue.serviceEvents("sandbox-login").filter((e) => e.detail?.sandbox === sb && e.detail?.result === "renewed");
+  const lastRead = checks.findLast((c) => c.detail.derived !== true);
+  const renewedAfter = (c: Check | undefined) => !!c && renewals.some((r) => r.seq > c.seq);
+  const age = lastRead ? nowMs - Date.parse(lastRead.at) : Infinity;
+  const due = !lastRead || age >= (lastRead.detail.state === "ok" ? LOGIN_READ_OK_MS : LOGIN_READ_MS) || renewedAfter(lastRead);
+  let reading: { state: LoginState; refresh_expires_at: string | null; days_left: number | null; derived: boolean } | null = null;
+  if (due) {
+    const r = await deps.read(sb);
+    if (!(r.state === "unknown" && r.reason === "sandbox stopped")) {
+      reading = { state: r.state, refresh_expires_at: r.refresh_expires_at, days_left: r.days_left, derived: false };
+    }
+  }
+  if (!reading) {
+    // The clock alone: the last check that knew the expiry, with no renewal after it.
+    const known = checks.findLast((c) => typeof c.detail.refresh_expires_at === "string");
+    if (!known || renewedAfter(known)) return;
+    const refresh = Date.parse(known.detail.refresh_expires_at);
+    if (!Number.isFinite(refresh)) return;
+    const state: LoginState = known.detail.state === "expired" || refresh <= nowMs ? "expired" : refresh - nowMs <= LOGIN_WARN_MS ? "expiring" : "ok";
+    reading = { state, refresh_expires_at: known.detail.refresh_expires_at, days_left: Math.max(0, Math.floor((refresh - nowMs) / 86_400_000)), derived: true };
+  }
+  const base = {
+    sandbox: sb, state: reading.state, refresh_expires_at: reading.refresh_expires_at, days_left: reading.days_left, ...(reading.derived ? { derived: true } : {}),
+  };
+  const R = reading.refresh_expires_at;
+  const recent = (c: Check) => nowMs - Date.parse(c.at) < LOGIN_TASK_RETRY_MS;
+  const record = (extra: Record<string, unknown> = {}) => queue.serviceEvent(SANDBOX_LOGIN_CHECK, { ...base, ...extra }, new Date(nowMs).toISOString());
+  if ((reading.state === "expiring" || reading.state === "expired") && R) {
+    const forR = checks.filter((c) => c.detail.refresh_expires_at === R);
+    if (forR.some((c) => typeof c.detail.task === "string")) { if (!reading.derived) record(); return; }
+    if (forR.filter((c) => "task" in c.detail || "task_skipped" in c.detail).some(recent)) {
+      if (!reading.derived) record();
+      return;
+    }
+    const root = await deps.boundRoot(sb);
+    if (!root) { record({ task: null, task_skipped: `no bound project places on ${sb}` }); return; }
+    const origin = deps.origin();
+    const args = ["block", "--directory", root, "--source", "owner", "--task", "sandbox-login", "--sandbox", sb, "--expires", R,
+      ...(origin ? ["--url", `${origin}/app/settings`] : [])];
+    const out = await trackCall(deps, root, args);
+    const key = out.ok ? out.issues.find((i) => typeof i.issue === "string")?.issue : undefined;
+    record(key ? { task: key } : { task: null, task_error: out.ok ? "track.py named no issue" : out.error });
+    return;
+  }
+  if (reading.state === "ok") {
+    const closed = new Set(checks.flatMap((c) => Array.isArray(c.detail.closed) ? c.detail.closed as string[] : []));
+    const open = [...new Set(checks.filter((c) => typeof c.detail.task === "string" && c.detail.refresh_expires_at !== R && !closed.has(c.detail.task))
+      .map((c) => c.detail.task as string))];
+    const lastTry = checks.findLast((c) => c.detail.state === "ok" && "task_error" in c.detail);
+    if (open.length && R && !(lastTry && recent(lastTry))) {
+      const root = await deps.boundRoot(sb);
+      if (!root) { if (!reading.derived) record(); return; }
+      const out = await trackCall(deps, root, ["close", "--directory", root, "--source", "owner", "--task", "sandbox-login", "--sandbox", sb, "--expires", R]);
+      if (out.ok) record({ closed: open });
+      else record({ task_error: out.error });
+      return;
+    }
+  }
+  if (!reading.derived) record();
+}
+
+/** One `track.py` call: its JSON block's `ok` and `issues`, or the failure (clipped). Never throws. */
+async function trackCall(deps: SandboxLoginPassDeps, root: string, args: string[]): Promise<{ ok: true; issues: { issue?: unknown }[] } | { ok: false; error: string }> {
+  let r: RunResult;
+  try { r = await deps.track(root, args); } catch (e) { return { ok: false, error: message(e).slice(0, 300) }; }
+  const o = lastJsonObject(r.stdout) as Record<string, any> | null;
+  if (o && o.ok === true) return { ok: true, issues: Array.isArray(o.issues) ? o.issues.filter((i: unknown) => i && typeof i === "object") : [] };
+  return { ok: false, error: String(o?.reason ?? o?.error ?? `track.py ${args[0]} exited ${r.exit}: ${(r.stderr || r.stdout).trim()}`).slice(0, 300) };
 }

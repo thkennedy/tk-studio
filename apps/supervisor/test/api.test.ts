@@ -13,7 +13,7 @@ import { CancelRaced, cancelRun, CANCELLED_REASON, endCancelledLeftovers, launch
 import { ApiBindMissing, ApiPortInvalid, ApiTokenMissing, apiBind, apiPort, apiToken } from "../src/env";
 import { END_HYGIENE_EVENTS, recordClaimRefusal } from "../src/hygiene";
 import { type QueueEvent, Queue, RunTerminal, STUDIO_END_RETRY_LIMIT, type EngineProbe, type Owner, type Probes, type QueueRun, type WorkerKill } from "../src/queue";
-import { fakeBin } from "./fakes";
+import { fakeBin, fakeSbx } from "./fakes";
 import { dump as dumpYaml } from "js-yaml";
 import { tempDir, track } from "./tmp";
 
@@ -2531,4 +2531,154 @@ describe("Story 32.2: the chat routes (contract 0.1.27 additive)", () => {
     expect(fx.chatRuns()).toHaveLength(1);
     rmSync(lock);
   }, 20_000);
+});
+
+describe("Story 39.2: GET /sandbox/login, POST /sandbox/login/start and /code (contract 0.1.35 additive)", () => {
+  const SECRET = "s".repeat(48);
+  const SB = "claude-tk-studio";
+  const DAY = 86_400_000;
+  const TOKEN_IN_FILE = "sk-ant-oat01-API-FAKE-TOKEN", EMAIL = "owner@example.invalid";
+  const CODE = "XyZ987_code#STATE1";
+  const PROBE = { loggedIn: true, authMethod: "claude.ai", subscriptionType: "max", email: EMAIL, orgName: "Fake Org" };
+  const KEYS = ["access_expires_at", "auth_method", "checked_at", "days_left", "logged_in", "ok", "refresh_expires_at", "sandbox", "state", "subscription_type"];
+  const creds = (refreshMs: number) => ({ claudeAiOauth: { accessToken: TOKEN_IN_FILE, refreshToken: "sk-ant-ort01-FAKE", expiresAt: Date.now() + 3_600_000, refreshTokenExpiresAt: refreshMs } });
+  let sbx: ReturnType<typeof fakeSbx>;
+  beforeAll(() => { sbx = fakeSbx(); });
+  const JOBS = { jobs: { "tk-studio/run-epic-39": { tier: "sbx" as const, sandbox: SB }, "tk-studio/sweep": { tier: "sbx" as const, sandbox: SB }, "other/run": { tier: "sbx" as const, sandbox: "claude-other" } }, logins: {} };
+  function routed(o: { config?: typeof JOBS } = {}) {
+    const queue = track(new Queue(join(tempDir("tk-sup-login-q-"), "q.db"), { ownerAlive: () => false, engineLive: async () => ({ live: false }) }));
+    const logs: string[] = [];
+    const handler = createApi({
+      queue, token: TOKEN, session: { secret: SECRET }, submit: async () => { throw new Error("never"); },
+      registry: async () => ({ projects: {} }), env: { TK_STUDIO_HOME: tempDir("tk-sup-login-home-") },
+      sandboxLogin: { config: () => o.config ?? JOBS, sbx: { env: { ...process.env, SBX_BIN: sbx.bin } }, pollMs: 20, urlWaitMs: 800, codeWaitMs: 1500 },
+    });
+    const cookie = `${SESSION_COOKIE}=${signSession(SECRET, "token", Date.now())}`;
+    const csrf = csrfToken(SECRET, cookie.slice(SESSION_COOKIE.length + 1));
+    const call = async (method: string, path: string, headers: Record<string, string> = { authorization: `Bearer ${TOKEN}` }, body?: unknown) => {
+      const res = await handler(new Request(`${BASE}${path}`, { method, headers: { ...(body !== undefined ? { "content-type": "application/json" } : {}), ...headers }, ...(body !== undefined ? { body: typeof body === "string" ? body : JSON.stringify(body) } : {}) }));
+      const text = await res.text();
+      logs.push(text);
+      return { status: res.status, headers: res.headers, json: JSON.parse(text) as Record<string, any> };
+    };
+    return { call, cookie, csrf, queue, logs };
+  }
+  const read = (fx: ReturnType<typeof routed>, q = "") => fx.call("GET", `/sandbox/login${q}`);
+  const setFile = (o: Record<string, unknown>) => sbx.answer({ ls: { [SB]: "running", "claude-other": "running" }, ...o });
+
+  test("AC1: each state through the fake probe and the fake file — ok, expiring, expired (refresh past, logged out), unknown (probe, method, file); exactly the named keys, never a token or the email", async () => {
+    const fx = routed();
+    const rows: [Record<string, unknown>, string, string | undefined][] = [
+      [{ auth: [PROBE], creds: creds(Date.now() + 12 * DAY) }, "ok", undefined],
+      [{ auth: [PROBE], creds: creds(Date.now() + 2 * DAY) }, "expiring", undefined],
+      [{ auth: [PROBE], creds: creds(Date.now() - DAY) }, "expired", undefined],
+      [{ auth: ["out"], creds: creds(Date.now() + 12 * DAY) }, "expired", undefined],
+      [{ auth: ["fail"], creds: creds(Date.now() + 12 * DAY) }, "unknown", "the login probe failed: exit 1"],
+      [{ auth: ["garbage"], creds: creds(Date.now() + 12 * DAY) }, "unknown", "the login probe failed: unparseable"],
+      [{ auth: [{ loggedIn: true, authMethod: "console", email: EMAIL }], creds: creds(Date.now() + 12 * DAY) }, "unknown", "logged in with 'console', not the claude.ai subscription (the preflight refuses it)"],
+      [{ auth: [PROBE], creds: "fail" }, "unknown", "the credentials file was not read: exit 1"],
+      [{ auth: [PROBE], creds: "garbage" }, "unknown", "the credentials file was not read: unparseable"],
+      [{ auth: [PROBE], creds: { claudeAiOauth: { accessToken: TOKEN_IN_FILE } } }, "unknown", "the credentials file was not read: no refreshTokenExpiresAt"],
+    ];
+    for (const [answers, state, reason] of rows) {
+      setFile(answers);
+      const res = await read(fx, "?project=tk-studio");
+      expect(res.status).toBe(200);
+      expect(res.json.state).toBe(state);
+      expect(res.json.reason).toBe(reason);
+      expect(Object.keys(res.json).sort()).toEqual(reason ? [...KEYS, "reason"].sort() : KEYS);
+    }
+    setFile({ auth: [PROBE], creds: creds(Date.now() + 12 * DAY + 60_000) });
+    expect((await read(fx, "?project=tk-studio")).json).toMatchObject({ ok: true, sandbox: SB, logged_in: true, auth_method: "claude.ai", subscription_type: "max", days_left: 12, state: "ok" });
+    expect(fx.queue.serviceEvents()).toEqual([]); // GET never writes an event
+    for (const line of fx.logs) { expect(line).not.toContain(TOKEN_IN_FILE); expect(line).not.toContain(EMAIL); expect(line).not.toContain("Fake Org"); }
+  });
+
+  test("AC1: a stopped sandbox → unknown `sandbox stopped`, nothing exec'd or started; the last check's values when one exists", async () => {
+    const fx = routed();
+    sbx.answer({ ls: { [SB]: "stopped" } });
+    const before = sbx.calls().length;
+    const res = await read(fx, "?project=tk-studio");
+    expect(res.json).toMatchObject({ state: "unknown", reason: "sandbox stopped", refresh_expires_at: null, days_left: null, logged_in: null });
+    expect(sbx.calls().slice(before).map((c) => c.argv)).toEqual([["ls"]]);
+    fx.queue.serviceEvent("sandbox-login-check", { sandbox: SB, state: "ok", refresh_expires_at: "2026-11-24T10:00:43.000Z", days_left: 15 }, "2026-11-09T08:00:00.000Z");
+    expect((await read(fx, "?project=tk-studio")).json).toMatchObject({ state: "unknown", reason: "sandbox stopped", refresh_expires_at: "2026-11-24T10:00:43.000Z", days_left: 15, checked_at: "2026-11-09T08:00:00.000Z" });
+  });
+
+  test("Which sandbox: the one configured by default (narrowed by ?project=), SandboxRequired with several or none, UnknownSandbox outside the config, SchemaError for a bad name", async () => {
+    setFile({ auth: [PROBE], creds: creds(Date.now() + 12 * DAY) });
+    const fx = routed();
+    const several = await read(fx);
+    expect(several.status).toBe(400);
+    expect(several.json).toMatchObject({ ok: false, error: "SandboxRequired", candidates: [SB, "claude-other"] });
+    expect((await read(fx, "?project=tk-studio")).json).toMatchObject({ ok: true, sandbox: SB });
+    expect((await read(fx, "?sandbox=claude-other")).json).toMatchObject({ ok: true, sandbox: "claude-other" });
+    expect(await read(fx, "?sandbox=claude-nope")).toMatchObject({ status: 404, json: { ok: false, error: "UnknownSandbox", sandbox: "claude-nope" } });
+    expect(await read(fx, "?sandbox=-bad%20name")).toMatchObject({ status: 400, json: { ok: false, error: "SchemaError" } });
+    const none = routed({ config: { jobs: {}, logins: {} } as unknown as typeof JOBS });
+    expect(await read(none)).toMatchObject({ status: 400, json: { ok: false, error: "SandboxRequired", candidates: [] } });
+    expect((await fx.call("POST", "/sandbox/login")).status).toBe(405);
+  });
+
+  test("Cookie: GET carries X-CSRF-Token; the two POSTs need it (403 CsrfRefused without); the bearer needs none", async () => {
+    setFile({ auth: [PROBE], creds: creds(Date.now() + 12 * DAY), login: {} });
+    const fx = routed();
+    const got = await fx.call("GET", "/sandbox/login?project=tk-studio", { cookie: fx.cookie });
+    expect(got.status).toBe(200);
+    expect(got.headers.get("x-csrf-token")).toBe(fx.csrf);
+    expect((await read(fx, "?project=tk-studio")).headers.get("x-csrf-token")).toBeNull();
+    for (const path of ["/sandbox/login/start", "/sandbox/login/code"]) {
+      expect(await fx.call("POST", path, { cookie: fx.cookie }, {})).toMatchObject({ status: 403, json: { ok: false, error: "CsrfRefused" } });
+    }
+    const started = await fx.call("POST", "/sandbox/login/start", { cookie: fx.cookie, "x-csrf-token": fx.csrf }, { sandbox: SB });
+    expect(started.status).toBe(200);
+    const coded = await fx.call("POST", "/sandbox/login/code", { cookie: fx.cookie, "x-csrf-token": fx.csrf }, { login_id: started.json.login_id, code: CODE });
+    expect(coded.status).toBe(200);
+    expect(Object.keys(coded.json).sort()).toEqual(KEYS);
+  });
+
+  test("AC2 through the routes: start 200 {login_id, url, started_at, expires_at}; a second start LoginInProgress; the code renews and the answer is the read; no URL, code or token in any event or other answer", async () => {
+    setFile({ auth: [PROBE], creds: creds(Date.now() + 30 * DAY), login: { url_after: 1 } });
+    const fx = routed();
+    const start = await fx.call("POST", "/sandbox/login/start", undefined, { sandbox: SB });
+    expect(start.status).toBe(200);
+    expect(Object.keys(start.json).sort()).toEqual(["expires_at", "login_id", "ok", "started_at", "url"]);
+    expect(start.json.url).toContain("/oauth/authorize?");
+    const again = await fx.call("POST", "/sandbox/login/start", undefined, {});
+    expect(again).toMatchObject({ status: 400, json: { error: "SandboxRequired" } });
+    const busy = await fx.call("POST", "/sandbox/login/start", undefined, { sandbox: SB });
+    expect(busy).toMatchObject({ status: 409, json: { ok: false, error: "LoginInProgress", sandbox: SB, login_id: start.json.login_id, expires_at: start.json.expires_at } });
+    const bad = await fx.call("POST", "/sandbox/login/code", undefined, { login_id: start.json.login_id, code: "no-hash-here" });
+    expect(bad).toMatchObject({ status: 400, json: { ok: false, error: "SchemaError", detail: "the code is the whole text claude.ai shows after you approve (it contains a #)" } });
+    expect((await fx.call("POST", "/sandbox/login/code", undefined, { login_id: "XYZ", code: CODE })).json.error).toBe("SchemaError");
+    expect((await fx.call("POST", "/sandbox/login/code", undefined, { login_id: start.json.login_id, code: CODE, url: "x" })).json.error).toBe("SchemaError");
+    expect((await fx.call("POST", "/sandbox/login/code", undefined, "{nope")).json.error).toBe("MalformedJson");
+    expect(await fx.call("POST", "/sandbox/login/code", undefined, { login_id: "0123456789ab", code: CODE })).toMatchObject({ status: 404, json: { error: "UnknownLogin" } });
+    const code = await fx.call("POST", "/sandbox/login/code", undefined, { login_id: start.json.login_id, code: `  ${CODE}\n` });
+    expect(code.status).toBe(200);
+    expect(code.json).toMatchObject({ ok: true, sandbox: SB, state: "ok", days_left: 29 });
+    expect(sbx.stdin().at(-1)?.stdin).toBe(CODE);
+    expect(await fx.call("POST", "/sandbox/login/code", undefined, { login_id: start.json.login_id, code: CODE })).toMatchObject({ status: 409, json: { error: "LoginClosed", result: "renewed" } });
+    const events = JSON.stringify(fx.queue.serviceEvents());
+    expect(fx.queue.serviceEvents("sandbox-login").map((e) => e.detail!.result ?? "open")).toEqual(["open", "renewed"]);
+    for (const secret of [start.json.url, "oauth", CODE, "STATE1", TOKEN_IN_FILE, EMAIL]) expect(events).not.toContain(secret);
+    const others = fx.logs.filter((l) => l !== JSON.stringify(start.json));
+    for (const l of others) { expect(l).not.toContain("/oauth/authorize"); expect(l).not.toContain(TOKEN_IN_FILE); expect(l).not.toContain(EMAIL); expect(l).not.toContain("XyZ987"); }
+  });
+
+  test("AC2 refusals by name: LoginWhileLive (naming the run), SandboxStopped, LoginStartFailed — each but the last writing nothing", async () => {
+    setFile({ login: {} });
+    const fx = routed();
+    const run = fx.queue.enqueue({ jobId: "run-epic-39", root: tempDir("tk-sup-login-root-"), projectId: "tk-studio", definition: { id: "run-epic-39", trigger: "one-shot", target: { skill: "tk-studio-launch" } }, tier: "sbx", sandbox: SB }).run;
+    expect((await fx.queue.claim(run.run_id, { pid: process.pid, host: hostname(), nonce: "login" })).claimed).toBe(true);
+    expect(await fx.call("POST", "/sandbox/login/start", undefined, { sandbox: SB })).toEqual({ status: 409, headers: expect.anything(), json: { ok: false, error: "LoginWhileLive", sandbox: SB, run_id: run.run_id, state: "running" } });
+    expect(fx.queue.serviceEvents()).toEqual([]);
+    sbx.answer({ ls: { "claude-other": "stopped" } });
+    expect(await fx.call("POST", "/sandbox/login/start", undefined, { sandbox: "claude-other" })).toMatchObject({ status: 409, json: { ok: false, error: "SandboxStopped", sandbox: "claude-other" } });
+    expect(fx.queue.serviceEvents()).toEqual([]);
+    sbx.answer({ ls: { "claude-other": "running" }, login: { url: "none" } });
+    const failed = await fx.call("POST", "/sandbox/login/start", undefined, { sandbox: "claude-other" });
+    expect(failed).toMatchObject({ status: 500, json: { ok: false, error: "LoginStartFailed", sandbox: "claude-other", last_line: "Opening browser to sign in…" } });
+    expect(fx.queue.serviceEvents("sandbox-login").map((e) => e.detail!.result ?? "open")).toEqual(["open", "failed"]);
+  });
 });

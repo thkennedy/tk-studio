@@ -129,13 +129,14 @@ describe("the route table (Story 39.1)", () => {
     expect(parseRoute("/app/inbox/K-1", "?project=")).toEqual({ route: { name: "issue", key: "K-1", project: null } });
   });
 
+  // Story 39.2: the Settings screen is built (the Sandbox login card); its placeholder now names 39.8's part.
   it("the placeholders name the story that builds each screen", () => {
     expect(PLACEHOLDER).toEqual({
       story: "Not built yet: Story 39.4",
       run: "Not built yet: Story 39.5",
       chat: "Not built yet: Story 39.3",
       checkin: "Not built yet: Story 39.7",
-      settings: "Not built yet: Story 39.2",
+      settings: "Not built yet: Story 39.8",
     });
   });
 

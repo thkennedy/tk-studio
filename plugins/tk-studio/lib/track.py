@@ -285,6 +285,47 @@ issue). A temporary failure ends
 `partial`, `ok: false`, `retry: true`. It holds the engagement's
 `track.lock` as `close` does. The supervisor's approve pass is the caller
 (`apps/supervisor/src/approve.ts`), on a bound project only.
+
+Story 39.2 gives the owner's own chores a source, starting with the sandbox
+login's renewal (the supervisor's drain pass, `hygiene.ts sandboxLoginPass`,
+is the caller, on a bound project only):
+
+  uv run track.py block --directory ROOT --source owner --task sandbox-login
+      --sandbox SB --expires ISO [--url URL] [--dry-run]
+  uv run track.py close --directory ROOT --source owner --task sandbox-login
+      --sandbox SB --expires ISO [--dry-run]
+
+The Task is keyed by the login's `refresh_expires_at` (ISO): a `Task`
+labelled `tk-studio-owner` and `tk-studio-sandbox-login`, assigned to the
+owner, summary `Renew the sandbox's Claude login before <YYYY-MM-DD
+HH:MM>Z` (the expiry in UTC, floored to the minute), its description the
+expiry, the Settings card's URL (`--url`, `<origin>/app/settings`; without
+it the route path `/app/settings`), the two steps (Renew, Open sign-in;
+paste the code, Send) and `Key: sandbox-login <SB> <ISO>`. `block` finds the
+open Task (`project = KEY AND labels = "tk-studio-sandbox-login" AND
+statusCategory != Done`, then in code this sandbox's description line
+`Key: sandbox-login <SB> ` and the exact summary, the lowest key winning;
+another sandbox's Task is never found), creates it when absent, and moves it to `Blocked - Awaiting User`
+with `_block_issue` (the mention comment: `the sandbox <SB>'s Claude login
+expires|expired <date>`, resolved by renewing it on the URL). `close` gives
+every open sandbox-login Task of this sandbox (its `Key:` line) whose
+summary is not the given expiry's one comment `Resolved: renewed: the login is valid until <date>` (skipped when
+the newest agent comment says it), then moves it by name to `Block
+Resolved` (when a transition reaches it) and `Done`. `--source owner` is
+exclusive with `--story`, `--engagement`, `--reason`, `--resolves`,
+`--kind`, `--triage`, `--run-id` and `--ask` (on `close`: `--engagement`),
+each mix refused by name (exit 2, no call); `--task`, `--sandbox`,
+`--expires` and `--url` without it are refused too; `close` with neither
+`--engagement` nor `--source owner` is a JSON refusal (exit 2). More
+refusals, before any call: `UnknownTask` (any task but `sandbox-login`),
+`SandboxInvalid`, `ExpiresInvalid` (not ISO-8601 with `Z` or an offset),
+`UrlInvalid` (not `http(s)://…/app/settings`) and the agent seat's gaps. The
+result is `{ok, dry_run, source: "owner", task, sandbox, expires, issues:
+[{issue, created, transitioned, commented, moved?, skipped?, error?}],
+skipped[], notes, written: []}`; a 400 on the create is
+`IssueCreateRefused`; a temporary failure is `partial`, `ok: false`,
+`retry: true`; a dry run makes no Atlassian call (after the refusals) and
+names what it would do (`partial`).
 """
 from __future__ import annotations
 
@@ -1980,6 +2021,349 @@ def unblock_engagement(project_root: Path, engagement: str, kind: str,
 
 # --------------------------------------------------------------------- CLI
 
+# ------------------------------------------------- the owner's Task (39.2)
+
+OWNER_TASKS = ("sandbox-login",)
+OWNER_LABEL = "tk-studio-owner"
+SANDBOX_LOGIN_LABEL = "tk-studio-sandbox-login"
+OWNER_ISSUE_TYPE = "Task"
+SANDBOX_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$")
+SETTINGS_ROUTE = "/app/settings"
+SETTINGS_URL_RE = re.compile(r"^https?://[^\s/]+(?:/[^\s]*)?/app/settings$")
+_EXPIRES_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?"
+                         r"(Z|[+-]\d{2}:\d{2})$")
+OWNER_MIXES = ("--story", "--engagement", "--reason", "--resolves", "--kind",
+               "--triage", "--run-id", "--ask")
+
+
+def parse_expires(text) -> datetime | None:
+    """An ISO-8601 instant with `Z` or an offset, in UTC; None otherwise."""
+    text = str(text or "").strip()
+    if not _EXPIRES_RE.match(text):
+        return None
+    try:
+        when = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return when.astimezone(timezone.utc)
+
+
+def expires_iso(when: datetime) -> str:
+    """The key's instant: UTC, milliseconds, `Z` (as the supervisor's
+    `toISOString`)."""
+    return when.astimezone(timezone.utc).isoformat(
+        timespec="milliseconds").replace("+00:00", "Z")
+
+
+def expires_minute(when: datetime) -> str:
+    """`YYYY-MM-DD HH:MMZ`: the instant in UTC, floored to the minute."""
+    return when.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M") + "Z"
+
+
+def owner_task_summary(when: datetime) -> str:
+    """The sandbox-login Task's summary, keyed by the expiry."""
+    return f"Renew the sandbox's Claude login before {expires_minute(when)}"
+
+
+def owner_task_description(sandbox: str, when: datetime, url: str) -> str:
+    """The Task's plain-text description: the expiry, the two steps, the
+    key."""
+    iso = expires_iso(when)
+    return (f"The sandbox {sandbox}'s Claude login (the subscription's "
+            f"claude.ai grant) ends {iso}. Once it lapses, every run on the "
+            f"sandbox waits for a renewal.\n\n"
+            f"1. Open {url} and press Renew, then Open sign-in: approve on "
+            f"any device that holds your claude.ai session.\n"
+            f"2. Paste the code claude.ai shows into \"Paste the code "
+            f"claude.ai shows after you approve\" and press Send.\n\n"
+            f"The studio moves this Task to Done when it reads the renewed "
+            f"login.\n"
+            f"Key: sandbox-login {sandbox} {iso}")
+
+
+def owner_task_key_prefix(sandbox: str) -> str:
+    """The description's key line up to the expiry: the sandbox's own
+    Tasks carry it, another sandbox's never do."""
+    return f"Key: sandbox-login {sandbox} "
+
+
+def find_owner_tasks(client, project_key: str,
+                     sandbox: str) -> list[tuple[str, str]]:
+    """This sandbox's open sandbox-login Tasks `(key, summary)`, lowest key
+    first (JQL by label and status category; the summary carries no sandbox,
+    so the description's `Key: sandbox-login <sandbox> ` line is matched in
+    code, and another sandbox's Task is never found)."""
+    jql = (f'project = "{project_key}" AND labels = "{SANDBOX_LOGIN_LABEL}" '
+           f'AND statusCategory != Done')
+    prefix = owner_task_key_prefix(sandbox)
+    hits = []
+    for issue in jirabackend.search_jql(client, jql,
+                                        "summary,status,description"):
+        fields = issue.get("fields") or {}
+        description = fields.get("description")
+        lines = description.splitlines() if isinstance(description, str) \
+            else []
+        if not issue.get("key") or not any(
+                line.strip().startswith(prefix) for line in lines):
+            continue
+        hits.append((str(issue["key"]),
+                     str(fields.get("summary") or "").strip()))
+
+    def number(hit: tuple[str, str]) -> int:
+        tail = hit[0].rsplit("-", 1)[-1]
+        return int(tail) if tail.isdigit() else 0
+    return sorted(hits, key=number)
+
+
+def create_owner_task(client, project_key: str, owner: str, summary: str,
+                      description: str) -> str:
+    """`POST /issue` (`sweepdecisions._create_issue`'s form): a Task
+    labelled `tk-studio-owner` and `tk-studio-sandbox-login`, assigned to the
+    owner. A 400 is IssueCreateRefused."""
+    fields = {"project": {"key": project_key}, "summary": summary,
+              "issuetype": {"name": OWNER_ISSUE_TYPE},
+              "description": description,
+              "labels": [OWNER_LABEL, SANDBOX_LOGIN_LABEL],
+              "assignee": {"accountId": owner}}
+    posted, resp = client.request("POST", "/issue", {"fields": fields},
+                                  scope=jirabackend.SCOPE_WORK)
+    if posted == 400:
+        raise IssueCreateRefused(
+            f"creating {summary!r} (issue type {OWNER_ISSUE_TYPE!r}) "
+            f"returned {jirabackend._refusal(posted, resp)}")
+    if posted not in (200, 201) or not isinstance(resp, dict) \
+            or not resp.get("key"):
+        raise jirabackend.JiraError(f"track: POST /issue returned {posted}")
+    return str(resp["key"])
+
+
+def _owner_result(task, sandbox, expires, dry_run: bool) -> dict:
+    return {"ok": False, "dry_run": dry_run, "source": "owner", "task": task,
+            "sandbox": sandbox, "expires": expires, "issues": [],
+            "skipped": [], "notes": [], "written": []}
+
+
+def _owner_checks(root: Path, task, sandbox, expires, url, check_url: bool
+                  ) -> tuple[datetime | None, tuple | None, str | None]:
+    """The owner form's refusals before any call: (the expiry, the agent
+    seat, refusal)."""
+    if task not in OWNER_TASKS:
+        return None, None, (f"UnknownTask: --task {task!r} is not one of "
+                            f"{', '.join(OWNER_TASKS)}; no Atlassian call "
+                            f"made")
+    if not SANDBOX_NAME_RE.match(str(sandbox or "")):
+        return None, None, (f"SandboxInvalid: --sandbox {sandbox!r} is not a "
+                            f"sandbox name; no Atlassian call made")
+    when = parse_expires(expires)
+    if when is None:
+        return None, None, (f"ExpiresInvalid: --expires {expires!r} is not an "
+                            f"ISO-8601 instant with Z or an offset; no "
+                            f"Atlassian call made")
+    if check_url and url is not None and not SETTINGS_URL_RE.match(url):
+        return None, None, (f"UrlInvalid: --url {url!r} is not "
+                            f"http(s)://…{SETTINGS_ROUTE}; no Atlassian call "
+                            f"made")
+    settings, owner, gap = _agent_seat(root)
+    if gap:
+        return None, None, gap
+    return when, (settings, owner), None
+
+
+def block_owner_task(project_root: Path, task: str, sandbox: str,
+                     expires: str, url: str | None = None,
+                     dry_run: bool = False, transport=None,
+                     sleep=None, now: datetime | None = None) -> dict:
+    """`block --source owner --task sandbox-login` (see the module
+    docstring): find the open Task for the expiry, else create it; then
+    `_block_issue` to `Blocked - Awaiting User` with the mention comment."""
+    root = Path(project_root).resolve()
+    result = _owner_result(task, sandbox, expires, dry_run)
+
+    def refuse(why: str) -> dict:
+        return _finish(result, "blocked", f"track refused: {why}")
+
+    when, seat, gap = _owner_checks(root, task, sandbox, expires, url, True)
+    if gap:
+        return refuse(gap)
+    settings, owner = seat
+    result["expires"] = expires_iso(when)
+    route = url or SETTINGS_ROUTE
+    summary = owner_task_summary(when)
+    at = now or datetime.now(timezone.utc)
+    verb = "expired" if when <= at else "expires"
+    comment = comment_body(
+        owner, f"the sandbox {sandbox}'s Claude login {verb} "
+               f"{expires_minute(when)}",
+        f"renew it on {route} (Renew, Open sign-in, paste the code, Send)")
+    notes = result["notes"]
+    if dry_run:
+        # A dry run makes no Atlassian call at all: it names what it would do.
+        notes.append(f"dry run: would find {sandbox}'s open {summary!r}, "
+                     f"else create it ({OWNER_ISSUE_TYPE}, {OWNER_LABEL}, "
+                     f"{SANDBOX_LOGIN_LABEL}, assigned to the owner), and "
+                     f"move it to {jirabackend.BLOCKED_STATUS!r} with the "
+                     f"mention comment")
+        result["issues"].append({"issue": None, "created": False,
+                                 "transitioned": False, "commented": False})
+        return _finish(result, "partial", "dry run: nothing written and no "
+                       "call made; a real run would find or create, move and "
+                       "comment as `notes[]` names")
+    project_key = str(plansync._recorded(root, "planning.jira.project_key"))
+    client = jirabackend.client_for(settings, transport)
+    if sleep is not None:
+        client.sleep = sleep
+    key = None
+    try:
+        hits = [k for k, s in find_owner_tasks(client, project_key, sandbox)
+                if s == summary]
+        key = hits[0] if hits else None
+        created = False
+        if key is None:
+            key = create_owner_task(client, project_key, owner, summary,
+                                    owner_task_description(sandbox, when,
+                                                           route))
+            created = True
+        moved = _block_issue(client, owner, {"id": f"sandbox-login {sandbox}"},
+                             key, "owner", comment, False, notes)
+    except IssueCreateRefused as exc:
+        return refuse(f"IssueCreateRefused: {exc}")
+    except jirabackend.JiraError as exc:
+        result["issues"].append({"issue": key, "created": False,
+                                 "transitioned": False, "commented": False,
+                                 "error": str(exc)})
+        if transient(exc):
+            result["retry"] = True
+            return _finish(result, "partial", f"track retry: {exc} — a "
+                           f"temporary failure; call again on the next "
+                           f"pass", ok=False)
+        return refuse(str(exc))
+    entry = {"issue": key, "created": created,
+             "transitioned": moved["transitioned"],
+             "commented": moved["commented"]}
+    for name in ("skipped", "error"):
+        if name in moved:
+            entry[name] = moved[name]
+    result["issues"].append(entry)
+    if "error" in entry:
+        return refuse(f"{key}: {entry['error']}")
+    return _finish(result, "complete", None)
+
+
+def close_owner_task(project_root: Path, task: str, sandbox: str,
+                     expires: str, dry_run: bool = False, transport=None,
+                     sleep=None) -> dict:
+    """`close --source owner --task sandbox-login` (see the module
+    docstring): every open sandbox-login Task of this sandbox whose summary
+    is not the expiry's gets `Resolved: renewed: …` once, then `Block Resolved` (when a
+    transition reaches it) and `Done` by name."""
+    root = Path(project_root).resolve()
+    result = _owner_result(task, sandbox, expires, dry_run)
+
+    def refuse(why: str) -> dict:
+        return _finish(result, "blocked", f"track refused: {why}")
+
+    when, seat, gap = _owner_checks(root, task, sandbox, expires, None, False)
+    if gap:
+        return refuse(gap)
+    settings, owner = seat
+    result["expires"] = expires_iso(when)
+    summary = owner_task_summary(when)
+    comment = unblock_comment(f"renewed: the login is valid until "
+                              f"{expires_minute(when)}")
+    if dry_run:
+        # A dry run makes no Atlassian call at all: it names what it would do.
+        result["notes"].append(f"dry run: every open sandbox-login Task of "
+                               f"{sandbox} but {summary!r} would get {comment!r} and move "
+                               f"to {jirabackend.RESOLVED_STATUS!r}, then "
+                               f"{DONE_STATUS!r}")
+        return _finish(result, "partial", "dry run: nothing written and no "
+                       "call made; a real run would comment and move as "
+                       "`notes[]` names")
+    project_key = str(plansync._recorded(root, "planning.jira.project_key"))
+    client = jirabackend.client_for(settings, transport)
+    if sleep is not None:
+        client.sleep = sleep
+    notes, skipped = result["notes"], result["skipped"]
+    try:
+        for key, hit in find_owner_tasks(client, project_key, sandbox):
+            if hit == summary:
+                skipped.append(f"{key}: the current expiry's Task stays open")
+                continue
+            entry = {"issue": key, "created": False, "transitioned": False,
+                     "commented": False, "moved": []}
+            result["issues"].append(entry)
+            if strip_route(newest_agent_body(client, key, owner)) == comment:
+                entry.setdefault("skipped", []).append(
+                    f"comment: {key}'s newest agent comment already says "
+                    f"this")
+            else:
+                jirabackend.add_comment(client, key, comment)
+                entry["commented"] = True
+            name, _ = jirabackend._current_status(client, key)
+            for target in (jirabackend.RESOLVED_STATUS, DONE_STATUS):
+                if name == target:
+                    entry.setdefault("skipped", []).append(
+                        f"transition: {key} is already in {target!r}")
+                    continue
+                optional = (target == jirabackend.RESOLVED_STATUS
+                            and name != jirabackend.BLOCKED_STATUS)
+                tried: list[str] = []
+                if jirabackend.transition_to_name(client, key, target, tried,
+                                                  f"sandbox-login {sandbox}"
+                                                  ) is None:
+                    if optional:
+                        entry.setdefault("skipped", []).append(
+                            f"transition: {key} is not blocked ({name}); "
+                            f"{target!r} skipped")
+                        continue
+                    notes.extend(tried)
+                    entry["error"] = (f"NoTransition: no transition reaches "
+                                      f"{target!r} from {name!r}")
+                    return refuse(f"NoTransition: {key}: no transition "
+                                  f"reaches {target!r} from {name!r}")
+                notes.extend(tried)
+                entry["moved"].append(target)
+                entry["transitioned"] = True
+                name = target
+    except jirabackend.JiraError as exc:
+        if transient(exc):
+            result["retry"] = True
+            return _finish(result, "partial", f"track retry: {exc} — a "
+                           f"temporary failure; call again on the next "
+                           f"pass", ok=False)
+        return refuse(str(exc))
+    return _finish(result, "complete", None)
+
+
+def _owner_main(args, directory: Path, command: str) -> tuple[dict, int]:
+    """The `--source owner` dispatch for `block` and `close`: a flag of
+    another form is refused by name (exit 2, no call)."""
+    flags = (OWNER_MIXES if command == "block"
+             else ("--engagement",))
+    mixed = [flag for flag in flags
+             if getattr(args, flag[2:].replace("-", "_"), None) is not None]
+    if mixed:
+        result = _finish(_owner_result(args.task, args.sandbox, args.expires,
+                                       args.dry_run), "blocked",
+                         f"track refused: --source owner is exclusive with "
+                         f"{', '.join(mixed)}; no Atlassian call made")
+    elif command == "block":
+        result = block_owner_task(directory, args.task, args.sandbox,
+                                  args.expires, url=args.url,
+                                  dry_run=args.dry_run)
+    else:
+        result = close_owner_task(directory, args.task, args.sandbox,
+                                  args.expires, dry_run=args.dry_run)
+    return result, 2 if result.get("status") == "blocked" else 0
+
+
+def _owner_flags_elsewhere(args) -> list[str]:
+    """`--task`, `--sandbox`, `--expires` and `--url` given without
+    `--source owner`."""
+    return [flag for flag in ("--task", "--sandbox", "--expires", "--url")
+            if getattr(args, flag[2:], None) is not None]
+
+
 def main(argv: list[str] | None = None) -> int:
     # Headless output must survive a cp1252 Windows console (AD-11).
     if hasattr(sys.stdout, "reconfigure"):
@@ -2009,6 +2393,12 @@ def main(argv: list[str] | None = None) -> int:
     blk.add_argument("--run-id", help="the sweep's studio run id")
     blk.add_argument("--ask", action="append",
                      help="re-ask a DW id already answered (repeatable)")
+    # Story 39.2: `--source owner`'s own flags (validated in code)
+    blk.add_argument("--task", help="the owner's Task (sandbox-login)")
+    blk.add_argument("--sandbox", help="the sandbox whose login expires")
+    blk.add_argument("--expires", help="the login's refresh_expires_at "
+                                       "(ISO-8601, Z or an offset)")
+    blk.add_argument("--url", help="the Settings card's absolute URL")
     blk.add_argument("--dry-run", action="store_true")
     unb = sub.add_parser("unblock")
     unb.add_argument("--directory", required=True,
@@ -2025,7 +2415,13 @@ def main(argv: list[str] | None = None) -> int:
     cls = sub.add_parser("close")
     cls.add_argument("--directory", required=True,
                      help="project root (walks up to the nearest)")
-    cls.add_argument("--engagement", required=True, help="ENG-NNN")
+    # Story 39.2: --engagement or --source owner, checked in code (a refusal
+    # stays JSON, exit 2)
+    cls.add_argument("--engagement", help="ENG-NNN")
+    cls.add_argument("--source")
+    cls.add_argument("--task")
+    cls.add_argument("--sandbox")
+    cls.add_argument("--expires")
     cls.add_argument("--dry-run", action="store_true")
     # DW-51: the superseded cycle's issues moved to DNI (validated in code: a
     # refusal stays JSON, exit 2)
@@ -2133,10 +2529,36 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 2 if result.get("status") == "blocked" else 0
     if args.command == "close":
+        if args.source == "owner":
+            result, code = _owner_main(args, directory, "close")
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return code
+        if args.engagement is None or args.source is not None \
+                or _owner_flags_elsewhere(args):
+            result = _finish({"ok": False, "dry_run": args.dry_run,
+                              "engagement": args.engagement, "issue": None,
+                              "moved": [], "skipped": [], "notes": [],
+                              "written": []}, "blocked",
+                             "track refused: give --engagement ENG-NNN, or "
+                             "--source owner --task sandbox-login --sandbox "
+                             "SB --expires ISO; no Atlassian call made")
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 2
         result = close_engagement(directory, args.engagement,
                                   dry_run=args.dry_run)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 2 if result.get("status") == "blocked" else 0
+    if args.source == "owner":
+        result, code = _owner_main(args, directory, "block")
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return code
+    if _owner_flags_elsewhere(args):
+        result = _finish(_result(args.story, args.source or "run",
+                                 args.dry_run), "blocked",
+                         "track refused: --task, --sandbox, --expires and "
+                         "--url are --source owner's; no Atlassian call made")
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 2
     if args.source == "sweep":
         mixed = [flag for flag, value in (
             ("--story", args.story), ("--engagement", args.engagement),

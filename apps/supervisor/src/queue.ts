@@ -174,6 +174,22 @@ export function queueDbPath(env: Env = process.env, platform: NodeJS.Platform = 
  * win32 the process creation time via PowerShell). */
 export interface Owner { pid: number; host: string; nonce: string; start?: string | null }
 
+/** Story 39.2: the service-event kind of the per-sandbox login lease and its close (one kind, two shapes). */
+export const SANDBOX_LOGIN = "sandbox-login";
+/** Story 39.2: the run states that refuse the lease's take (`sandbox.ts` `RESTART_BLOCKING_STATES`'s values: a run in
+ * one holds the sandbox's Claude session; a `queued` run does not, the claim gate waits for the lease instead). */
+export const LOGIN_BLOCKING_STATES = ["running", "paused", "external"] as const;
+export type SandboxLoginResult = "renewed" | "refused" | "failed" | "expired";
+/** Story 39.2: a `sandbox-login` opening event. It never carries a sign-in URL or a code. */
+export interface SandboxLoginLease {
+  sandbox: string; login_id: string; owner: { pid: number; host: string; nonce: string; start?: string }; by: "owner";
+  started_at: string; deadline: string;
+}
+/** Story 39.2: a `sandbox-login` closing event. */
+export interface SandboxLoginClose {
+  sandbox: string; login_id: string; result: SandboxLoginResult; by: "owner"; started_at: string; ended_at: string; closed_by?: "drain";
+}
+
 /** Runs one bounded PowerShell command; null when it cannot run or fails. */
 export type PowerShellRunner = (command: string) => string | null;
 
@@ -602,7 +618,14 @@ export interface Holder {
 
 export type ClaimResult =
   | { claimed: true; run: QueueRun }
-  | { claimed: false; run: QueueRun; why: "terminal" | "running" | "owned" | "lock"; reason: string; holder?: Holder };
+  | {
+    claimed: false; run: QueueRun; reason: string; holder?: Holder;
+    /** `sandbox-login` (Story 39.2) is internal: the caller records it as its `sandbox-login:<sb>` claim refusal and
+     * never answers it as a `waited` value. */
+    why: "terminal" | "running" | "owned" | "lock" | "sandbox-login";
+    /** Story 39.2: the live `sandbox-login` lease on the run's sandbox (`why: "sandbox-login"`). */
+    lease?: SandboxLoginLease;
+  };
 
 /** Ends a minted studio run for an orphaned queue run (injected: the contract verbs live in cli.ts);
  * `state`: the studio run's terminal state once ended (or already). */
@@ -1311,6 +1334,17 @@ export class Queue {
             claimed: false, run, why: "owned",
             reason: `run ${runId} is queued under a live owner (pid ${run.owner_pid}${run.owner_host ? `@${run.owner_host}` : ""})`,
           };
+        }
+        // Story 39.2: a live `sandbox-login` lease on the run's sandbox refuses the claim here too, read in this
+        // transaction — the gate's last read (`claimGate`) precedes awaits (`validate`, `resolveCheckout`) a start may
+        // take the lease during, and `takeSandboxLogin` reads the run states in its own transaction, so the take and the
+        // claim never both win. The run stays `queued`, ownerless (as a lock wait), for the next drain pass.
+        const lease = run.sandbox ? this.openSandboxLogin(run.sandbox, Date.now()) : null;
+        if (lease) {
+          const reason = `sandbox ${lease.sandbox}: a Claude login renewal is in progress (login ${lease.login_id}, until ${lease.deadline})`;
+          this.db.query("UPDATE runs SET reason = ?, owner_pid = NULL, owner_host = NULL, owner_nonce = NULL, owner_start = NULL, updated = ? WHERE run_id = ?")
+            .run(reason, now(), runId);
+          return { claimed: false, run: this.must(runId), why: "sandbox-login", reason, lease };
         }
         const detail: Record<string, unknown> = { owner: ownerDetail(owner) };
         // Story 31.7: a `validate-resolution` run exists to un-pause the paused holder — it never waits on it,
@@ -2162,6 +2196,69 @@ export class Queue {
       ? this.db.query("SELECT * FROM service_events WHERE kind = ? ORDER BY seq").all(kind)
       : this.db.query("SELECT * FROM service_events ORDER BY seq").all()) as { seq: number; at: string; kind: string; detail: string | null }[];
     return rows.map((r) => ({ ...r, detail: r.detail ? JSON.parse(r.detail) : null }));
+  }
+
+  // ---------------------------------------------------------- Story 39.2: the sandbox-login lease
+
+  /** Story 39.2: the open `sandbox-login` leases (an opening event with no closing event for its `login_id`), oldest first. */
+  private openSandboxLogins(): SandboxLoginLease[] {
+    const evs = this.serviceEvents(SANDBOX_LOGIN);
+    const closed = new Set(evs.filter((e) => typeof e.detail?.result === "string").map((e) => String(e.detail!.login_id)));
+    return evs.filter((e) => e.detail && typeof e.detail.result !== "string" && typeof e.detail.login_id === "string" && !closed.has(e.detail.login_id))
+      .map((e) => e.detail as unknown as SandboxLoginLease);
+  }
+
+  /** Story 39.2: take the per-sandbox `sandbox-login` lease atomically (`.immediate()`): appends the opening event
+   * `{sandbox, login_id, owner, by: "owner", started_at, deadline}` (deadline = started_at + `leaseS`). Refused (the
+   * holding run answered, `held`) while a run on `sb` is `running`, `paused` or `external` (`LOGIN_BLOCKING_STATES`) —
+   * read in the same transaction, so a drain's claim (a separate process) and the take never both win; refused (the live
+   * lease answered) while an open lease on `sb` has its deadline ahead. */
+  takeSandboxLogin(sb: string, loginId: string, nowMs: number, leaseS: number, self: Owner = selfOwner()): { lease: SandboxLoginLease } | { live: SandboxLoginLease } | { held: QueueRun } {
+    return this.db.transaction(() => {
+      const held = this.runs().find((r) => r.sandbox === sb && (LOGIN_BLOCKING_STATES as readonly string[]).includes(r.state));
+      if (held) return { held };
+      const live = this.openSandboxLogin(sb, nowMs);
+      if (live) return { live };
+      const lease: SandboxLoginLease = {
+        sandbox: sb, login_id: loginId, owner: ownerDetail(self), by: "owner",
+        started_at: new Date(nowMs).toISOString(), deadline: new Date(nowMs + leaseS * 1000).toISOString(),
+      };
+      this.serviceEvent(SANDBOX_LOGIN, lease as unknown as Record<string, unknown>);
+      return { lease };
+    }).immediate();
+  }
+
+  /** Story 39.2: close a lease once: `{sandbox, login_id, result, by: "owner", started_at, ended_at[, closed_by]}`. False
+   * (nothing written) when no such lease opened or it is already closed. */
+  closeSandboxLogin(loginId: string, result: SandboxLoginResult, nowMs: number = Date.now(), closedBy?: "drain"): boolean {
+    return this.db.transaction(() => {
+      const state = this.sandboxLogin(loginId);
+      if (!state || state.closed) return false;
+      this.serviceEvent(SANDBOX_LOGIN, {
+        sandbox: state.open.sandbox, login_id: loginId, result, by: "owner", started_at: state.open.started_at,
+        ended_at: new Date(nowMs).toISOString(), ...(closedBy ? { closed_by: closedBy } : {}),
+      });
+      return true;
+    }).immediate();
+  }
+
+  /** Story 39.2: the live lease on `sb` (open, its deadline ahead of `nowMs`), else null. */
+  openSandboxLogin(sb: string, nowMs: number = Date.now()): SandboxLoginLease | null {
+    return this.openSandboxLogins().find((l) => l.sandbox === sb && Date.parse(l.deadline) > nowMs) ?? null;
+  }
+
+  /** Story 39.2: one login's opening and closing events (`closed` null while open); null for an unknown login. */
+  sandboxLogin(loginId: string): { open: SandboxLoginLease; closed: SandboxLoginClose | null } | null {
+    const evs = this.serviceEvents(SANDBOX_LOGIN).filter((e) => e.detail?.login_id === loginId);
+    const open = evs.find((e) => typeof e.detail?.result !== "string");
+    if (!open) return null;
+    const closed = evs.find((e) => typeof e.detail?.result === "string");
+    return { open: open.detail as unknown as SandboxLoginLease, closed: (closed?.detail as unknown as SandboxLoginClose) ?? null };
+  }
+
+  /** Story 39.2: the open leases past their deadline (the drain pass closes them `expired`). */
+  staleSandboxLogins(nowMs: number = Date.now()): SandboxLoginLease[] {
+    return this.openSandboxLogins().filter((l) => !(Date.parse(l.deadline) > nowMs));
   }
 
   // ---------------------------------------------------------- the agent registry (Story 29.2)

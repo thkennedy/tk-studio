@@ -272,8 +272,20 @@ type SbxAnswers = {
    * `stop <sb>` makes a listed sandbox `stopped` and a successful `run -d --name <sb>` makes it `running`. */
   ls?: Record<string, string> | "fail";
   /** Story 33.3: the answers to `exec <sb> env -u ANTHROPIC_API_KEY claude auth status --json`, consumed one per call;
-   * the last one stays (`in`: logged in with claude.ai, `out`: loggedIn false). */
-  auth?: ("in" | "out")[];
+   * the last one stays (`in`: logged in with claude.ai on the max subscription, `out`: loggedIn false). Story 39.2: an
+   * object is printed verbatim, `fail` exits 1, `garbage` prints no JSON. */
+  auth?: ("in" | "out" | "fail" | "garbage" | Record<string, unknown>)[];
+  /** Story 39.2: `exec <sb> cat /home/agent/.claude/.credentials.json` — an object printed verbatim (a fake credential
+   * file, its `accessToken` included), `fail` (No such file, exit 1; the default) or `garbage` (no JSON). */
+  creds?: Record<string, unknown> | "fail" | "garbage";
+  /** Story 39.2: the in-sandbox `claude auth login --claudeai` the tmux login sessions run. `url_after`: the captures
+   * before the sign-in URL shows (default 0); `url: "none"` never prints one; `base`: `com` (the installed binary's
+   * `claude.com/cai`, default) or `ai`; `start: "fail"` fails `new-session`; `outcomes`: per Enter after a paste, consumed
+   * in order (`ok`: `Login successful.`, exit 0; `refused`: `Login failed: …`, exit 1; `invalid`: `Invalid code. …`, still
+   * waiting; `hang`: nothing); `respawn: "no-url"`: a respawned login prints no URL. */
+  login?: { url_after?: number; url?: "none"; base?: "com" | "ai"; start?: "fail"; outcomes?: ("ok" | "refused" | "invalid" | "hang")[]; respawn?: "no-url" };
+  /** Story 39.2: the fake's tmux login sessions by name (its own state; tests read it through `answers()`). */
+  tmux?: Record<string, { captures: number; lines: string[]; dead: boolean; status: number | null; buffer: string | null; typed: string | null; n: number; url_after: number; no_url?: boolean }>;
 };
 
 /** The fake `sbx` (SBX_BIN): records `{argv}` per call to its log and answers from a JSON file (rewritable
@@ -292,11 +304,13 @@ type SbxAnswers = {
  * read as the host's `<D>:/…` on win32. Anything else exits 2. Never a real sandbox. */
 export function fakeSbx(dir: string = tempDir("tk-sup-sbx-")): {
   bin: string; calls: () => { argv: string[] }[]; answer: (a: SbxAnswers) => void; answers: () => Required<SbxAnswers>;
+  /** Story 39.2: what each `exec -i` call carried on stdin. */
+  stdin: () => { argv: string[]; stdin: string }[];
 } {
-  const log = join(dir, "sbx-calls.jsonl"), answers = join(dir, "sbx-answers.json");
+  const log = join(dir, "sbx-calls.jsonl"), answers = join(dir, "sbx-answers.json"), stdinLog = join(dir, "sbx-stdin.jsonl");
   const set = (a: SbxAnswers) => writeFileSync(answers, JSON.stringify({
     pin: "ok", stop: "ok", procs: {}, pgrep: [], sessions: [], home: "/home/agent", archive: "ok", resolve: "ok", resume_pid: null,
-    launch_status: { ok: true, runs: [], live: [] }, ls: {}, auth: ["in"], ...a,
+    launch_status: { ok: true, runs: [], live: [] }, ls: {}, auth: ["in"], creds: "fail", login: {}, tmux: {}, ...a,
   }));
   set({});
   const bin = fakeBin(join(dir, "sbx.js"), `const fs = require("node:fs");
@@ -322,11 +336,69 @@ if (argv[0] === "ls" && argv.length === 1) {
   process.exit(0);
 }
 if (argv[0] !== "exec" || !argv[1]) { console.error("fake sbx: unsupported " + argv.join(" ")); process.exit(2); }
+// Story 39.2: \`exec -i <sb> …\` keeps stdin open; what it carried is recorded beside the argv log, never in it.
+const interactive = argv[1] === "-i";
+if (interactive) argv.splice(1, 1);
+const stdin = interactive ? fs.readFileSync(0, "utf-8") : null;
+if (interactive) fs.appendFileSync(${JSON.stringify(stdinLog)}, JSON.stringify({ argv: ["exec", "-i", ...argv.slice(1)], stdin }) + "\\n");
 const cmd = argv.slice(2);
 if (cmd.join(" ") === "env -u ANTHROPIC_API_KEY claude auth status --json") {
   const answer = a.auth.length > 1 ? a.auth.shift() : a.auth[0];
   fs.writeFileSync(file, JSON.stringify(a));
-  console.log(JSON.stringify(answer === "out" ? { loggedIn: false } : { loggedIn: true, authMethod: "claude.ai" })); process.exit(0);
+  if (answer === "fail") { console.error("fake claude: auth status failed"); process.exit(1); }
+  if (answer === "garbage") { console.log("not json"); process.exit(0); }
+  console.log(JSON.stringify(typeof answer === "object" ? answer : answer === "out" ? { loggedIn: false } : { loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" })); process.exit(0);
+}
+if (cmd[0] === "cat" && cmd[1] === "/home/agent/.claude/.credentials.json" && cmd.length === 2) {
+  if (a.creds === "fail") { console.error("cat: " + cmd[1] + ": No such file or directory"); process.exit(1); }
+  if (a.creds === "garbage") { console.log("{not json"); process.exit(0); }
+  console.log(JSON.stringify(a.creds)); process.exit(0);
+}
+if (cmd[0] === "tmux" && ["new-session", "capture-pane", "display-message", "load-buffer", "paste-buffer", "send-keys", "respawn-pane", "clear-history"].includes(cmd[1])) {
+  const L = a.login || {}, T = a.tmux;
+  const save = () => fs.writeFileSync(file, JSON.stringify(a));
+  const url = (n) => "https://" + (L.base === "ai" ? "claude.ai" : "claude.com/cai") + "/oauth/authorize?code=true&client_id=fake-client&response_type=code"
+    + "&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=user%3Ainference&code_challenge=CHALLENGE" + n + "&code_challenge_method=S256&state=STATE" + n;
+  const at = (flag) => cmd[cmd.indexOf(flag) + 1];
+  const target = (t) => /^=tk-login-[0-9a-f]{12}:$/.test(t || "") ? t.slice(1, -1) : null;
+  if (cmd[1] === "new-session") {
+    const S = at("-s");
+    const want = ["tmux", "new-session", "-d", "-s", S, "-x", "1000", "-y", "50", "env", "-u", "ANTHROPIC_API_KEY", "claude", "auth", "login", "--claudeai", ";", "set-option", "-t", "=" + S + ":", "remain-on-exit", "on"];
+    if (cmd.join("\\u0001") !== want.join("\\u0001")) { console.error("fake sbx: unexpected new-session " + cmd.join(" ")); process.exit(2); }
+    if (L.start === "fail") { console.error("fake tmux: no server running"); process.exit(1); }
+    T[S] = { captures: 0, lines: ["Opening browser to sign in\\u2026"], dead: false, status: null, buffer: null, typed: null, n: 1, url_after: L.url_after || 0, no_url: L.url === "none" };
+    a.sessions.push(S); save(); process.exit(0);
+  }
+  const S = target(at("-t")) || (cmd[1] === "load-buffer" ? at("-b") : null);
+  const t = S ? T[S] : undefined;
+  if (!t) { console.error("can't find session: " + (S || at("-t"))); process.exit(1); }
+  if (cmd[1] === "capture-pane") {
+    if (cmd.join(" ") !== "tmux capture-pane -p -J -S - -t =" + S + ":") { console.error("fake sbx: unexpected capture " + cmd.join(" ")); process.exit(2); }
+    t.captures++;
+    if (!t.no_url && t.captures > t.url_after && !t.lines.some((l) => l.includes("/oauth/authorize?"))) t.lines.push("If the browser didn't open, visit: " + url(t.n), "Paste code here if prompted > ");
+    save(); console.log(t.lines.join("\\n")); process.exit(0);
+  }
+  if (cmd[1] === "display-message") { console.log((t.dead ? "1" : "0") + " " + (t.status === null ? "" : t.status)); process.exit(0); }
+  if (cmd[1] === "load-buffer") {
+    if (!interactive || cmd.join(" ") !== "tmux load-buffer -b " + S + " -") { console.error("fake sbx: load-buffer without stdin"); process.exit(2); }
+    t.buffer = stdin; save(); process.exit(0);
+  }
+  if (cmd[1] === "paste-buffer") { if (t.buffer === null) { console.error("no buffer " + S); process.exit(1); } t.typed = t.buffer; t.buffer = null; save(); process.exit(0); }
+  if (cmd[1] === "send-keys") {
+    if (cmd[cmd.length - 1] !== "Enter" || cmd.length !== 5) { console.error("fake sbx: send-keys carries only Enter"); process.exit(2); }
+    const typed = t.typed || ""; t.typed = null;
+    t.lines.push("Paste code here if prompted > " + typed);
+    const outcome = (L.outcomes || []).length ? L.outcomes.shift() : "ok";
+    if (outcome === "ok") { t.lines.push("Login successful."); t.dead = true; t.status = 0; }
+    else if (outcome === "refused") { t.lines.push("Login failed: That code wasn't accepted. It may be incomplete, expired, already used, or from an earlier sign-in attempt. Sign in again to get a new code."); t.dead = true; t.status = 1; }
+    else if (outcome === "invalid") t.lines.push("Invalid code. Please make sure the full code was copied.");
+    save(); process.exit(0);
+  }
+  if (cmd[1] === "clear-history") { t.lines = []; save(); process.exit(0); }
+  if (cmd[1] === "respawn-pane") {
+    if (cmd.slice(5).join(" ") !== "env -u ANTHROPIC_API_KEY claude auth login --claudeai" || cmd[2] !== "-k") { console.error("fake sbx: unexpected respawn " + cmd.join(" ")); process.exit(2); }
+    t.n++; t.dead = false; t.status = null; t.captures = 0; t.lines = ["Opening browser to sign in\\u2026"]; t.no_url = L.respawn === "no-url"; save(); process.exit(0);
+  }
 }
 if (cmd[0] === "cat" && /^\\/proc\\/\\d+\\/stat$/.test(cmd[1] ?? "") && cmd.length === 2) {
   const pid = cmd[1].split("/")[2], p = a.procs[pid];
@@ -348,7 +420,7 @@ if (cmd[0] === "pgrep" && cmd[1] === "-a" && cmd[2] === "-f" && cmd.length === 4
 if (cmd[0] === "tmux" && cmd[1] === "kill-session" && cmd[2] === "-t" && /^=/.test(cmd[3] ?? "") && cmd.length === 4) {
   const name = cmd[3].slice(1), i = a.sessions.indexOf(name);
   if (i < 0) { console.error("can't find session: " + name); process.exit(1); }
-  a.sessions.splice(i, 1); fs.writeFileSync(file, JSON.stringify(a)); process.exit(0);
+  a.sessions.splice(i, 1); if (a.tmux) delete a.tmux[name]; fs.writeFileSync(file, JSON.stringify(a)); process.exit(0);
 }
 if (cmd[0] === "tail" && /^--pid=\\d+$/.test(cmd[1] ?? "") && cmd[2] === "-f" && cmd[3] === "/dev/null" && cmd.length === 4) process.exit(0);
 if (cmd[0] === "printenv" && cmd[1] === "HOME" && cmd.length === 2) { console.log(a.home); process.exit(0); }
@@ -378,6 +450,7 @@ console.error("fake sbx: unsupported exec " + cmd.join(" ")); process.exit(2);
     calls: () => existsSync(log) ? readFileSync(log, "utf-8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : [],
     answer: set,
     answers: () => JSON.parse(readFileSync(answers, "utf-8")),
+    stdin: () => existsSync(stdinLog) ? readFileSync(stdinLog, "utf-8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : [],
   };
 }
 
