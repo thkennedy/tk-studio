@@ -6,10 +6,12 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
-import { cancelRun, claimGate, detectExternal, pinBeforeClaim, driveResumes, ExternalRunRefused, finishRun, mirror, queueRecorder, recoverQueue, watchStarterLocks, type ResumedRun, type Started } from "../src/cli";
+import { cancelRun, claimGate, detectExternal, drainQueue, pinBeforeClaim, driveResumes, ExternalRunRefused, finishRun, mirror, queueRecorder, recoverQueue, watchStarterLocks, type ResumedRun, type Started } from "../src/cli";
 import { checkoutKey, Queue, workerMayRun, type Owner, type Probes, type QueueRun, type StudioOps } from "../src/queue";
 import { stopEngineMcp } from "../src/enginemcp";
 import {
+  configuredSandboxes, credentialsArgv, expireSandboxLogins, judgeLogin, LOGIN_LEASE_S, loginMemory, paneLastLine, readSandboxLogin, sendSandboxLoginCode, signInUrl,
+  startSandboxLogin, type LoginDeps,
   defaultHold, holdArgv, holdEngine, killEngine, killRunEngine, lookupEnginePid, pinRecordPath, pinSandbox, pinWithRestart, probeEngine, parseSkillsList, pruneEngineTmp, pruneTmpArgv, releasePin, respawnHolds, sandboxHolders, skillInStore, skillsLsArgv,
   STARTER, STARTER_LOCK_REFRESH_MS, starterLockPath, writeStarterLock, writeStarterLocks, type HoldChild, type SandboxDeps,
 } from "../src/sandbox";
@@ -34,6 +36,8 @@ beforeAll(() => {
 afterAll(() => {
   // Every `sbx` call this suite made was argv only: no shell, no `-c` string (AC2).
   for (const c of sbx.calls()) for (const a of c.argv) expect(["bash", "sh", "-c", "-lc"]).not.toContain(a);
+  // Story 39.2: no argv ever carries a login code (`code#state`): it travels on `sbx exec -i`'s stdin only.
+  for (const c of sbx.calls()) for (const a of c.argv) expect(a).not.toMatch(/^[A-Za-z0-9._~-]+#[A-Za-z0-9._~-]+$/);
 });
 
 /** The test queue: owner `me` alive, no launch-core engine, the in-VM engine probe through the fake `sbx`. */
@@ -1978,5 +1982,459 @@ describe("Story 36.5 (M5, DW-113): the shared skills store", () => {
     expect(out.text).toContain("read from the store folder: sbx skills ls exited 2: unknown command skills");
     expect(await skillInStore(SKILL, fake(missing, { [STORE]: ["tk-studio"], [join(STORE, "tk-studio", "skills")]: [SKILL] }))).toEqual({ in_store: true });
     expect(await skillInStore(SKILL, fake("throw"))).toMatchObject({ in_store: "unknown", why: expect.stringContaining("ENOENT sbx") });
+  });
+});
+
+// ---------------------------------------------------------------- Story 39.2: the sandbox login has a clock
+
+describe("Story 39.2: the sandbox login's read, renewal and lease", () => {
+  const DAY = 86_400_000;
+  const NOW = Date.parse("2026-11-09T12:00:00Z");
+  const TOKEN = "sk-ant-oat01-FAKE-ACCESS-TOKEN", REFRESH = "sk-ant-ort01-FAKE-REFRESH", EMAIL = "owner@example.invalid";
+  const CODE = "AbC123-code_part~x#STATE1";
+  const creds = (refreshMs: number) => ({
+    claudeAiOauth: { accessToken: TOKEN, refreshToken: REFRESH, expiresAt: NOW + 3_600_000, refreshTokenExpiresAt: refreshMs, scopes: ["user:inference"], subscriptionType: "max" },
+  });
+  const PROBE = { loggedIn: true, authMethod: "claude.ai", subscriptionType: "max", email: EMAIL, orgId: "org-fake", orgName: "Fake Org" };
+  const KEYS = ["access_expires_at", "auth_method", "checked_at", "days_left", "logged_in", "ok", "refresh_expires_at", "sandbox", "state", "subscription_type"];
+  const ld = (extra: Partial<LoginDeps> = {}): LoginDeps => ({ sbx: deps, pollMs: 20, urlWaitMs: 800, codeWaitMs: 1500, ...extra });
+  const logins = (q: Queue) => q.serviceEvents("sandbox-login");
+  const clean = (q: Queue, ...extra: string[]) => {
+    const text = JSON.stringify([q.serviceEvents(), q.runs().map((r) => q.events(r.run_id)), ...extra]);
+    for (const secret of [TOKEN, REFRESH, EMAIL, "org-fake", CODE, "STATE1", "/oauth/authorize"]) expect(text).not.toContain(secret);
+  };
+  const ok = (stdout: unknown) => ({ exit: 0, stdout: JSON.stringify(stdout) });
+
+  test("judgeLogin: the precedence table — probe failed, logged out, wrong method, file unread, expired, expiring, ok; exactly the named keys", () => {
+    const file = ok(creds(NOW + 10 * DAY));
+    const read = (probe: Parameters<typeof judgeLogin>[1], c: Parameters<typeof judgeLogin>[2] = file) => judgeLogin(SB, probe, c, NOW);
+    const okRead = read(ok(PROBE));
+    expect(okRead).toEqual({
+      ok: true, sandbox: SB, logged_in: true, auth_method: "claude.ai", subscription_type: "max", access_expires_at: new Date(NOW + 3_600_000).toISOString(),
+      refresh_expires_at: new Date(NOW + 10 * DAY).toISOString(), days_left: 10, state: "ok", checked_at: new Date(NOW).toISOString(),
+    });
+    expect(Object.keys(okRead).sort()).toEqual(KEYS);
+    expect(read({ exit: 1, stdout: "" })).toMatchObject({ state: "unknown", reason: "the login probe failed: exit 1", logged_in: null });
+    expect(read({ exit: 0, stdout: "nope" })).toMatchObject({ state: "unknown", reason: "the login probe failed: unparseable" });
+    expect(read({ error: "spawn sbx ENOENT" })).toMatchObject({ state: "unknown", reason: "the login probe failed: spawn sbx ENOENT" });
+    expect(read(ok({ loggedIn: false }))).toMatchObject({ state: "expired", logged_in: false });
+    expect(read(ok({ loggedIn: true, authMethod: "console" }))).toMatchObject({ state: "unknown", reason: "logged in with 'console', not the claude.ai subscription (the preflight refuses it)" });
+    expect(read(ok(PROBE), { exit: 1, stdout: "" })).toMatchObject({ state: "unknown", reason: "the credentials file was not read: exit 1" });
+    expect(read(ok(PROBE), { exit: 0, stdout: "{" })).toMatchObject({ state: "unknown", reason: "the credentials file was not read: unparseable" });
+    expect(read(ok(PROBE), ok({ claudeAiOauth: { expiresAt: 1 } }))).toMatchObject({ state: "unknown", reason: "the credentials file was not read: no refreshTokenExpiresAt" });
+    expect(read(ok(PROBE), ok(creds(NOW - 1)))).toMatchObject({ state: "expired", days_left: 0 });
+    expect(read(ok(PROBE), ok(creds(NOW + 3 * DAY)))).toMatchObject({ state: "expiring", days_left: 3 });
+    expect(read(ok(PROBE), ok(creds(NOW + 2.5 * DAY)))).toMatchObject({ state: "expiring", days_left: 2 });
+    expect(read(ok(PROBE), ok(creds(NOW + 3 * DAY + 1)))).toMatchObject({ state: "ok", days_left: 3 });
+    for (const r of [okRead, read({ exit: 1, stdout: "" })]) expect(JSON.stringify(r)).not.toContain(TOKEN);
+    expect(JSON.stringify(read(ok(PROBE)))).not.toContain(EMAIL);
+  });
+
+  test("configuredSandboxes: the distinct `jobs.*.sandbox` in config order, narrowed by project", () => {
+    const cfg = { logins: {}, jobs: { "a/run": { sandbox: "sb-1" }, "a/other": { sandbox: "sb-1" }, "my project/x": { sandbox: "sb-2" }, "b/host": { tier: "host" as const } } };
+    expect(configuredSandboxes(cfg)).toEqual(["sb-1", "sb-2"]);
+    expect(configuredSandboxes(cfg, "my project")).toEqual(["sb-2"]);
+    expect(configuredSandboxes(cfg, "b")).toEqual([]);
+  });
+
+  test("readSandboxLogin: a running sandbox → `ls`, the preflight's probe, one `cat` of the credential file; a stopped one → no exec, `sandbox stopped`, the last check's values", async () => {
+    sbx.answer({ ls: { [SB]: "running" }, auth: [PROBE], creds: creds(NOW + 20 * DAY) });
+    const q = newQueue();
+    const { out, calls } = await during(() => readSandboxLogin(q, SB, deps, NOW));
+    expect(calls).toEqual([["ls"], ["exec", SB, "env", "-u", "ANTHROPIC_API_KEY", "claude", "auth", "status", "--json"], credentialsArgv(SB)]);
+    expect(credentialsArgv(SB)).toEqual(["exec", SB, "cat", "/home/agent/.claude/.credentials.json"]);
+    expect(out).toMatchObject({ state: "ok", days_left: 20, subscription_type: "max" });
+    expect(q.serviceEvents()).toEqual([]); // the read writes nothing
+    sbx.answer({ ls: { [SB]: "stopped" } });
+    const stopped = await during(() => readSandboxLogin(q, SB, deps, NOW));
+    expect(stopped.calls).toEqual([["ls"]]);
+    expect(stopped.out).toEqual({ ok: true, sandbox: SB, logged_in: null, auth_method: null, subscription_type: null, access_expires_at: null, refresh_expires_at: null, days_left: null, state: "unknown", checked_at: new Date(NOW).toISOString(), reason: "sandbox stopped" });
+    q.serviceEvent("sandbox-login-check", { sandbox: SB, state: "expiring", refresh_expires_at: "2026-11-11T00:00:00.000Z", days_left: 1 }, "2026-11-09T10:00:00.000Z");
+    expect(await readSandboxLogin(q, SB, deps, NOW)).toMatchObject({ state: "unknown", reason: "sandbox stopped", refresh_expires_at: "2026-11-11T00:00:00.000Z", days_left: 1, checked_at: "2026-11-09T10:00:00.000Z" });
+  });
+
+  test("signInUrl and paneLastLine: both URL bases with challenge and state; the URL, the code and the paste prompt never in a last line", () => {
+    expect(signInUrl("visit: https://claude.ai/oauth/authorize?code_challenge=c&state=s\n")).toBe("https://claude.ai/oauth/authorize?code_challenge=c&state=s");
+    expect(signInUrl("Sign in at: https://claude.com/cai/oauth/authorize?x=1&code_challenge=c&state=s2")).toBe("https://claude.com/cai/oauth/authorize?x=1&code_challenge=c&state=s2");
+    expect(signInUrl("https://claude.ai/oauth/authorize?state=s")).toBeNull(); // no challenge
+    expect(paneLastLine("a\nSee https://claude.ai/oauth/authorize?code_challenge=c&state=s now\n\n")).toBe("See [sign-in URL] now");
+    expect(paneLastLine(`Login failed: no\n> ${CODE}\nPaste code here > `, CODE)).toBe("Login failed: no");
+    expect(paneLastLine("\x1b[31mInvalid code.\x1b[0m\nSTATE1 echoed", CODE)).toBe("Invalid code.");
+    expect(paneLastLine("")).toBe("the pane printed nothing");
+  });
+
+  test("Start: the lease, `claude auth login --claudeai` in `tk-login-<id>`, the pane read until the URL shows; the URL only in the answer", async () => {
+    sbx.answer({ ls: { [SB]: "running" }, login: { url_after: 2 } });
+    const q = newQueue();
+    const { out, calls } = await during(() => startSandboxLogin(q, SB, ld({ now: () => NOW })));
+    expect(out.status).toBe(200);
+    const body = out.body as Record<string, string>;
+    expect(Object.keys(body).sort()).toEqual(["expires_at", "login_id", "ok", "started_at", "url"]);
+    expect(body.login_id).toMatch(/^[0-9a-f]{12}$/);
+    expect(body.url).toBe("https://claude.com/cai/oauth/authorize?code=true&client_id=fake-client&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=user%3Ainference&code_challenge=CHALLENGE1&code_challenge_method=S256&state=STATE1");
+    expect(body.started_at).toBe(new Date(NOW).toISOString());
+    expect(body.expires_at).toBe(new Date(NOW + LOGIN_LEASE_S * 1000).toISOString());
+    const S = `tk-login-${body.login_id}`;
+    expect(calls[0]).toEqual(["ls"]);
+    expect(calls[1]).toEqual(["exec", SB, "tmux", "new-session", "-d", "-s", S, "-x", "1000", "-y", "50", "env", "-u", "ANTHROPIC_API_KEY", "claude", "auth", "login", "--claudeai", ";", "set-option", "-t", `=${S}:`, "remain-on-exit", "on"]);
+    expect(calls.filter((c) => c[3] === "capture-pane")).toHaveLength(3);
+    expect(calls.find((c) => c[3] === "capture-pane")).toEqual(["exec", SB, "tmux", "capture-pane", "-p", "-J", "-S", "-", "-t", `=${S}:`]);
+    expect(logins(q).map((e) => e.detail)).toEqual([{
+      sandbox: SB, login_id: body.login_id, owner: expect.objectContaining({ pid: process.pid }), by: "owner", started_at: body.started_at, deadline: body.expires_at,
+    }]);
+    expect(q.openSandboxLogin(SB, NOW)?.login_id).toBe(body.login_id);
+    clean(q);
+  });
+
+  test("Start: the AC's `claude.ai/oauth/authorize` base matches too", async () => {
+    sbx.answer({ ls: { [SB]: "running" }, login: { base: "ai" } });
+    const out = await startSandboxLogin(newQueue(), SB, ld());
+    expect(String(out.body.url)).toStartWith("https://claude.ai/oauth/authorize?");
+  });
+
+  test("Start: no URL within the bound → the session killed, the lease closed `failed`, 500 LoginStartFailed with the pane's last line (no URL)", async () => {
+    sbx.answer({ ls: { [SB]: "running" }, login: { url: "none" } });
+    const q = newQueue();
+    const { out, calls } = await during(() => startSandboxLogin(q, SB, ld({ urlWaitMs: 150 })));
+    expect(out).toEqual({ status: 500, body: { ok: false, error: "LoginStartFailed", sandbox: SB, last_line: "Opening browser to sign in…" } });
+    const id = String(logins(q)[0]!.detail!.login_id);
+    expect(calls.at(-1)).toEqual(["exec", SB, "tmux", "kill-session", "-t", `=tk-login-${id}`]);
+    expect(logins(q).map((e) => e.detail!.result ?? "open")).toEqual(["open", "failed"]);
+    expect(sbx.answers().tmux[`tk-login-${id}`]).toBeUndefined();
+    // A tmux that will not start: the same refusal, the lease closed.
+    sbx.answer({ ls: { [SB]: "running" }, login: { start: "fail" } });
+    const q2 = newQueue();
+    expect(await startSandboxLogin(q2, SB, ld())).toEqual({ status: 500, body: { ok: false, error: "LoginStartFailed", sandbox: SB, last_line: "fake tmux: no server running" } });
+    expect(logins(q2).map((e) => e.detail!.result ?? "open")).toEqual(["open", "failed"]);
+  });
+
+  test("Start refusals write nothing: LoginWhileLive (a running run on the sandbox, named), LoginInProgress (a live lease), SandboxStopped (nothing started)", async () => {
+    sbx.answer({ ls: { [SB]: "running" } });
+    const q = newQueue();
+    const { run } = await sbxRun(q);
+    const live = await during(() => startSandboxLogin(q, SB, ld()));
+    expect(live.out).toEqual({ status: 409, body: { ok: false, error: "LoginWhileLive", sandbox: SB, run_id: run.run_id, state: "running" } });
+    expect(live.calls).toEqual([]);
+    expect(q.serviceEvents()).toEqual([]);
+    const q2 = newQueue();
+    q2.takeSandboxLogin(SB, "aaaaaaaaaaaa", NOW, LOGIN_LEASE_S);
+    const before = q2.serviceEvents().length;
+    expect(await startSandboxLogin(q2, SB, ld({ now: () => NOW + 1000 }))).toEqual({ status: 409, body: {
+      ok: false, error: "LoginInProgress", sandbox: SB, login_id: "aaaaaaaaaaaa", started_at: new Date(NOW).toISOString(), expires_at: new Date(NOW + 600_000).toISOString(),
+    } });
+    expect(q2.serviceEvents()).toHaveLength(before);
+    sbx.answer({ ls: { [SB]: "stopped" } });
+    const q3 = newQueue();
+    const stopped = await during(() => startSandboxLogin(q3, SB, ld()));
+    expect(stopped.out).toEqual({ status: 409, body: { ok: false, error: "SandboxStopped", sandbox: SB } });
+    expect(stopped.calls).toEqual([["ls"]]); // never `sbx run`
+    expect(q3.serviceEvents()).toEqual([]);
+  });
+
+  /** A started login on a running sandbox whose file reads `refreshMs` after a renewal. */
+  async function started(q: Queue, login: Record<string, unknown> = {}, refreshMs = NOW + 30 * DAY) {
+    sbx.answer({ ls: { [SB]: "running" }, auth: [PROBE], creds: creds(refreshMs), login });
+    const out = await startSandboxLogin(q, SB, ld());
+    expect(out.status).toBe(200);
+    return out.body as { login_id: string; url: string };
+  }
+
+  test("Code ok: the code through `exec -i` stdin only (load-buffer, paste-buffer -d, Enter), the pane dead 0 → killed, closed `renewed`, the read answered", async () => {
+    const q = newQueue();
+    const { login_id } = await started(q);
+    const mem = loginMemory();
+    const { out, calls } = await during(() => sendSandboxLoginCode(q, login_id, CODE, mem, ld()));
+    expect(out.status).toBe(200);
+    expect(out.body).toMatchObject({ ok: true, sandbox: SB, state: "ok", days_left: expect.any(Number), logged_in: true });
+    expect(Object.keys(out.body).sort()).toEqual(KEYS);
+    const S = `tk-login-${login_id}`, T = `=${S}:`;
+    expect(calls).toContainEqual(["exec", "-i", SB, "tmux", "load-buffer", "-b", S, "-"]);
+    expect(calls).toContainEqual(["exec", SB, "tmux", "paste-buffer", "-d", "-b", S, "-t", T]);
+    expect(calls).toContainEqual(["exec", SB, "tmux", "send-keys", "-t", T, "Enter"]);
+    expect(calls).toContainEqual(["exec", SB, "tmux", "display-message", "-p", "-t", T, "#{pane_dead} #{pane_dead_status}"]);
+    expect(calls).toContainEqual(["exec", SB, "tmux", "kill-session", "-t", `=${S}`]);
+    for (const c of sbx.calls()) for (const a of c.argv) { expect(a).not.toContain(CODE); expect(a).not.toContain("AbC123"); }
+    expect(sbx.stdin().at(-1)).toEqual({ argv: ["exec", "-i", SB, "tmux", "load-buffer", "-b", S, "-"], stdin: CODE });
+    const closes = logins(q).filter((e) => e.detail!.result);
+    expect(closes.map((e) => e.detail)).toEqual([{ sandbox: SB, login_id, result: "renewed", by: "owner", started_at: expect.any(String), ended_at: expect.any(String) }]);
+    expect(q.openSandboxLogin(SB)).toBeNull();
+    clean(q, JSON.stringify(out.body));
+    // The login is over: another code is LoginClosed.
+    expect(await sendSandboxLoginCode(q, login_id, CODE, mem, ld())).toEqual({ status: 409, body: { ok: false, error: "LoginClosed", login_id, result: "renewed" } });
+  });
+
+  test("Code refused (the process ends ≠0): the login respawned with a new URL, CodeRefused {tries_left: 1, url}; a second refusal closes it `refused`, tries_left 0", async () => {
+    const q = newQueue();
+    const { login_id, url } = await started(q, { outcomes: ["refused", "refused"] });
+    const mem = loginMemory();
+    const first = await sendSandboxLoginCode(q, login_id, CODE, mem, ld());
+    expect(first.status).toBe(409);
+    expect(first.body).toMatchObject({ ok: false, error: "CodeRefused", login_id, tries_left: 1, last_line: expect.stringMatching(/^Login failed: That code wasn't accepted\./) });
+    expect(String(first.body.url)).toContain("state=STATE2");
+    expect(first.body.url).not.toBe(url);
+    expect(sbx.calls().map((c) => c.argv)).toContainEqual(["exec", SB, "tmux", "respawn-pane", "-k", "-t", `=tk-login-${login_id}:`, "env", "-u", "ANTHROPIC_API_KEY", "claude", "auth", "login", "--claudeai"]);
+    expect(q.openSandboxLogin(SB)?.login_id).toBe(login_id); // still open for one more try
+    const second = await sendSandboxLoginCode(q, login_id, "Other-code#STATE2", mem, ld());
+    expect(second).toEqual({ status: 409, body: { ok: false, error: "CodeRefused", login_id, last_line: expect.stringMatching(/^Login failed/), tries_left: 0 } });
+    expect(logins(q).filter((e) => e.detail!.result).map((e) => e.detail!.result)).toEqual(["refused"]);
+    expect(JSON.stringify(q.serviceEvents())).not.toContain("oauth");
+  });
+
+  test("Code incomplete (`Invalid code.`, the pane still waiting): CodeRefused {tries_left: 1}, no new URL; the next code renews", async () => {
+    const q = newQueue();
+    const { login_id } = await started(q, { outcomes: ["invalid", "ok"] });
+    const mem = loginMemory();
+    const first = await sendSandboxLoginCode(q, login_id, CODE, mem, ld());
+    expect(first).toEqual({ status: 409, body: { ok: false, error: "CodeRefused", login_id, last_line: "Invalid code. Please make sure the full code was copied.", tries_left: 1 } });
+    expect(q.openSandboxLogin(SB)?.login_id).toBe(login_id);
+    const second = await sendSandboxLoginCode(q, login_id, CODE, mem, ld());
+    expect(second.status).toBe(200);
+    expect(logins(q).filter((e) => e.detail!.result).map((e) => e.detail!.result)).toEqual(["renewed"]);
+  });
+
+  test("Code with no outcome within the bound → killed, closed `failed`, 500 LoginFailed; late → LoginExpired (closed `expired`); unknown → UnknownLogin; in flight → LoginInProgress", async () => {
+    const q = newQueue();
+    const { login_id } = await started(q, { outcomes: ["hang"] });
+    expect(await sendSandboxLoginCode(q, login_id, CODE, loginMemory(), ld({ codeWaitMs: 150 }))).toMatchObject({ status: 500, body: { ok: false, error: "LoginFailed", login_id } });
+    expect(logins(q).filter((e) => e.detail!.result).map((e) => e.detail!.result)).toEqual(["failed"]);
+    const q2 = newQueue();
+    const late = await started(q2);
+    const calls = await during(() => sendSandboxLoginCode(q2, late.login_id, CODE, loginMemory(), ld({ now: () => Date.now() + 601_000 })));
+    expect(calls.out).toEqual({ status: 409, body: { ok: false, error: "LoginExpired", login_id: late.login_id } });
+    expect(calls.calls).toEqual([["ls"], ["exec", SB, "tmux", "kill-session", "-t", `=tk-login-${late.login_id}`]]); // running: read, then killed; no paste
+    expect(logins(q2).filter((e) => e.detail!.result).map((e) => e.detail!.result)).toEqual(["expired"]);
+    expect(await sendSandboxLoginCode(q2, "0123456789ab", CODE, loginMemory(), ld())).toEqual({ status: 404, body: { ok: false, error: "UnknownLogin", login_id: "0123456789ab" } });
+    const q3 = newQueue();
+    q3.takeSandboxLogin(SB, "bbbbbbbbbbbb", Date.now(), LOGIN_LEASE_S);
+    const mem = loginMemory();
+    mem.inFlight.add("bbbbbbbbbbbb");
+    expect(await sendSandboxLoginCode(q3, "bbbbbbbbbbbb", CODE, mem, ld())).toEqual({ status: 409, body: { ok: false, error: "LoginInProgress", login_id: "bbbbbbbbbbbb" } });
+  });
+
+  /** A clock frozen `beforeMs` before the lease's deadline that moves only by the injected sleep. */
+  const clockBefore = (q: Queue, beforeMs: number) => {
+    let t = Date.parse(q.openSandboxLogin(SB)!.deadline) - beforeMs;
+    return { now: () => t, sleep: async (ms: number) => { t += ms; } };
+  };
+
+  test("Code wait bounded by the lease: the deadline reached with no outcome → the session killed, closed `expired`, 409 LoginExpired (not LoginFailed)", async () => {
+    const q = newQueue();
+    const { login_id } = await started(q, { outcomes: ["hang"] });
+    const mem = loginMemory();
+    mem.tries.set(login_id, 1);
+    const { out, calls } = await during(() => sendSandboxLoginCode(q, login_id, CODE, mem, ld({ codeWaitMs: 60_000, ...clockBefore(q, 100) })));
+    expect(out).toEqual({ status: 409, body: { ok: false, error: "LoginExpired", login_id } });
+    expect(calls.at(-1)).toEqual(["exec", SB, "tmux", "kill-session", "-t", `=tk-login-${login_id}`]);
+    expect(logins(q).filter((e) => e.detail!.result).map((e) => e.detail!.result)).toEqual(["expired"]);
+    expect(q.openSandboxLogin(SB)).toBeNull();
+    expect(mem.tries.has(login_id)).toBe(false);
+    expect(mem.inFlight.size).toBe(0);
+    clean(q, JSON.stringify(out.body));
+  });
+
+  test("Respawn wait bounded by the lease: a first refusal whose new URL has not shown by the deadline → killed, closed `expired`, 409 LoginExpired", async () => {
+    const q = newQueue();
+    const { login_id } = await started(q, { outcomes: ["refused"], respawn: "no-url" });
+    const mem = loginMemory();
+    const { out, calls } = await during(() => sendSandboxLoginCode(q, login_id, CODE, mem, ld({ codeWaitMs: 60_000, urlWaitMs: 30_000, ...clockBefore(q, 100) })));
+    expect(out).toEqual({ status: 409, body: { ok: false, error: "LoginExpired", login_id } });
+    expect(calls.some((c) => c[3] === "respawn-pane")).toBe(true);
+    expect(calls.at(-1)).toEqual(["exec", SB, "tmux", "kill-session", "-t", `=tk-login-${login_id}`]);
+    expect(logins(q).filter((e) => e.detail!.result).map((e) => e.detail!.result)).toEqual(["expired"]);
+    expect(mem.tries.has(login_id)).toBe(false);
+    clean(q, JSON.stringify(out.body));
+  });
+
+  test("A success just before the deadline is still `renewed` (the outcome is checked before the deadline)", async () => {
+    const q = newQueue();
+    const { login_id } = await started(q, { outcomes: ["ok"] });
+    const out = await sendSandboxLoginCode(q, login_id, CODE, loginMemory(), ld({ ...clockBefore(q, 1) }));
+    expect(out.status).toBe(200);
+    expect(logins(q).filter((e) => e.detail!.result).map((e) => e.detail!.result)).toEqual(["renewed"]);
+  });
+
+  test("Code on a sandbox stopped under the lease → no exec, the lease closed `failed`, 409 SandboxStopped {sandbox, login_id}", async () => {
+    const q = newQueue();
+    const { login_id } = await started(q);
+    sbx.answer({ ls: { [SB]: "stopped" } });
+    const mem = loginMemory();
+    mem.tries.set(login_id, 1);
+    const stdinBefore = sbx.stdin().length;
+    const { out, calls } = await during(() => sendSandboxLoginCode(q, login_id, CODE, mem, ld()));
+    expect(out).toEqual({ status: 409, body: { ok: false, error: "SandboxStopped", sandbox: SB, login_id } });
+    expect(calls).toEqual([["ls"]]); // never `exec`
+    expect(sbx.stdin()).toHaveLength(stdinBefore);
+    const closes = logins(q).filter((e) => e.detail!.result);
+    expect(closes.map((e) => e.detail)).toEqual([{ sandbox: SB, login_id, result: "failed", by: "owner", started_at: expect.any(String), ended_at: expect.any(String) }]);
+    expect(q.openSandboxLogin(SB)).toBeNull();
+    expect(mem.tries.has(login_id)).toBe(false);
+    expect(mem.inFlight.size).toBe(0);
+    clean(q, JSON.stringify(out.body));
+  });
+
+  test("A late code on a sandbox stopped under the lease → no exec (only the `ls`), closed `expired`, 409 LoginExpired (not SandboxStopped)", async () => {
+    const q = newQueue();
+    const { login_id } = await started(q);
+    sbx.answer({ ls: { [SB]: "stopped" } });
+    const mem = loginMemory();
+    mem.tries.set(login_id, 1);
+    const { out, calls } = await during(() => sendSandboxLoginCode(q, login_id, CODE, mem, ld({ now: () => Date.now() + 601_000 })));
+    expect(out).toEqual({ status: 409, body: { ok: false, error: "LoginExpired", login_id } });
+    expect(calls).toEqual([["ls"]]); // never `exec`
+    expect(calls.some((c) => c[0] === "exec")).toBe(false);
+    expect(logins(q).filter((e) => e.detail!.result).map((e) => e.detail!.result)).toEqual(["expired"]);
+    expect(q.openSandboxLogin(SB)).toBeNull();
+    expect(mem.tries.has(login_id)).toBe(false);
+    clean(q, JSON.stringify(out.body));
+  });
+
+  test("The lease: the claim gate refuses `sandbox-login:<sb>` before any pin call (the run stays queued); the pin never restarts and the release keeps the sandbox", async () => {
+    sbx.answer({ ls: { [SB]: "running" }, auth: ["out"] });
+    const q = newQueue();
+    q.takeSandboxLogin(SB, "cccccccccccc", Date.now(), LOGIN_LEASE_S);
+    const deadline = q.openSandboxLogin(SB)!.deadline;
+    const run = q.enqueue({ jobId: "launch-27", root: tempDir("tk-sup-lease-"), projectId: "p27", definition: LAUNCH, tier: "sbx", sandbox: SB }).run;
+    const spawned: string[][] = [];
+    const gate = await during(() => claimGate(q, run.run_id, { tier: "sbx", sandbox: SB }, { sbx: deps, spawner: async (_c, a) => { spawned.push(a); return { exit: 0, stdout: "", stderr: "" }; }, hygiene: { env: {} } }));
+    expect(gate.calls).toEqual([]);
+    expect(spawned).toEqual([]);
+    expect(gate.out).toEqual({
+      reason: `sandbox ${SB}: a Claude login renewal is in progress (login cccccccccccc, until ${deadline})`,
+      resolves: `send the code on the Settings page (/app/settings), or let the lease run out at ${deadline}; the next drain pass claims the run`,
+    });
+    expect(q.events(run.run_id).find((e) => e.kind === "claim-refused")?.detail).toMatchObject({ key: `sandbox-login:${SB}` });
+    expect(q.get(run.run_id)?.state).toBe("queued");
+    // The pin of a running, logged-out sandbox does not restart it under the lease.
+    const pin = await during(() => pinWithRestart(q, run.run_id, SB, deps));
+    expect(pin.out).toBeNull();
+    expect(pin.calls.filter((c) => c[0] === "stop")).toEqual([]);
+    // The release keeps the sandbox up while the lease is live.
+    const q2 = newQueue();
+    const { run: ended } = await sbxRun(q2);
+    q2.end(ended.run_id, "complete", null);
+    expect("lease" in q2.takeSandboxLogin(SB, "dddddddddddd", Date.now(), LOGIN_LEASE_S)).toBe(true);
+    const rel = await during(() => releasePin(q2, ended.run_id, deps));
+    expect(rel).toEqual({ out: "kept", calls: [] });
+    expect(q2.events(ended.run_id).find((e) => e.kind === "pin-kept")?.detail).toEqual({ sandbox: SB, held_by: ["sandbox-login:dddddddddddd"] });
+  });
+
+  test("The take and the claim never both win: `takeSandboxLogin` refuses `held` while a run on the sandbox is running or paused (a queued one does not), writing nothing; a claim landing between start's check and its take answers LoginWhileLive", async () => {
+    sbx.answer({ ls: { [SB]: "running" } });
+    const q = newQueue();
+    q.enqueue({ jobId: "launch-27", root: tempDir("tk-sup-take-"), projectId: "p27", definition: LAUNCH, tier: "sbx", sandbox: SB });
+    expect("lease" in q.takeSandboxLogin(SB, "aaaaaaaaaaaa", NOW, LOGIN_LEASE_S)).toBe(true); // a queued run waits on the lease instead
+    const q2 = newQueue();
+    const { run } = await sbxRun(q2);
+    const taken = q2.takeSandboxLogin(SB, "bbbbbbbbbbbb", NOW, LOGIN_LEASE_S);
+    expect("held" in taken && taken.held.run_id).toBe(run.run_id);
+    q2.markPaused(run.run_id, {});
+    const paused = q2.takeSandboxLogin(SB, "bbbbbbbbbbbb", NOW, LOGIN_LEASE_S);
+    expect("held" in paused && paused.held.state).toBe("paused");
+    expect("lease" in q2.takeSandboxLogin("other-sb", "cccccccccccc", NOW, LOGIN_LEASE_S)).toBe(true); // another sandbox is free
+    expect(q2.serviceEvents("sandbox-login").map((e) => e.detail!.sandbox)).toEqual(["other-sb"]);
+    // The race: the drain (another process) claims a queued run on the sandbox while start awaits its `ls`.
+    const q3 = newQueue();
+    const queued = q3.enqueue({ jobId: "launch-27", root: tempDir("tk-sup-race-"), projectId: "p27", definition: LAUNCH, owner: me, tier: "sbx", sandbox: SB }).run;
+    const racing: SandboxDeps = {
+      ...deps,
+      run: async (bin, args, o) => {
+        if (args[0] === "ls") expect((await q3.claim(queued.run_id, me)).claimed).toBe(true);
+        return runProcess(bin, args, { timeoutS: o.timeoutS, ...(o.input !== undefined ? { input: o.input } : {}) });
+      },
+    };
+    const raced = await during(() => startSandboxLogin(q3, SB, ld({ sbx: racing })));
+    expect(raced.out).toEqual({ status: 409, body: { ok: false, error: "LoginWhileLive", sandbox: SB, run_id: queued.run_id, state: "running" } });
+    expect(raced.calls).toEqual([["ls"]]); // no tmux started
+    expect(q3.serviceEvents("sandbox-login")).toEqual([]);
+  });
+
+  test("The claim gate reads the lease again after the pin and the preflight: a start that took it meanwhile refuses the claim `sandbox-login:<sb>`; the run stays queued", async () => {
+    sbx.answer({});
+    const q = newQueue();
+    const run = q.enqueue({ jobId: "launch-27", root: tempDir("tk-sup-lease-race-"), projectId: "p27", definition: LAUNCH, tier: "sbx", sandbox: SB }).run;
+    const spawned: string[][] = [];
+    // serve's start takes the lease while the drain's gate runs the preflight (after its pin).
+    const spawner: Spawner = async (_c, a) => {
+      spawned.push(a);
+      expect("lease" in q.takeSandboxLogin(SB, "gggggggggggg", Date.now(), LOGIN_LEASE_S)).toBe(true);
+      return { exit: 0, stderr: "", stdout: JSON.stringify({ loggedIn: true, authMethod: "claude.ai" }) };
+    };
+    const gate = await during(() => claimGate(q, run.run_id, { tier: "sbx", sandbox: SB }, { sbx: deps, spawner, hygiene: { env: {} } }));
+    expect(gate.calls).toContainEqual(["run", "-d", "--name", SB]); // the pin ran first
+    expect(spawned).toHaveLength(1);
+    const deadline = q.openSandboxLogin(SB)!.deadline;
+    expect(gate.out).toEqual({
+      reason: `sandbox ${SB}: a Claude login renewal is in progress (login gggggggggggg, until ${deadline})`,
+      resolves: `send the code on the Settings page (/app/settings), or let the lease run out at ${deadline}; the next drain pass claims the run`,
+    });
+    expect(q.events(run.run_id).find((e) => e.kind === "claim-refused")?.detail).toMatchObject({ key: `sandbox-login:${SB}` });
+    expect(q.get(run.run_id)?.state).toBe("queued");
+  });
+
+  test("The claim reads the lease in its own transaction: a lease taken after the gate passed but before `claim` (runJob's `validate`/`resolveCheckout` window) leaves the run `queued`, ownerless, no lock taken and no worker claimed", async () => {
+    sbx.answer({});
+    const q = newQueue();
+    const run = q.enqueue({ jobId: "launch-27", root: tempDir("tk-sup-lease-claim-"), projectId: "p27", definition: LAUNCH, tier: "sbx", sandbox: SB }).run;
+    const loggedIn: Spawner = async () => ({ exit: 0, stderr: "", stdout: JSON.stringify({ loggedIn: true, authMethod: "claude.ai" }) });
+    const gate = await during(() => claimGate(q, run.run_id, { tier: "sbx", sandbox: SB }, { sbx: deps, spawner: loggedIn, hygiene: { env: {} } }));
+    expect(gate.out).toBeNull(); // the gate let the claim proceed
+    // serve's start takes the lease in the window between the gate's last read and the claim.
+    const taken = q.takeSandboxLogin(SB, "kkkkkkkkkkkk", Date.now(), LOGIN_LEASE_S);
+    expect("lease" in taken).toBe(true);
+    const claim = await q.claim(run.run_id, me);
+    expect(claim.claimed).toBe(false);
+    const deadline = q.openSandboxLogin(SB)!.deadline;
+    expect(claim).toMatchObject({ claimed: false, why: "sandbox-login", reason: `sandbox ${SB}: a Claude login renewal is in progress (login kkkkkkkkkkkk, until ${deadline})`, lease: { sandbox: SB, login_id: "kkkkkkkkkkkk" } });
+    expect(q.get(run.run_id)).toMatchObject({ state: "queued", owner_pid: null, owner_nonce: null, worker_pid: null });
+    expect(q.events(run.run_id).some((e) => e.kind === "claimed")).toBe(false);
+    expect(q.locks().some((l) => l.run_id === run.run_id)).toBe(false);
+    // The lease closes: the next claim goes through.
+    expect(q.closeSandboxLogin("kkkkkkkkkkkk", "renewed")).toBe(true);
+    expect((await q.claim(run.run_id, me)).claimed).toBe(true);
+  });
+
+  test("drainQueue closes a stale lease `expired` (`closed_by: drain`) before its claims: a queued run on that sandbox is gated in the same pass and never refused `sandbox-login:<sb>`", async () => {
+    // The fake answers the gate's preflight logged out, so the run stays queued with the gate's next refusal (max-login).
+    sbx.answer({ ls: { [SB]: "running" }, auth: ["out"] });
+    const q = newQueue();
+    q.takeSandboxLogin(SB, "hhhhhhhhhhhh", Date.now() - 700_000, LOGIN_LEASE_S);
+    const run = q.enqueue({ jobId: "launch-27", root: tempDir("tk-sup-drain-lease-"), projectId: "p27", definition: LAUNCH, tier: "sbx", sandbox: SB }).run;
+    const prev = { root: process.env.TK_STUDIO_ROOT, bin: process.env.SBX_BIN };
+    process.env.TK_STUDIO_ROOT = prev.root ?? resolve(import.meta.dir, "..", "..", "..");
+    process.env.SBX_BIN = sbx.bin; // the gate's preflight spawns `sbxBin()` from process.env: the fake, never a real sbx
+    try {
+      const report = await drainQueue({
+        queue: q, owner: me, hygiene: { env: {} }, sandboxLogin: false,
+        worktree: { env: { ...deps.env! }, run: async () => ({ exit: 0, stdout: "", stderr: "" }), sbx: deps },
+      }, async () => ({ ok: true, runs: [] }));
+      const closed = logins(q).find((e) => e.detail!.result);
+      expect(closed?.detail).toMatchObject({ sandbox: SB, login_id: "hhhhhhhhhhhh", result: "expired", closed_by: "drain" });
+      expect(q.openSandboxLogin(SB)).toBeNull();
+      const refusals = q.events(run.run_id).filter((e) => e.kind === "claim-refused");
+      expect(refusals.map((e) => e.detail!.key)).toEqual(["max-login"]); // the gate ran past the lease, in this pass
+      expect(refusals[0]!.at >= closed!.at).toBe(true);
+      expect(report.runs.map((r) => r.run_id)).toEqual([run.run_id]);
+      expect(q.get(run.run_id)?.state).toBe("queued");
+    } finally {
+      for (const [k, v] of [["TK_STUDIO_ROOT", prev.root], ["SBX_BIN", prev.bin]] as const) {
+        if (v === undefined) delete process.env[k]; else process.env[k] = v;
+      }
+    }
+  });
+
+  test("The drain's expiry: a lease past its deadline → its session killed (running sandbox) and closed `expired`, `closed_by: drain`; a live one untouched", async () => {
+    sbx.answer({ ls: { [SB]: "running" } });
+    const q = newQueue();
+    q.takeSandboxLogin(SB, "eeeeeeeeeeee", NOW - 700_000, LOGIN_LEASE_S);
+    q.takeSandboxLogin("other-sb", "ffffffffffff", NOW, LOGIN_LEASE_S);
+    const { out, calls } = await during(() => expireSandboxLogins(q, deps, NOW));
+    expect(out).toEqual(["eeeeeeeeeeee"]);
+    expect(calls).toEqual([["ls"], ["exec", SB, "tmux", "kill-session", "-t", "=tk-login-eeeeeeeeeeee"]]);
+    expect(logins(q).filter((e) => e.detail!.result).map((e) => e.detail)).toEqual([{
+      sandbox: SB, login_id: "eeeeeeeeeeee", result: "expired", by: "owner", started_at: new Date(NOW - 700_000).toISOString(), ended_at: new Date(NOW).toISOString(), closed_by: "drain",
+    }]);
+    expect(q.staleSandboxLogins(NOW)).toEqual([]);
+    expect(q.openSandboxLogin("other-sb", NOW)?.login_id).toBe("ffffffffffff");
+    expect(q.closeSandboxLogin("eeeeeeeeeeee", "failed", NOW)).toBe(false); // closed once
   });
 });

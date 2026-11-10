@@ -646,3 +646,10 @@
 - What no longer holds: plans/39-4.md:351 "`BoardScreen.tsx` (modify): the project from the route" (already done by 39.1).
 - Suggested adjustment: Keep 39.1's `project`/`onProject`/`addressProject` flow in `BoardScreen` and add only the `?view=`/`?epic=` toggles and the kanban default. A toggle must preserve the address project, using replace for a view change. `StoryScreen`'s project fallback reuses `rememberedProject`, as planned. Flip the `PLACEHOLDER.story` pin in `screen.test.ts` and name the flip in the spec.
 - Status: closed — applied to the unstarted entry's invoke_dev_with by the 39-1 gate session (2026-11-09)
+
+## 39-8-model-and-effort-in-the-owners-hands — scope: stories — from 39-2-the-sandbox-login-has-a-clock — 2026-11-09
+
+- What changed: 39.2 created `apps/studio-web/src/settings/` with `SettingsScreen.tsx` (mounted at `/app/settings` by `App.tsx`), `LoginCard.tsx`, `login.ts` and `login.test.ts`. `SettingsScreen` renders `<LoginCard />`, then `Model and effort: {PLACEHOLDER.settings}`. `screen.ts` keeps `PLACEHOLDER.settings = "Not built yet: Story 39.8"`, which `screen.test.ts:139` pins.
+- What no longer holds: plans/39-8.md:300 "`SettingsScreen.tsx` (modify; 39.2 creates it, under whatever name 39.2 gives its screen): mounts `RoutingCard` below the login card".
+- Suggested adjustment: The screen is `src/settings/SettingsScreen.tsx`. Replace its `Model and effort: {PLACEHOLDER.settings}` line with `<RoutingCard />` below `<LoginCard />`. Drop `settings` from `PLACEHOLDER` in `screen.ts` (and the `settings` placeholder case in `App.tsx`, if it remains), flip the `screen.test.ts` `PLACEHOLDER` pin, and name the flip in the spec. Leave `login.ts`/`LoginCard.tsx` as they are; the login card writes no `localStorage` key, so the presentation toggles' keys collide with nothing of 39.2's.
+- Status: closed — applied to the unstarted entry's invoke_dev_with by the 39-2 gate session (2026-11-09)

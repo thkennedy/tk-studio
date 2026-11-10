@@ -193,7 +193,7 @@ the History API (`createRouter(win)`, the browser's `window` or a fake; no route
 | `/app/chat/<engagement-id>[?project=]` | the Chat screen opened on it; the project is `?project=`, else the store's single project for the id, else (once the store's snapshot is in; before it, no project: the screen waits) the remembered chat project |
 | `/app/checkin/<engagement-id>/<n>[?project=]` (`n` ≥ 1) | `Not built yet: Story 39.7` |
 | `/app/status` | the Status screen |
-| `/app/settings` | `Not built yet: Story 39.2` |
+| `/app/settings` | the Settings screen: the Sandbox login card first, then `Model and effort: Not built yet: Story 39.8` |
 | anything else under `/app` | `No page at <path>` |
 
 - **The rules.** Segments are `decodeURIComponent`-decoded (a bad escape is not found); trailing slashes are dropped;
@@ -205,6 +205,33 @@ the History API (`createRouter(win)`, the browser's `window` or a fake; no route
 - **The migration.** At load, `migrateRemembered` reads `tk-studio.web.screen` and `tk-studio.web.issue` once, removes
   both and carries the screen (`issue` with a stored issue: `/app/inbox/<KEY>?project=<p>`) onto the landing only — a
   deep link wins. Nothing writes either key again. `tk-studio.office.project` and `tk-studio.web.chat` are kept.
+
+## The Settings screen: the sandbox login card (Story 39.2)
+
+`/app/settings` mounts `src/settings/SettingsScreen.tsx` in place of 39.1's placeholder: the Sandbox login card first,
+then `Model and effort: Not built yet: Story 39.8` (`PLACEHOLDER.settings` now names 39.8's part). The card's rules are
+`src/settings/login.ts` (pure, vitest-driven in `login.test.ts`); its React is `src/settings/LoginCard.tsx`.
+
+- **The clock.** The card reads `GET /sandbox/login` (the default sandbox: the one configured) and `GET /status` when
+  shown, every minute while open (`POLL_MS`), and once more after a renewal. Its line: `Checking the login…` while
+  reading; `Login valid for N days (until <date and time, local>)` when `ok`; amber `Renew soon: N days left` (`1 day
+  left`, `less than a day left`) when `expiring`; red `Expired: every run on the sandbox waits for a renewal` when
+  `expired`; for `unknown` the reason in words (`The sandbox is stopped: the login is read while it runs`, with the last
+  read when one is known, else `Login not read: <reason>`); a failed read `Login not read: <url> answered <status> <error>`.
+- **Renew** is disabled with its reason shown: no CSRF token yet (`Waiting for the page's session`), a live run in
+  `running`, `paused` or `external` on the sandbox (`A run holds the sandbox (run <id>, <state>): Renew opens when it
+  ends`), this card's own sign-in still open (`A sign-in is open: paste its code, or wait until <time>`, until its
+  `expires_at`), a renewal started elsewhere (`A renewal is in progress elsewhere until <time>`, learnt from the start's
+  `LoginInProgress`), the sandbox stopped, or a request in flight (`Working…`). Only the closing answers to the code
+  clear the open login (its link and its field): `200`, `CodeRefused` with `tries_left` 0, `LoginExpired`,
+  `LoginFailed`, `SandboxStopped`, `UnknownLogin` and `LoginClosed`. A network failure or any other error keeps the link and the field.
+- **The two steps.** Renew → `POST /sandbox/login/start` → the `Open sign-in` link (a new tab, `noopener noreferrer`:
+  approve on whichever device holds the claude.ai session), the field `Paste the code claude.ai shows after you approve`
+  and Send (disabled while blank) → `POST /sandbox/login/code`. Both POSTs carry `X-CSRF-Token` and the session cookie.
+  The result line is `Renewed: valid until <date>` or the refusal in words (`CodeRefused` with a new sign-in swaps the
+  link; an incomplete code keeps it; a second refusal, `LoginExpired` or a closed login asks for Renew again).
+- **Nothing kept.** The sign-in URL and the code live in the component's state only: never `localStorage`, never a
+  console line.
 
 ## Commands (from `apps/studio-web`)
 

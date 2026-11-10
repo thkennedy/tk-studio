@@ -59,9 +59,25 @@ class FakeTrack(FakeSyncBack):
         self.summaries: dict[str, str] = {}  # key -> summary (the search)
         self.next_issue = 100
         self.refuse_create = False           # a 400 (e.g. no Task type)
+        self.labels: dict[str, list[str]] = {}  # 39.2: key -> its labels
+        self.descriptions: dict[str, str] = {}  # 39.2: key -> description
 
     def _jira(self, method, path, query, body):
         q = {k: v[0] for k, v in urllib.parse.parse_qs(query).items()}
+        if method == "GET" and path == "/search/jql" \
+                and q.get("fields") == "summary,status,description" \
+                and 'labels = "tk-studio-sandbox-login"' in q["jql"]:
+            # 39.2: the owner Task's search — by label, not Done
+            self.jql.append(q["jql"])
+            assert q["jql"].endswith("AND statusCategory != Done"), q["jql"]
+            return 200, {"issues": [
+                {"key": k, "fields": {"summary": self.summaries.get(k, ""),
+                                      "status": {"name": self.status.get(k)},
+                                      "description":
+                                          self.descriptions.get(k)}}
+                for k, labels in self.labels.items()
+                if "tk-studio-sandbox-login" in labels
+                and self.status.get(k) != "Done"]}
         if method == "GET" and path == "/search/jql" \
                 and q.get("fields") == "summary,status":
             self.jql.append(q["jql"])
@@ -81,6 +97,8 @@ class FakeTrack(FakeSyncBack):
             key = f"{KEY}-{self.next_issue}"
             self.next_issue += 1
             self.summaries[key] = body["fields"]["summary"]
+            self.labels[key] = list(body["fields"].get("labels") or [])
+            self.descriptions[key] = body["fields"].get("description")
             self.status[key] = "To Do"
             return 201, {"id": "1", "key": key}
         m = re.match(r"^/issue/([^/]+)$", path)
@@ -2510,6 +2528,226 @@ class Story39_1ValidateRouteTests(ValidateTestCase):
         self.assert_validate_block(again, "blocked")
         self.assertEqual(len(self.fake.posted[self.ISSUE]), 1)
         self.assertEqual(len(self.lines()), 1)
+
+
+# ---------------------------------------------------------- Story 39.2: the owner's Task
+
+SB = "claude-tk-studio"
+R = "2026-11-24T10:00:43Z"
+R_ISO = "2026-11-24T10:00:43.000Z"
+SUMMARY = "Renew the sandbox's Claude login before 2026-11-24 10:00Z"
+CARD = "https://studio.example.ts.net:8787/app/settings"
+NO_ORIGIN = {"TK_SUPERVISOR_TLS_NAME": "", "TK_SUPERVISOR_BIND": "", "TK_SUPERVISOR_PORT": "8787"}
+
+
+class OwnerTaskTests(TrackTestCase):
+    """Story 39.2: `block|close --source owner --task sandbox-login` — the
+    Task keyed by the login's expiry: created, assigned and blocked once,
+    found again, moved to Done by a later expiry's close; every refusal
+    before any call; the CLI forms."""
+
+    def owner_block(self, expires=R, url=CARD, env=NO_ORIGIN, **kwargs):
+        with unittest.mock.patch.dict(os.environ, env):
+            return track.block_owner_task(self.root, "sandbox-login", SB, expires,
+                                          url=url, transport=self.fake,
+                                          sleep=self.sleeps.append, **kwargs)
+
+    def owner_close(self, expires="2026-12-24T10:00:43Z", **kwargs):
+        return track.close_owner_task(self.root, "sandbox-login", SB, expires,
+                                      transport=self.fake,
+                                      sleep=self.sleeps.append, **kwargs)
+
+    def main(self, *argv, env=NO_ORIGIN):
+        out = io.StringIO()
+        with unittest.mock.patch.object(jirabackend, "client_for",
+                                        _client_with(self.fake)), \
+                unittest.mock.patch.dict(os.environ, env), \
+                contextlib.redirect_stdout(out):
+            code = track.main([argv[0], "--directory", str(self.root), *argv[1:]])
+        return code, json.loads(out.getvalue())
+
+    def test_creates_the_task_assigned_to_the_owner_then_blocks_it_with_the_mention(self):
+        result = self.owner_block(now=track.parse_expires("2026-11-21T10:00:00Z"))
+        self.assert_track_block(result, "complete")
+        key = f"{KEY}-100"
+        self.assertEqual({k: result[k] for k in ("source", "task", "sandbox", "expires")},
+                         {"source": "owner", "task": "sandbox-login", "sandbox": SB, "expires": R_ISO})
+        self.assertEqual(result["issues"], [{"issue": key, "created": True, "transitioned": True, "commented": True}])
+        self.assertEqual(self.fake.created, [{
+            "project": {"key": KEY}, "summary": SUMMARY, "issuetype": {"name": "Task"},
+            "description": (
+                f"The sandbox {SB}'s Claude login (the subscription's claude.ai grant) ends {R_ISO}. "
+                "Once it lapses, every run on the sandbox waits for a renewal.\n\n"
+                f"1. Open {CARD} and press Renew, then Open sign-in: approve on any device that holds your claude.ai session.\n"
+                "2. Paste the code claude.ai shows into \"Paste the code claude.ai shows after you approve\" and press Send.\n\n"
+                "The studio moves this Task to Done when it reads the renewed login.\n"
+                f"Key: sandbox-login {SB} {R_ISO}"),
+            "labels": ["tk-studio-owner", "tk-studio-sandbox-login"], "assignee": {"accountId": OWNER}}])
+        self.assertEqual(self.fake.status[key], BLOCKED)
+        self.assertEqual(self.fake.posted[key], [
+            f"[~accountid:{OWNER}] Blocked: the sandbox {SB}'s Claude login expires 2026-11-24 10:00Z\n"
+            f"Resolves when: renew it on {CARD} (Renew, Open sign-in, paste the code, Send)"])
+
+    def test_the_comment_keeps_39_1s_open_line_with_the_origin_set(self):
+        env = {"TK_SUPERVISOR_TLS_NAME": "studio.example.ts.net", "TK_SUPERVISOR_BIND": "", "TK_SUPERVISOR_PORT": "8787"}
+        self.owner_block(env=env, now=track.parse_expires("2026-11-25T00:00:00Z"))
+        key = f"{KEY}-100"
+        (text,) = self.fake.posted[key]
+        self.assertIn(f"Claude login expired 2026-11-24 10:00Z", text)
+        self.assertTrue(text.endswith(f"\nOpen: https://studio.example.ts.net:8787/app/inbox/{key}"))
+
+    def test_no_url_carries_the_route_path_only(self):
+        self.owner_block(url=None)
+        self.assertIn("1. Open /app/settings and press Renew", self.fake.created[0]["description"])
+
+    def test_the_task_for_the_expiry_is_found_not_minted_again(self):
+        self.owner_block()
+        again = self.owner_block()
+        self.assert_track_block(again, "complete")
+        self.assertEqual(len(self.fake.created), 1)
+        (entry,) = again["issues"]
+        self.assertEqual((entry["issue"], entry["created"], entry["transitioned"], entry["commented"]),
+                         (f"{KEY}-100", False, False, False))
+        self.assertEqual(len(entry["skipped"]), 2)
+        self.assertTrue(any('labels = "tk-studio-sandbox-login"' in j for j in self.fake.jql))
+        # another expiry is another Task
+        self.owner_block(expires="2026-12-24T10:00:43+00:00")
+        self.assertEqual([c["summary"] for c in self.fake.created],
+                         [SUMMARY, "Renew the sandbox's Claude login before 2026-12-24 10:00Z"])
+
+    def test_close_moves_only_other_expiries_tasks_to_done_with_one_comment(self):
+        self.owner_block()
+        self.owner_block(expires="2026-12-24T10:00:43Z")
+        result = self.owner_close()
+        self.assert_track_block(result, "complete")
+        old, new = f"{KEY}-100", f"{KEY}-101"
+        self.assertEqual(result["issues"], [{"issue": old, "created": False, "transitioned": True, "commented": True,
+                                             "moved": [jirabackend.RESOLVED_STATUS, "Done"]}])
+        self.assertEqual(result["skipped"], [f"{new}: the current expiry's Task stays open"])
+        self.assertEqual(self.fake.status[old], "Done")
+        self.assertEqual(self.fake.status[new], BLOCKED)
+        self.assertEqual(self.fake.posted[old][-1], "Resolved: renewed: the login is valid until 2026-12-24 10:00Z")
+        again = self.owner_close()
+        self.assert_track_block(again, "complete")
+        self.assertEqual(again["issues"], [])  # Done: no longer found
+
+    def test_close_of_a_task_never_blocked_skips_block_resolved(self):
+        self.owner_block()
+        key = f"{KEY}-100"
+        self.fake.status[key] = "To Do"
+        self.fake.lacking[key] = {"In Progress", BLOCKED, jirabackend.RESOLVED_STATUS}
+        result = self.owner_close()
+        self.assertEqual(result["issues"][0]["moved"], ["Done"])
+        self.assertIn(f"transition: {key} is not blocked (To Do); {jirabackend.RESOLVED_STATUS!r} skipped",
+                      result["issues"][0]["skipped"])
+
+    def test_each_refusal_before_any_call(self):
+        cases = (
+            (dict(task="other"), "UnknownTask"),
+            (dict(sandbox="-bad name"), "SandboxInvalid"),
+            (dict(expires="2026-11-24 10:00"), "ExpiresInvalid"),
+            (dict(expires="2026-11-24T10:00:43"), "ExpiresInvalid"),
+            (dict(url="https://example.invalid/app/inbox"), "UrlInvalid"),
+            (dict(url="ftp://example.invalid/app/settings"), "UrlInvalid"),
+        )
+        for kwargs, name in cases:
+            args = dict(task="sandbox-login", sandbox=SB, expires=R, url=CARD)
+            args.update(kwargs)
+            result = track.block_owner_task(self.root, args["task"], args["sandbox"], args["expires"],
+                                            url=args["url"], transport=self.fake)
+            self.assert_track_block(result, "blocked")
+            self.assertIn(name, result["reason"])
+        result = track.close_owner_task(self.root, "other", SB, R, transport=self.fake)
+        self.assertIn("UnknownTask", result["reason"])
+        with unittest.mock.patch.dict(os.environ, {jirabackend.TOKEN_ENV: "", jirabackend.AGENT_TOKEN_ENV: ""}):
+            result = track.block_owner_task(self.root, "sandbox-login", SB, R, url=CARD, transport=self.fake)
+        self.assert_track_block(result, "blocked")
+        self.assertIn("no Atlassian call made", result["reason"])
+        self.assertEqual(self.fake.calls, [])
+
+    def test_a_create_refused_and_a_transient_failure(self):
+        self.fake.refuse_create = True
+        result = self.owner_block()
+        self.assert_track_block(result, "blocked")
+        self.assertIn("IssueCreateRefused", result["reason"])
+        self.fake.refuse_create = False
+        with unittest.mock.patch.object(track, "find_owner_tasks",
+                                        side_effect=jirabackend.JiraError("sync-back: GET /search/jql returned 503")), \
+                unittest.mock.patch.object(track, "transient", return_value=True):
+            result = self.owner_block()
+        self.assertEqual((result["status"], result["ok"], result.get("retry")), ("partial", False, True))
+
+    def test_the_dry_run_makes_no_call_and_names_what_it_would_do(self):
+        result = self.owner_block(dry_run=True)
+        self.assertEqual(result["status"], "partial")
+        self.assertIn(SUMMARY, result["notes"][0])
+        closed = self.owner_close(dry_run=True)
+        self.assertEqual(closed["status"], "partial")
+        self.assertEqual(self.fake.calls, [])
+
+    def test_cli_forms_mixes_and_exit_codes(self):
+        code, out = self.main("block", "--source", "owner", "--task", "sandbox-login", "--sandbox", SB,
+                              "--expires", R, "--url", CARD)
+        self.assertEqual(code, 0)
+        self.assert_track_block(out, "complete")
+        for extra, name in ((["--story", "ST-001"], "--story"), (["--engagement", "ENG-001"], "--engagement"),
+                            (["--reason", "r"], "--reason"), (["--resolves", "r"], "--resolves"),
+                            (["--kind", "cap"], "--kind"), (["--triage", "t.json"], "--triage"),
+                            (["--run-id", "r1"], "--run-id"), (["--ask", "DW-1"], "--ask")):
+            code, out = self.main("block", "--source", "owner", "--task", "sandbox-login", "--sandbox", SB,
+                                  "--expires", R, *extra)
+            self.assertEqual(code, 2)
+            self.assert_track_block(out, "blocked")
+            self.assertIn(f"exclusive with {name}", out["reason"])
+        code, out = self.main("block", "--story", "ST-001", "--reason", "r", "--resolves", "s", "--sandbox", SB)
+        self.assertEqual(code, 2)
+        self.assertIn("--source owner's", out["reason"])
+        code, out = self.main("close", "--source", "owner", "--task", "sandbox-login", "--sandbox", SB,
+                              "--expires", "2026-12-24T10:00:43Z")
+        self.assertEqual(code, 0)
+        self.assertEqual(out["issues"][0]["moved"], [jirabackend.RESOLVED_STATUS, "Done"])
+        code, out = self.main("close", "--source", "owner", "--engagement", "ENG-001", "--task", "sandbox-login",
+                              "--sandbox", SB, "--expires", R)
+        self.assertEqual(code, 2)
+        self.assertIn("exclusive with --engagement", out["reason"])
+        # `close` without --engagement nor --source owner: a JSON refusal, exit 2 (no longer argparse's)
+        code, out = self.main("close")
+        self.assertEqual(code, 2)
+        self.assert_track_block(out, "blocked")
+        self.assertIn("give --engagement ENG-NNN, or --source owner", out["reason"])
+
+    def test_close_for_one_sandbox_leaves_another_sandboxs_task_open(self):
+        other = "claude-other"
+        self.owner_block()                                 # SB's Task, KEY-100
+        with unittest.mock.patch.dict(os.environ, NO_ORIGIN):
+            track.block_owner_task(self.root, "sandbox-login", other, R, url=CARD,
+                                   transport=self.fake, sleep=self.sleeps.append)  # KEY-101
+        a, b = f"{KEY}-100", f"{KEY}-101"
+        self.assertEqual(len(self.fake.created), 2)        # the same summary, two sandboxes
+        self.assertEqual(self.fake.created[1]["summary"], SUMMARY)
+        self.assertTrue(self.fake.created[1]["description"].endswith(f"Key: sandbox-login {other} {R_ISO}"))
+        result = self.owner_close()                        # SB renewed
+        self.assert_track_block(result, "complete")
+        self.assertEqual([e["issue"] for e in result["issues"]], [a])
+        self.assertEqual(self.fake.status[a], "Done")
+        self.assertEqual(self.fake.status[b], BLOCKED)
+        self.assertEqual(len(self.fake.posted[b]), 1)      # only its own block comment
+
+    def test_a_block_for_another_sandbox_does_not_reuse_this_ones_task(self):
+        other = "claude-other"
+        self.owner_block()
+        with unittest.mock.patch.dict(os.environ, NO_ORIGIN):
+            result = track.block_owner_task(self.root, "sandbox-login", other, R, url=CARD,
+                                            transport=self.fake, sleep=self.sleeps.append)
+        self.assert_track_block(result, "complete")
+        self.assertEqual(result["issues"], [{"issue": f"{KEY}-101", "created": True,
+                                             "transitioned": True, "commented": True}])
+        self.assertEqual(len(self.fake.posted[f"{KEY}-100"]), 1)
+        # a Task without its Key line (e.g. hand-made) is nobody's
+        self.fake.descriptions[f"{KEY}-100"] = "no key line"
+        again = self.owner_block()
+        self.assertTrue(again["issues"][0]["created"])
+
 
 if __name__ == "__main__":
     unittest.main()

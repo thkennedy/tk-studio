@@ -60,6 +60,10 @@ jobs:
   # place tk-studio/run-epic-41 {tier: sbx} in the supervisor's per-job config before the first POST (hole 90),
   # and POST only after Epic 40 has landed and the previous landing's docs PR has merged.
   - run-epic-41
+  # atlassian-sync-back (2026-11-10, the owner's `SYNC: A` on TKSTUDIO-262): the shipped sync-back tick, declared
+  # hourly by the instance file. A core job on the host tier (no placement entry, no model session). Nothing on
+  # the box fires a timed job yet (hole 126, DW-214; Story 41.1), so until then one tick is POSTed per landing.
+  - atlassian-sync-back
 
 # Role-keyed working sets (AD-17) — recorded only on explicit
 # confirmation via tk-studio-onboard; one entry per role.

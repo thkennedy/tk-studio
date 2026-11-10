@@ -18,6 +18,7 @@
 // back and forward switch screens, `/app` (and a client-side `/`) is replaced by `/app/office`, the screens not built
 // yet show "Not built yet: Story 39.N", and `/app/chat` keeps the engagement Chat screen under that strip. The two
 // remembered keys (`tk-studio.web.screen`, `tk-studio.web.issue`) are migrated once at load and never written again.
+// Story 39.2: `/app/settings` mounts the Settings screen (the Sandbox login card first, then 39.8's named placeholder).
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { createOfficeStore, LIVE_RUN_STATES } from "./live/store";
 import { openOfficeStream } from "./live/stream";
@@ -31,6 +32,7 @@ import { OfficeScreen, type CanvasStats } from "./office/OfficeScreen";
 import {
   createRouter, engagementRefFor, isLanding, issueRefFor, migrateRemembered, NAV, navActive, notFoundText, PLACEHOLDER, routePath, type Route,
 } from "./screen";
+import { SettingsScreen } from "./settings/SettingsScreen";
 import { StatusScreen } from "./status/StatusScreen";
 
 /** The tab's one store (module-level: it outlives StrictMode's remount, so the view is never cleared). */
@@ -87,7 +89,9 @@ export function App() {
         </>
       ) : route.name === "status" ? (
         <StatusScreen store={officeStore} />
-      ) : route.name === "story" || route.name === "run" || route.name === "checkin" || route.name === "settings" ? (
+      ) : route.name === "settings" ? (
+        <SettingsScreen />
+      ) : route.name === "story" || route.name === "run" || route.name === "checkin" ? (
         <div style={pageText}>{PLACEHOLDER[route.name]}</div>
       ) : (
         <div style={pageText}>{notFoundText(route.path)}</div>

@@ -8,8 +8,9 @@ import { NotifierConfigMissing, NotifierUnknown, notifier, supervisorOrigin, wor
 import {
   canonicalPr, claimRefusedLine, copyTranscript, END_HYGIENE_EVENTS, engagementRoute, recordClaimRefusal, endNotice, isGodot, isWithin, NOTICE_MAX_BYTES, notifierSecrets, notify, noticeText, prUrl,
   REFUSED_UNDER_TEST, robocopyOk, scrubNotifier, snapshot, snapshotArgv, SnapshotFailed, snapshotOnce, snapshotTarget, sweepEnds, TRUNCATED_MARKER,
-  routeUrl, runRoute, underBunTest,
+  routeUrl, runRoute, sandboxLoginPass, underBunTest, type SandboxLoginPassDeps,
 } from "../src/hygiene";
+import type { SandboxLoginReading } from "../src/sandbox";
 import { NOTIFIER_VARS } from "./preload";
 import { END_LEASE_STALE_MS, NOTIFIED_BEFORE, Queue, type Owner, type Probes, type QueueRun } from "../src/queue";
 import type { RunResult } from "../src/server";
@@ -911,5 +912,110 @@ describe("Story 39.1: the notifier line's route_url from the supervisor's origin
     expect(text).toBe(noticeText(endNotice(fx.queue, fx.queue.get(plain.run_id)!)));
     expect(text).not.toContain("open:");
     expect(fx.queue.events(plain.run_id).find((e) => e.kind === "notified")!.detail).toEqual({ via: "ntfy", state: "blocked" });
+  });
+});
+
+describe("Story 39.2: the sandbox login's Task pass (sandboxLoginPass)", () => {
+  const SB = "claude-tk-studio";
+  const HOUR = 3_600_000, DAY = 24 * HOUR;
+  const R = "2026-11-24T10:00:43.000Z", R2 = "2026-12-24T10:00:43.000Z";
+  const reading = (state: SandboxLoginReading["state"], refresh: string | null, nowMs: number, reason?: string): SandboxLoginReading => ({
+    ok: true, sandbox: SB, logged_in: state !== "unknown", auth_method: "claude.ai", subscription_type: "max", access_expires_at: null, refresh_expires_at: refresh,
+    days_left: refresh ? Math.max(0, Math.floor((Date.parse(refresh) - nowMs) / DAY)) : null, state, checked_at: new Date(nowMs).toISOString(), ...(reason ? { reason } : {}),
+  });
+  function harness(o: { root?: string | null; origin?: string | null; trackOut?: (args: string[]) => RunResult } = {}) {
+    const q = track(new Queue(join(tempDir("tk-sup-login-pass-"), "q.db"), { ownerAlive: () => false, engineLive: async () => ({ live: false }) }));
+    let now = Date.parse("2026-11-21T12:00:00Z");
+    let next: (nowMs: number) => SandboxLoginReading = (n) => reading("expiring", R, n);
+    const reads: number[] = [];
+    const calls: { root: string; args: string[] }[] = [];
+    const deps: SandboxLoginPassDeps = {
+      sandboxes: () => [SB],
+      read: async () => { reads.push(now); return next(now); },
+      boundRoot: async () => (o.root === undefined ? "/c/GitHub/tk-studio" : o.root),
+      track: async (root, args) => {
+        calls.push({ root, args });
+        return o.trackOut?.(args) ?? { exit: 0, stderr: "", stdout: `note\n${JSON.stringify({ ok: true, source: "owner", issues: [{ issue: args[0] === "block" ? "TKSTUDIO-300" : "TKSTUDIO-300", created: true }] })}` };
+      },
+      origin: () => (o.origin === undefined ? "https://agent-pc.tail.ts.net:8787" : o.origin),
+      now: () => now,
+    };
+    const checks = () => q.serviceEvents("sandbox-login-check").map((e) => e.detail!);
+    return { q, deps, reads, calls, checks, set: (f: typeof next) => { next = f; }, at: (ms: number) => { now = ms; }, now: () => now };
+  }
+
+  test("expiring → one Task minted per expiry (`track.py block --source owner …` with the card's absolute URL); the next pass neither reads early nor mints again", async () => {
+    const h = harness();
+    await sandboxLoginPass(h.q, h.deps);
+    expect(h.calls).toEqual([{ root: "/c/GitHub/tk-studio", args: [
+      "block", "--directory", "/c/GitHub/tk-studio", "--source", "owner", "--task", "sandbox-login", "--sandbox", SB, "--expires", R, "--url", "https://agent-pc.tail.ts.net:8787/app/settings",
+    ] }]);
+    expect(h.checks()).toEqual([{ sandbox: SB, state: "expiring", refresh_expires_at: R, days_left: 2, task: "TKSTUDIO-300" }]);
+    h.at(h.now() + 10 * 60_000);
+    await sandboxLoginPass(h.q, h.deps); // derived (throttled read): no mint, no record
+    h.at(h.now() + 2 * HOUR);
+    await sandboxLoginPass(h.q, h.deps); // read again (1 h for a non-ok check): a plain check
+    expect(h.reads).toHaveLength(2);
+    expect(h.calls).toHaveLength(1);
+    expect(h.checks().map((c) => c.task ?? "-")).toEqual(["TKSTUDIO-300", "-"]);
+  });
+
+  test("the derived clock: the sandbox stopped, the last check's expiry and the clock alone (no exec) mint the Task three days out; a renewal read moves it to Done", async () => {
+    const h = harness({ origin: null });
+    h.at(Date.parse("2026-11-15T12:00:00Z"));
+    h.set((n) => reading("ok", R, n));
+    await sandboxLoginPass(h.q, h.deps);
+    expect(h.checks()).toEqual([{ sandbox: SB, state: "ok", refresh_expires_at: R, days_left: 8 }]);
+    expect(h.calls).toEqual([]);
+    h.set((n) => reading("unknown", null, n, "sandbox stopped"));
+    h.at(Date.parse("2026-11-21T12:00:00Z"));
+    await sandboxLoginPass(h.q, h.deps);
+    // No origin: the Task carries the route path only (no --url).
+    expect(h.calls.map((c) => c.args)).toEqual([["block", "--directory", "/c/GitHub/tk-studio", "--source", "owner", "--task", "sandbox-login", "--sandbox", SB, "--expires", R]]);
+    expect(h.checks().at(-1)).toEqual({ sandbox: SB, state: "expiring", refresh_expires_at: R, days_left: 2, derived: true, task: "TKSTUDIO-300" });
+    await sandboxLoginPass(h.q, h.deps);
+    expect(h.calls).toHaveLength(1); // once per expiry
+    // Past the expiry: still derived, `expired`, no second Task for R.
+    h.at(Date.parse("2026-11-25T12:00:00Z"));
+    await sandboxLoginPass(h.q, h.deps);
+    expect(h.calls).toHaveLength(1);
+    // A renewal (`renewed` close) makes the next pass read: ok for R2 → close the Task for R.
+    h.q.serviceEvent("sandbox-login", { sandbox: SB, login_id: "aaaaaaaaaaaa", result: "renewed", by: "owner", started_at: "x", ended_at: "y" });
+    h.set((n) => reading("ok", R2, n));
+    await sandboxLoginPass(h.q, h.deps);
+    expect(h.calls.at(-1)!.args).toEqual(["close", "--directory", "/c/GitHub/tk-studio", "--source", "owner", "--task", "sandbox-login", "--sandbox", SB, "--expires", R2]);
+    expect(h.checks().at(-1)).toEqual({ sandbox: SB, state: "ok", refresh_expires_at: R2, days_left: 28, closed: ["TKSTUDIO-300"] });
+    h.at(h.now() + 7 * HOUR);
+    await sandboxLoginPass(h.q, h.deps);
+    expect(h.calls).toHaveLength(2); // closed once
+  });
+
+  test("no bound project → `task_skipped`, retried after an hour, never every pass; a failed call records `task_error` and never throws", async () => {
+    const h = harness({ root: null });
+    await sandboxLoginPass(h.q, h.deps);
+    expect(h.checks()).toEqual([{ sandbox: SB, state: "expiring", refresh_expires_at: R, days_left: 2, task: null, task_skipped: `no bound project places on ${SB}` }]);
+    await sandboxLoginPass(h.q, h.deps);
+    expect(h.checks()).toHaveLength(1);
+    const f = harness({ trackOut: () => ({ exit: 1, stderr: "boom", stdout: JSON.stringify({ ok: false, status: "partial", retry: true, reason: "Jira 503" }) }) });
+    await sandboxLoginPass(f.q, f.deps);
+    expect(f.checks()).toEqual([{ sandbox: SB, state: "expiring", refresh_expires_at: R, days_left: 2, task: null, task_error: "Jira 503" }]);
+    f.at(f.now() + 2 * HOUR);
+    await sandboxLoginPass(f.q, f.deps);
+    expect(f.calls).toHaveLength(2);
+    const t = harness();
+    t.deps.read = async () => { throw new Error("sbx gone"); };
+    await sandboxLoginPass(t.q, t.deps); // never throws
+    expect(t.checks()).toEqual([]);
+  });
+
+  test("the check event carries no token, URL or email; nothing to read nor derive records nothing", async () => {
+    const h = harness();
+    h.set((n) => reading("unknown", null, n, "sandbox stopped"));
+    await sandboxLoginPass(h.q, h.deps);
+    expect(h.checks()).toEqual([]);
+    h.set((n) => reading("expired", R, n));
+    await sandboxLoginPass(h.q, h.deps);
+    const text = JSON.stringify(h.q.serviceEvents());
+    for (const s of ["accessToken", "oauth", "@"]) expect(text).not.toContain(s);
   });
 });

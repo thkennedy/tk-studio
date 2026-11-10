@@ -113,9 +113,10 @@ import {
   readProjectConfig, registryShow, requireCompatible, resolveStudioRoot, runJobVerb, runProcess, runUv, SbxSandboxMissing, TierRequired, toVmPath, WORKER_RECORD_FAILED, type OwnBlock, type RunResult, type Spawner, type Tier,
 } from "./server";
 import { serve as serveApi } from "./api";
-import { notifier, pluginRoot, studioRoot, tlsConfig, WorkDirMissing, workDir } from "./env";
+import { notifier, pluginRoot, studioRoot, supervisorOrigin, tlsConfig, WorkDirMissing, workDir } from "./env";
+import { jiraBound } from "./planseams";
 import { engineMcpEnv, engineMcpRefusalText, recoverEngineMcps, startEngineMcp, stopEngineMcp, type EngineMcpDeps } from "./enginemcp";
-import { canonicalPr, prUrl, recordClaimRefusal, snapshotOnce, sweepEnds, underBunTest, type HygieneDeps } from "./hygiene";
+import { canonicalPr, prUrl, recordClaimRefusal, sandboxLoginPass, snapshotOnce, sweepEnds, underBunTest, type HygieneDeps, type SandboxLoginPassDeps } from "./hygiene";
 import { rebuildAgents, type RebuildDeps, type RebuildResult } from "./registry";
 import {
   closeOut, closeOutDetail, launchedCloseOutInput, launchedNoEngine, meteredCost, pendingCloseOut, prepareWorktree, priorPr, sweepEngines, WorktreeFailed, type WorktreeDeps,
@@ -123,7 +124,7 @@ import {
 import {
   checkoutKey, defaultProbes, engineRoot, type EngineWhere, servedRoot, isTerminal, LAUNCH_SKILL, VALIDATE_RESOLUTION_JOB, ENGAGEMENT_CHAT_JOB, ORPHANED_REASON, probeLaunchEngine, processStartTime, Queue, RunTerminal, selfOwner, STUDIO_END_RETRY_LIMIT, workerMayRun,
   type Holder, type LaunchEngine, type Owner, type QueueRun, type RecoverReport, type RunState, type StudioEnder, type StudioFinder, type StudioOps, type StudioResumer, type TerminalState,
-  type WorkerKill,
+  type SandboxLoginLease, type WorkerKill,
 } from "./queue";
 import { rerunHostLeg, VerifyRefused, type HostLegStarted } from "./hostleg";
 import { redSuites } from "./hostverify";
@@ -141,8 +142,8 @@ import { closeoutPass } from "./delivery";
 import { ledgerPath } from "./board";
 import { CERT_CHECK_MS, CERT_RENEW_EXIT, certCheck, recordCertStart } from "./cert";
 import {
-  holdEngine, killRunEngine, pinWithRestart, pruneEngineTmp, releasePin, respawnHolds, skillInStore, STARTER_LOCK_REFRESH_MS, studioRunDir, writeStarterLock, writeStarterLocks, type PinContext,
-  type SandboxDeps,
+  configuredSandboxes, expireSandboxLogins, holdEngine, killRunEngine, pinWithRestart, pruneEngineTmp, readSandboxLogin, releasePin, respawnHolds, skillInStore, STARTER_LOCK_REFRESH_MS,
+  studioRunDir, writeStarterLock, writeStarterLocks, type PinContext, type SandboxDeps,
 } from "./sandbox";
 import { jobOptions, loadSupervisorConfig, type JobOptions } from "./config";
 import {
@@ -336,6 +337,8 @@ export interface RunOptions {
   approve?: Partial<ApproveDeps> | false;
   /** Story 32.6: the engagement run-spend pass (`runSpendQuietly`) — injected deps, or `false` to skip it. */
   runSpend?: Partial<RunSpendDeps> | false;
+  /** Story 39.2: the sandbox login's Task pass (`sandboxLoginQuietly`) — injected deps, or `false` to skip it. */
+  sandboxLogin?: Partial<SandboxLoginPassDeps> | false;
 }
 
 /** Story 29.2: how a rebuild point rebuilds the `agents` table — the injected deps (tests), `false` (no rebuild),
@@ -971,6 +974,8 @@ export async function drainQueue(opts: RunOptions = {}, verbRunner: VerbRunner =
     const relogged = new Set<string>(); // DW-170: one relogin per sandbox per pass
     const { report: recovered, prepared } = await recoverWithResume(queue, owner, verbRunner);
     await driveResumes(queue, recovered.resumed, prepared, verbRunner, invokeSkill, sbxDeps(opts.worktree), restarted);
+    // Story 39.2: a stale `sandbox-login` lease is closed `expired` before the claims, so this pass's gate sees it closed.
+    try { await expireSandboxLogins(queue, sbxDeps(opts.worktree), Date.now()); } catch { /* the next pass */ }
     const runs: DrainReport["runs"] = [];
     for (const r of queue.drainable(owner)) {
       try {
@@ -1016,9 +1021,39 @@ export async function drainQueue(opts: RunOptions = {}, verbRunner: VerbRunner =
     await afterCloseOuts(queue, opts); // Story 27.5
     await rebuildQuietly(queue, opts.agents); // Story 29.2: the agent registry after the drain's claims and ends
     await sweepEnds(queue, opts.hygiene);
+    await sandboxLoginQuietly(queue, opts); // Story 39.2: the login's clock and its owner Task
     await pausedLegs(queue, pausedDeps(opts)); // Story 38.5 (CAP-13): the pause's leg, after its notice and block
     if (owned) queue.close();
   }
+}
+
+/** Story 39.2: the sandbox login's Task pass (`hygiene.ts sandboxLoginPass`) in `drainQueue`'s `finally`, after
+ * `sweepEnds`: production reads the configured sandboxes (TK_SUPERVISOR_CONFIG), reads a running one through
+ * `readSandboxLogin`, and runs `track.py block|close --source owner --task sandbox-login` through the worktree deps'
+ * `uv` (default `runUv`) at the first configured, registered, Jira-bound project placing on the sandbox; under
+ * `bun test` it runs only with injected deps (as `resolveQuietly`). Never throws. */
+async function sandboxLoginQuietly(queue: Queue, opts: RunOptions): Promise<void> {
+  if (opts.sandboxLogin === false || (opts.sandboxLogin === undefined && underBunTest())) return;
+  const env = opts.worktree?.env ?? process.env;
+  const deps: SandboxLoginPassDeps = {
+    sandboxes: () => configuredSandboxes(loadSupervisorConfig()),
+    read: (sb) => readSandboxLogin(queue, sb, sbxDeps(opts.worktree), Date.now()),
+    boundRoot: async (sb) => {
+      const cfg = loadSupervisorConfig();
+      const shown = await registryShow();
+      const projects = shown?.projects && typeof shown.projects === "object" ? shown.projects as Record<string, any> : {};
+      for (const [key, o] of Object.entries(cfg.jobs)) {
+        if (o.sandbox !== sb) continue;
+        const root = projects[key.slice(0, key.lastIndexOf("/"))]?.root;
+        if (typeof root === "string" && root && existsSync(root) && jiraBound(root)) return root;
+      }
+      return null;
+    },
+    track: (root, args) => (opts.worktree?.uv ?? runUv)(root, join(pluginRoot(env), "lib", "track.py"), args, 120),
+    origin: () => supervisorOrigin(env),
+    ...(opts.sandboxLogin ?? {}),
+  };
+  try { await sandboxLoginPass(queue, deps); } catch { /* the next pass */ }
 }
 
 /** `submit`: validate, then enqueue (idempotent). Nothing is driven. */
@@ -1469,8 +1504,27 @@ export interface ClaimGateDeps {
  * reason, the notifier line when it is new) and answered; the run stays `queued`. Null: the claim may proceed.
  * DW-170 (hole 111): a pin refused because the sandbox tier is not signed in to Docker runs the sign-in verb once per
  * pass per sandbox (`relogin` event) and pins again when it answered `complete`. */
+/** Story 39.2: the claim refusal of a live `sandbox-login` lease on `sb` (key `sandbox-login:<sb>`), else null. */
+async function loginLeaseRefusal(queue: Queue, runId: string, sb: string, hygiene?: HygieneDeps): Promise<ClaimRefused | null> {
+  const lease = queue.openSandboxLogin(sb);
+  if (!lease) return null;
+  return recordedRefusal(queue, runId, leaseRefusal(lease), hygiene);
+}
+
+/** Story 39.2: the keyed claim refusal (`sandbox-login:<sb>`) of a live lease — the gate's and the claim's own. */
+function leaseRefusal(lease: SandboxLoginLease): KeyedRefusal {
+  return {
+    key: `sandbox-login:${lease.sandbox}`,
+    reason: `sandbox ${lease.sandbox}: a Claude login renewal is in progress (login ${lease.login_id}, until ${lease.deadline})`,
+    resolves: `send the code on the Settings page (/app/settings), or let the lease run out at ${lease.deadline}; the next drain pass claims the run`,
+  };
+}
+
 export async function claimGate(queue: Queue, runId: string, options: WorkerOptions, deps: ClaimGateDeps = {}): Promise<ClaimRefused | null> {
   if (options.tier === "sbx" && options.sandbox) {
+    // Story 39.2: a live `sandbox-login` lease on the sandbox refuses the claim first, before any pin call.
+    const leased = await loginLeaseRefusal(queue, runId, options.sandbox, deps.hygiene);
+    if (leased) return leased;
     // The pin is found through the run's recorded sandbox (`pinOutstanding`, `releasePin`): a queued run whose stored
     // tier/sandbox differ from the resolved ones (a legacy row; config supplies the sandbox) records them first.
     const stored = queue.get(runId);
@@ -1492,6 +1546,13 @@ export async function claimGate(queue: Queue, runId: string, options: WorkerOpti
   }
   const login = await maxLoginPreflight(deps.spawner, { tier: options.tier, sandbox: options.sandbox });
   if (login) return recordedRefusal(queue, runId, { key: "max-login", reason: login, resolves: loginResolves(options) }, deps.hygiene);
+  // Story 39.2: read the lease again after the pin and the preflight, right before the gate lets the claim proceed — a
+  // start (serve, another process) that took it meanwhile refuses the claim by the same name. A start once the claim
+  // has moved the run to `running` finds it in `takeSandboxLogin`'s transaction and is refused `LoginWhileLive`.
+  if (options.tier === "sbx" && options.sandbox) {
+    const leased = await loginLeaseRefusal(queue, runId, options.sandbox, deps.hygiene);
+    if (leased) return leased;
+  }
   return null;
 }
 
@@ -1603,17 +1664,23 @@ export async function runJob(jobId: string, directory: string, permissionMode?: 
     if (claim.claimed) await rebuildQuietly(queue, opts.agents); // Story 29.2: every claim rebuilds the agent registry
     // Story 33.2: the claim went through — the run's open refusals are cleared (`claim-refusal-cleared`).
     if (claim.claimed) { try { queue.clearClaimRefusals(run.run_id); } catch { /* the claim stands */ } }
-    if (!claim.claimed && opts.runId && claim.why !== "lock") return skipped(claim.reason);
+    // Story 39.2: a `sandbox-login` lease taken after the gate's last read (during `validate`/`resolveCheckout`) is
+    // found in the claim's own transaction: the run stays `queued`; a drained run records it as the gate does
+    // (`sandbox-login:<sb>`, answered as `claim_refused`); `why: "sandbox-login"` is never answered as `waited`.
+    if (!claim.claimed && claim.why === "sandbox-login" && opts.runId && claim.lease) {
+      return refusedClaim(queue, run.run_id, jobId, await recordedRefusal(queue, run.run_id, leaseRefusal(claim.lease), opts.hygiene));
+    }
+    if (!claim.claimed && opts.runId && claim.why !== "lock" && claim.why !== "sandbox-login") return skipped(claim.reason);
     // Story 33.2: a drained run waiting on a live lock holder records the wait as its claim refusal, keyed on the
     // holder's run id (its reason's pid, host and detail may change between passes), and answers it as `claim_refused`
     // beside the existing `waited` (additive).
     let lockRefused: ClaimRefused | undefined;
-    if (!claim.claimed && opts.runId) {
+    if (!claim.claimed && opts.runId && claim.why === "lock") {
       lockRefused = await recordedRefusal(queue, run.run_id, { key: `lock:${claim.holder?.run_id ?? "unknown"}`, reason: claim.reason, resolves: LOCK_RESOLVES }, opts.hygiene);
     }
     if (!claim.claimed) {
       return {
-        waited: claim.why,
+        ...(claim.why !== "sandbox-login" ? { waited: claim.why } : {}),
         ok: false, job_id: jobId, project_id: v.projectId, run_id: run.run_id, studio_run_id: claim.run.studio_run_id,
         target: v.target, state: claim.run.state, reason: claim.reason, ...(claim.holder ? { holder: claim.holder } : {}),
         ...(lockRefused ? { claim_refused: lockRefused } : {}),

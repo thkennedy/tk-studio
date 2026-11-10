@@ -4116,6 +4116,78 @@ class DriverContractTestCase(unittest.TestCase):
         self.assertIn("`open: <route_url>`", readme)
         self.assertIn("`Open: <origin>/app/inbox/<KEY>`", readme)
 
+    def test_0_1_35_story_39_2_the_sandbox_login_has_a_clock(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.35**", header)
+        self.assertNotIn("**0.1.36**", header)
+        self.assertEqual(header.count("0.1.35 (Story 39.2, additive)"), 1)
+        self.assertLess(header.index("0.1.35 (Story 39.1, additive)"),
+                        header.index("0.1.35 (Story 39.2, additive)"))
+        clause = " ".join(header[header.index("0.1.35 (Story 39.2, additive)"):].split())
+        for phrase in ("the sandbox login's clock", "`GET /sandbox/login`", "`POST /sandbox/login/start`",
+                       "`POST /sandbox/login/code`", "the `sandbox-login` lease and event",
+                       "the `sandbox-login-check` event", "the claim gate's `sandbox-login:<sb>` refusal",
+                       "`track.py block|close --source owner --task sandbox-login`"):
+            self.assertIn(phrase, clause)
+        self.assertTrue(clause.endswith("— additive) |"))
+        rulings = next(line for line in self.text.splitlines() if line.startswith("| Story / rulings"))
+        self.assertRegex(rulings, r"Story 38\.7 \(Epic 38\), Story 39\.1(, Story 39\.\d+)* \(Epic 39\)")
+        self.assertIn("Story 39.2", rulings)
+        flat = " ".join(self.text.split())
+        title = "**0.1.35 (Story 39.2, additive).**"
+        self.assertEqual(flat.count(title), 1)
+        self.assertLess(flat.index("**0.1.35 (Story 39.1, additive).**"), flat.index(title))
+        note = flat[flat.index(title):]
+        note = note[:note.index("## 8. Conformance")]
+        subs = ("**The read:**", "**The renewal:**", "**The lease and the events:**", "**The Task:**",
+                "**The serve process:**")
+        self.assertEqual([note.index(s) for s in subs], sorted(note.index(s) for s in subs))
+        for phrase in ("`GET /sandbox/login[?sandbox=<name>][&project=<id>]`", "`400 SandboxRequired {candidates}`",
+                       "`404 UnknownSandbox {sandbox}`", "`reason: \"sandbox stopped\"`",
+                       "judged by `judgeAuthStatus`; ruling 3 unchanged", "the probe's object never spread",
+                       "`sbx exec <sb> cat /home/agent/.claude/.credentials.json`",
+                       "only `claudeAiOauth.expiresAt` and `refreshTokenExpiresAt` survive",
+                       "`200 {ok, sandbox, logged_in, auth_method, subscription_type, access_expires_at, "
+                       "refresh_expires_at, days_left, state, checked_at[, reason]}` and no other key",
+                       "three days or fewer left (`expiring`)", "The read writes no event.",
+                       "`409 LoginWhileLive {sandbox, run_id, state}`",
+                       "`409 LoginInProgress {sandbox, login_id, started_at, expires_at}`",
+                       "`409 SandboxStopped {sandbox}`", "`claude auth login --claudeai`", "`tk-login-<id>`",
+                       "`200 {ok, login_id, url, started_at, expires_at}`; the URL appears in that answer and in a first "
+                       "refusal's `409 CodeRefused {…, url}` (the respawned sign-in) only",
+                       "`500 LoginStartFailed {sandbox, last_line}`",
+                       "`sbx exec -i <sb> tmux load-buffer -b tk-login-<id> -` with the code on stdin",
+                       "the code never travels on an argument",
+                       "`409 CodeRefused {login_id, last_line, tries_left[, url]}`", "`409 LoginExpired`",
+                       "`404 UnknownLogin`", "`409 LoginClosed {result}`", "`500 LoginFailed {last_line}`",
+                       "`sandbox-login {sandbox, login_id, owner, by: \"owner\", started_at, deadline}`",
+                       "`sandbox-login {sandbox, login_id, result: renewed|refused|failed|expired, by: \"owner\", "
+                       "started_at, ended_at[, closed_by: \"drain\"]}`",
+                       "neither carries a URL or a code", "(`claim-refused` key `sandbox-login:<sb>`",
+                       "`pin-kept {sandbox, held_by: [\"sandbox-login:<id>\"]}`",
+                       "`sandbox-login-check {sandbox, state, refresh_expires_at, days_left, derived?, task?, "
+                       "task_error?, task_skipped?, closed?}`",
+                       "The `max-login` claim refusal of hole 69 keeps its line.",
+                       "`track.py block --source owner --task sandbox-login --sandbox <sb> --expires <R> [--url "
+                       "<origin>/app/settings]`",
+                       "labelled `tk-studio-owner` and `tk-studio-sandbox-login`",
+                       "`Renew the sandbox's Claude login before <YYYY-MM-DD HH:MM>Z`",
+                       "`track.py close --source owner …`",
+                       "`api.ts`, `sandbox.ts`, `queue.ts`, `hygiene.ts` and `cli.ts` run in serve",
+                       "Every other field, kind and route is unchanged."):
+            self.assertIn(phrase, note)
+        track_row = next(line for line in self.text.splitlines() if line.startswith("| `tk-studio-track`"))
+        self.assertLess(track_row.index("0.1.35, Story 39.1:"), track_row.index("0.1.35, Story 39.2:"))
+        for phrase in ("`block` and `close` with `source: owner`, `task: sandbox-login`",
+                       "→ `lib/track.py block|close --source owner`", "`UnknownTask`, `SandboxInvalid`, "
+                       "`ExpiresInvalid`, `UrlInvalid`", "`close` takes `engagement` or `source: owner`"):
+            self.assertIn(phrase, track_row)
+        runbook = (PLUGIN_ROOT.parents[1] / "kb" / "agent-pc-setup-runbook.md").read_text(encoding="utf-8")
+        row = next(line for line in runbook.splitlines() if "(hole 69)" in line)
+        self.assertIn("; fixed (Story 39.2): the clock and the renewal are on the Settings page, `/app/settings`", row)
+        self.assertIn("TKSTUDIO-233 (the renewal due before 2026-11-24 10:00Z) is the last manual one |", row)
+
     def test_story_35_7_the_skill_sweep_waits_540_s_inside_the_bash_cap(self):
         # the skill's one sweep call must print its block inside the Bash tool's 600 s cap
         skill = (PLUGIN_ROOT / "skills" / "tk-studio-launch" / "SKILL.md").read_text(encoding="utf-8")
