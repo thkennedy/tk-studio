@@ -2188,6 +2188,15 @@ export class Queue {
     }).immediate();
   }
 
+  /** Story 39.4: the live holder of a run's plan lease for `phase` — the latest `plan-lease` event of `phase` on the run
+   * when its `owner` is non-null and live (`ownerLive`, as `claimPlanPhase` reads it), with that event's `at`; else null.
+   * A read: nothing is written. */
+  planLeaseHolder(runId: string, phase: string, self: Owner = selfOwner()): { owner: Owner; at: string } | null {
+    const ev = this.events(runId).findLast((e) => e.kind === "plan-lease" && e.detail?.phase === phase);
+    const owner = ev?.detail?.owner as Owner | null | undefined;
+    return ev && owner && this.ownerLive(owner, self) ? { owner, at: ev.at } : null;
+  }
+
   // ---------------------------------------------------------- supervisor-scope events (Story 27.5)
 
   /** A supervisor-scope event (no run): the certificate's renew request and its outcome. */

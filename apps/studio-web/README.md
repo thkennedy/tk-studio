@@ -264,6 +264,37 @@ then `Model and effort: Not built yet: Story 39.8` (`PLACEHOLDER.settings` now n
 - **Nothing kept.** The sign-in URL and the code live in the component's state only: never `localStorage`, never a
   console line.
 
+## The kanban and the story (Story 39.4)
+
+`/app/board/<project>` opens on the kanban (addendum §3.1.7); `?view=rows` is the row view and triage above,
+unchanged. The toggles (`?view=`, `?epic=<EP-id>|all`) keep the address project and navigate with `replace`. The rules
+are the `// Story 39.4: the kanban` section of `src/board/model.ts`; the view is `src/board/KanbanView.tsx`.
+
+- **The columns** are the canonical seven in enum order (`Draft`, `Ready`, `In progress`, `Blocked`, `Review`, `Done`,
+  `Dropped`); a story with any other status sits in Draft, showing its word. The cards show one epic: the last plan epic
+  neither `done` nor `dropped` (else the last), or every epic with `?epic=all`.
+- **A card** shows the `EP-NNN` badge (titled with the epic), `N.M · ST-NNN` and the title, `band M` | `no band`, the
+  Jira key | `no Jira key`, `PR #N` (a link) | `no PR`, the cost (the Stage Log total) | `no cost yet`, the stage (the
+  live store story's `phase` while it is `current`, `starting` with none) and `Needs you`. Every field comes from the one
+  `GET /board` (0.1.35's `band`, `jira_key`, `cost_usd`, `needs_you`); there is no per-card read. A click opens
+  `/app/story/<id>?project=<project>` through the router.
+- **The drag** is HTML5 drag and drop (desktop, and iPadOS Safari by long-press; no dependency). While a card is held
+  the strip reads "Requests plansync status ready; the loop owns every other column". `draft → ready` posts `POST
+  /stories/<id>/status?project=<p> {status: "ready"}` with the CSRF token `GET /inbox` answers, then reads `Ready: <id>
+  (was <previous>)` and refetches the board, or names the refusal (`StoryLeaseHeld: the loop holds <id> (run …)`, the
+  column's owner, the verb's reason). The same column does nothing; any other drop is refused in the page with
+  `Refused: <from> → <to>. <who writes that column>. Only draft → ready is yours.` and never posts.
+
+`/app/story/<id>` mounts `src/story/StoryScreen.tsx` (no longer 39.1's placeholder; `PLACEHOLDER` drops `story`). It
+reads `GET /stories/<id>?project=` (the project from `?project=`, else the board's remembered choice) and shows, in
+order: the header (badge, key, id, title, status, band, the Jira key linking its issue, the PR), the "Needs you" strip
+(the inbox item linking `/app/inbox/<KEY>`, else `run <id> waits on you` linking `/app/run/<id>`), the plan text (as
+text, pre-wrapped, never HTML), the Stage Log table (stage and pass, the local start, the span or `running`, model and
+effort or `host`, tokens, cost, the outcome, `posted to Jira` | `not posted`), its total line, the runs (each linking
+`/app/run/<id>`) and the open findings. A pending read says "Loading the story…"; a refusal reads `<error>: <detail>`.
+It refetches on mount, on focus or visibility, and when the project's runs in the store change; never on a timer. The
+rules are `src/story/model.ts`, pinned by `src/story/model.test.ts`.
+
 ## Commands (from `apps/studio-web`)
 
 ```bash

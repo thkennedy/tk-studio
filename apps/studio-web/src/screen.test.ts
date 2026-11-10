@@ -131,13 +131,24 @@ describe("the route table (Story 39.1)", () => {
 
   // Story 39.2: the Settings screen is built (the Sandbox login card); its placeholder now names 39.8's part.
   // Story 39.3: `/app/chat` is the studio chat, so `chat` is no longer a placeholder.
+  // Story 39.4: `/app/story/<id>` mounts the story page (`StoryScreen`), so `story` is no longer a placeholder.
   it("the placeholders name the story that builds each screen", () => {
     expect(PLACEHOLDER).toEqual({
-      story: "Not built yet: Story 39.4",
       run: "Not built yet: Story 39.5",
       checkin: "Not built yet: Story 39.7",
       settings: "Not built yet: Story 39.8",
     });
+  });
+
+  it("Story 39.4: /app/story/<id> resolves to the story route and App mounts StoryScreen for it, before the placeholder branch", () => {
+    expect(parseRoute("/app/story/ST-177", "?project=p")).toEqual({ route: { name: "story", id: "ST-177" } });
+    expect("story" in PLACEHOLDER).toBe(false);
+    const app = readFileSync(new URL("./App.tsx", import.meta.url), { encoding: "utf-8" });
+    const storyBranch = app.indexOf('route.name === "story" ? (');
+    expect(storyBranch).toBeGreaterThan(-1);
+    expect(app.slice(storyBranch, app.indexOf("\n", app.indexOf("\n", storyBranch) + 1))).toContain("<StoryScreen");
+    expect(storyBranch).toBeLessThan(app.indexOf("PLACEHOLDER[route.name]"));
+    expect(app).toContain('route.name === "run" || route.name === "checkin" ? (');
   });
 
   it("the nav: Office, Board, Status, Inbox (count), Chat (count), Settings; no Issue", () => {

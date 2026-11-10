@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
@@ -3051,5 +3051,188 @@ describe("Story 39.3: the studio chat (contract 0.1.35 additive)", () => {
     expect(r2.status).toBe(500);
     expect(((await r2.json()) as any).error).toBe("ChatJobUnresolved");
     expect(broken.chatLines()).toEqual([]);
+  });
+});
+
+describe("Story 39.4: POST /stories/{id}/status — the owner's one transition (contract 0.1.35 additive)", () => {
+  const SECRET = "k".repeat(48);
+  const PLAN = join("_bmad-output", "planning-artifacts", "plan");
+  const ME: Owner = { pid: 920039, host: HOST, nonce: "api-stories-me" }; // another live process (the loop) on this host
+  function routed(o: { verb?: ApiDeps["storyStatusVerb"] } = {}) {
+    const root = tempDir("tk-sup-stories-api-root-");
+    cpSync(join(import.meta.dir, "fixtures", "board", "plan"), join(root, PLAN), { recursive: true });
+    const queue = track(new Queue(join(tempDir("tk-sup-stories-api-q-"), "q.db"), {
+      ownerAlive: (w) => w.nonce === ME.nonce, engineLive: async () => ({ live: false }),
+    }));
+    const calls: { root: string; id: string; note: string }[] = [];
+    // The fake verb: `plansync.py status` writes `status: ready` (and `updated`) into the entity, as the real one does.
+    const verb: NonNullable<ApiDeps["storyStatusVerb"]> = o.verb ?? (async (r, id, note) => {
+      calls.push({ root: r, id, note });
+      const file = join(r, PLAN, `${id}.md`);
+      writeFileSync(file, readFileSync(file, "utf-8").replace(/^status: \S+$/m, "status: ready").replace(/^updated: .*$/m, "updated: 2026-11-10T08:00:00+00:00"));
+      return { ok: true, previous_status: "draft" };
+    });
+    const handler = createApi({
+      queue, token: TOKEN, session: { secret: SECRET }, submit: async () => { throw new Error("never"); },
+      registry: async () => ({ projects: { p: { root } } }), env: { TK_STUDIO_HOME: tempDir("tk-sup-stories-api-home-") },
+      storyStatusVerb: async (r, id, note) => { if (o.verb) calls.push({ root: r, id, note }); return verb(r, id, note); },
+    });
+    const cookie = `${SESSION_COOKIE}=${signSession(SECRET, "token", Date.now())}`;
+    const csrf = csrfToken(SECRET, cookie.slice(SESSION_COOKIE.length + 1));
+    const call = (path: string, body: unknown, headers: Record<string, string> = { authorization: `Bearer ${TOKEN}` }, method = "POST") =>
+      handler(new Request(`${BASE}${path}`, { method, headers: { "content-type": "application/json", ...headers }, ...(method === "POST" ? { body: typeof body === "string" ? body : JSON.stringify(body) } : {}) }));
+    const events = () => queue.serviceEvents("plan-status");
+    const status = (id: string) => /^status: (\S+)$/m.exec(readFileSync(join(root, PLAN, `${id}.md`), "utf-8"))?.[1];
+    return { root, queue, calls, call, cookie, csrf, events, status };
+  }
+
+  test("the accepted draft → ready: the verb once, one plan-status service event with actor owner, the new frontmatter", async () => {
+    const fx = routed();
+    const res = await fx.call("/stories/ST-112/status?project=p", { status: "ready" }, { cookie: fx.cookie, "x-csrf-token": fx.csrf });
+    expect(res.status).toBe(200);
+    const body = await res.json() as Record<string, any>;
+    expect(body).toMatchObject({ ok: true, project: "p", previous_status: "draft", sync: "ok" });
+    expect(body.story).toMatchObject({ id: "ST-112", key: "30.5", status: "ready", updated: "2026-11-10T08:00:00+00:00", epic: { id: "EP-030" } });
+    expect(fx.calls).toEqual([{ root: fx.root, id: "ST-112", note: "the owner moved ST-112 draft → ready (cookie)" }]);
+    expect(fx.events().map((e) => e.detail)).toEqual([{
+      phase: "ready", project: "p", story_key: "30.5", id: "ST-112", owner: "p", directory: fx.root, actor: "owner", source: "cookie", ok: true, previous_status: "draft",
+    }]);
+    expect(fx.queue.events()).toEqual([]); // no run event: the loop's run-scoped plan-status events are untouched
+    expect(fx.status("ST-112")).toBe("ready");
+  });
+
+  test("StoryStatusNotOwnerWritable: review → ready and draft → done name the column and its owner; no call, no event", async () => {
+    const fx = routed();
+    const a = await fx.call("/stories/ST-110/status?project=p", { status: "ready" });
+    expect(a.status).toBe(409);
+    expect(await a.json()).toEqual({
+      ok: false, error: "StoryStatusNotOwnerWritable", project: "p", story: "ST-110", from: "review", to: "ready", column: "review",
+      owner: "review is written by the loop's review pass when the run's PR opens (Story 27.5)",
+    });
+    const b = await fx.call("/stories/ST-112/status?project=p", { status: "done" });
+    expect(b.status).toBe(409);
+    expect(await b.json()).toMatchObject({ error: "StoryStatusNotOwnerWritable", from: "draft", to: "done", column: "done", owner: "done is written by the loop's merge pass when the PR merges (Story 27.5)" });
+    expect(fx.calls).toEqual([]);
+    expect(fx.events()).toEqual([]);
+  });
+
+  test("StoryLeaseHeld: a live draft:<key> lease names the run and the holder; no call, no event", async () => {
+    const fx = routed();
+    const run = fx.queue.enqueue({ jobId: "run-epic-30", root: tempDir("tk-sup-stories-api-co-"), projectId: "p", target: "skill", definition: { id: "run-epic-30" } }).run;
+    expect(fx.queue.claimPlanPhase(run.run_id, "draft:30-5-the-board-screen", ME)).toBe(true);
+    const res = await fx.call("/stories/ST-112/status?project=p", { status: "ready" });
+    expect(res.status).toBe(409);
+    const body = await res.json() as Record<string, any>;
+    expect(body).toMatchObject({ ok: false, error: "StoryLeaseHeld", project: "p", story: "ST-112", run_id: run.run_id, phase: "draft:30-5-the-board-screen", holder: { pid: ME.pid, host: HOST } });
+    expect(Object.keys(body.holder).sort()).toEqual(["host", "pid"]);
+    expect(typeof body.since).toBe("string");
+    expect(fx.calls).toEqual([]);
+    expect(fx.events()).toEqual([]);
+    // let go: the press goes through
+    fx.queue.releasePlanPhase(run.run_id, "draft:30-5-the-board-screen", ME);
+    expect((await fx.call("/stories/ST-112/status?project=p", { status: "ready" })).status).toBe(200);
+  });
+
+  test("a cookie without X-CSRF-Token is 403; no auth 401; GET 405 Allow POST", async () => {
+    const fx = routed();
+    for (const headers of [{ cookie: fx.cookie }, { cookie: fx.cookie, "x-csrf-token": "forged" }] as Record<string, string>[]) {
+      const res = await fx.call("/stories/ST-112/status?project=p", { status: "ready" }, headers);
+      expect(res.status).toBe(403);
+      expect(await res.json()).toMatchObject({ ok: false, error: "CsrfRefused" });
+    }
+    expect((await fx.call("/stories/ST-112/status?project=p", { status: "ready" }, {})).status).toBe(401);
+    const get = await fx.call("/stories/ST-112/status?project=p", null, undefined, "GET");
+    expect(get.status).toBe(405);
+    expect(get.headers.get("allow")).toBe("POST");
+    expect(fx.calls).toEqual([]);
+  });
+
+  test("the body and the address: MalformedJson, SchemaError, BadStory, ProjectRequired, UnknownProject, UnknownStory", async () => {
+    const fx = routed();
+    const cases: [string, unknown, number, string][] = [
+      ["/stories/ST-112/status?project=p", "{nope", 400, "MalformedJson"],
+      ["/stories/ST-112/status?project=p", { status: "ready", note: "x" }, 400, "SchemaError"],
+      ["/stories/ST-112/status?project=p", { status: "started" }, 400, "SchemaError"],
+      ["/stories/ST-112/status?project=p", [], 400, "SchemaError"],
+      ["/stories/112/status?project=p", { status: "ready" }, 400, "BadStory"],
+      ["/stories/ST-112/status", { status: "ready" }, 400, "ProjectRequired"],
+      ["/stories/ST-112/status?project=nope", { status: "ready" }, 404, "UnknownProject"],
+      ["/stories/ST-999/status?project=p", { status: "ready" }, 404, "UnknownStory"],
+    ];
+    for (const [path, body, code, error] of cases) {
+      const res = await fx.call(path, body);
+      expect(res.status).toBe(code);
+      expect(await res.json()).toMatchObject({ ok: false, error });
+    }
+    expect(fx.calls).toEqual([]);
+    expect(fx.events()).toEqual([]);
+  });
+
+  test("the verb's refusal: 409 StoryStatusRefused naming the re-read status and the reason; the event ok false", async () => {
+    const fx = routed({ verb: async () => ({ ok: false, error: "PlanSyncError", reason: "pinned by sprint-status.yaml" }) });
+    const res = await fx.call("/stories/ST-112/status?project=p", { status: "ready" });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ ok: false, error: "StoryStatusRefused", project: "p", story: "ST-112", status: "draft", reason: "pinned by sprint-status.yaml" });
+    expect(fx.calls).toHaveLength(1);
+    expect(fx.events().map((e) => e.detail)).toEqual([expect.objectContaining({ actor: "owner", source: "bearer", ok: false, error: "PlanSyncError", reason: "pinned by sprint-status.yaml" })]);
+  });
+
+  test("transient: the runner throws, 500 StoryStatusFailed; the event ok false", async () => {
+    const fx = routed({ verb: async () => { throw new Error("uv: spawn failed"); } });
+    const res = await fx.call("/stories/ST-112/status?project=p", { status: "ready" });
+    expect(res.status).toBe(500);
+    expect(await res.json()).toMatchObject({ ok: false, error: "StoryStatusFailed", project: "p", story: "ST-112", detail: "plansync.py status: uv: spawn failed" });
+    expect(fx.events().map((e) => e.detail)).toEqual([expect.objectContaining({ actor: "owner", ok: false, error: "plansync.py status: uv: spawn failed" })]);
+    expect(fx.events()[0]!.detail).not.toHaveProperty("transient");
+    const viaResult = routed({ verb: async () => ({ ok: false, error: "plansync.py status exited 1", transient: true }) });
+    expect((await viaResult.call("/stories/ST-112/status?project=p", { status: "ready" })).status).toBe(500);
+  });
+
+  /** What `plansync.py status` does to the entity before it answers: `status: ready` written. */
+  const writeReady = (r: string, id: string) => {
+    const file = join(r, PLAN, `${id}.md`);
+    writeFileSync(file, readFileSync(file, "utf-8").replace(/^status: \S+$/m, "status: ready"));
+  };
+
+  test("sync partial: the write landed with a held AD-5 conflict → 200 sync partial; the event carries status partial and the conflict", async () => {
+    const conflict = [{ id: "ST-112", canonical: "ready", backend: "To Do", fields: ["status"] }];
+    const fx = routed({ verb: async (r, id) => { writeReady(r, id); return { ok: true, previous_status: "draft", status: "partial", conflict }; } });
+    const res = await fx.call("/stories/ST-112/status?project=p", { status: "ready" });
+    expect(res.status).toBe(200);
+    const body = await res.json() as Record<string, any>;
+    expect(body).toMatchObject({ ok: true, project: "p", previous_status: "draft", sync: "partial" });
+    expect(body).not.toHaveProperty("reason");
+    expect(body.story).toMatchObject({ id: "ST-112", status: "ready" });
+    expect(fx.calls).toHaveLength(1);
+    expect(fx.events().map((e) => e.detail)).toEqual([{
+      phase: "ready", project: "p", story_key: "30.5", id: "ST-112", owner: "p", directory: fx.root, actor: "owner", source: "bearer",
+      ok: true, previous_status: "draft", status: "partial", conflict,
+    }]);
+  });
+
+  test("sync blocked: the write landed and the re-sync failed → 200 sync blocked with the reason; the event ok false, blocked", async () => {
+    const reason = "jira push failed: 503";
+    const fx = routed({ verb: async (r, id) => { writeReady(r, id); return { ok: false, blocked: true, reason }; } });
+    const res = await fx.call("/stories/ST-112/status?project=p", { status: "ready" });
+    expect(res.status).toBe(200);
+    const body = await res.json() as Record<string, any>;
+    expect(body).toMatchObject({ ok: true, project: "p", previous_status: "draft", sync: "blocked", reason });
+    expect(body.story).toMatchObject({ id: "ST-112", status: "ready" });
+    expect(fx.status("ST-112")).toBe("ready");
+    expect(fx.events().map((e) => e.detail)).toEqual([{
+      phase: "ready", project: "p", story_key: "30.5", id: "ST-112", owner: "p", directory: fx.root, actor: "owner", source: "bearer",
+      ok: false, blocked: true, reason,
+    }]);
+  });
+
+  test("two presses at once: the second re-reads under the chain and is refused (ready → ready is not the owner's)", async () => {
+    const fx = routed();
+    const [a, b] = await Promise.all([
+      fx.call("/stories/ST-112/status?project=p", { status: "ready" }),
+      fx.call("/stories/ST-112/status?project=p", { status: "ready" }),
+    ]);
+    expect([a.status, b.status].sort()).toEqual([200, 409]);
+    expect(fx.calls).toHaveLength(1);
+    expect(fx.events()).toHaveLength(1);
   });
 });
