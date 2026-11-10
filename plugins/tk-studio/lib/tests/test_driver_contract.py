@@ -4329,9 +4329,10 @@ class DriverContractTestCase(unittest.TestCase):
                         header.index("0.1.35 (Story 39.5, additive)"))
         clause = " ".join(header[header.index("0.1.35 (Story 39.5, additive)"):].split())
         for phrase in ("the run's stage", "`stage` on the snapshot's `runs[]`",
-                       "every `office.progress` (`{run_id, epic, stage, leg, story?}`)", "one per row of the office mapping table",
+                       "every `office.progress` (`{run_id, epic, stage, leg, worker, story?}`)", "one per row of the office mapping table",
                        "`review pass <n> of <m>` from the engine's `policy_snapshot.limits`",
-                       "`leg` beside `stage` (the open host-verify leg, `null` or `{since}`)"):
+                       "`leg` beside `stage` (the open host-verify leg, `null` or `{since}`)",
+                       "`worker` beside `stage` and `leg` (the worker's start, `null` or `{since}`)"):
             self.assertIn(phrase, clause)
         self.assertTrue(clause.endswith("— additive) |"))
         rulings = next(line for line in self.text.splitlines() if line.startswith("| Story / rulings"))
@@ -4343,16 +4344,19 @@ class DriverContractTestCase(unittest.TestCase):
         self.assertLess(flat.index("**0.1.35 (Story 39.4, additive).**"), flat.index(title))
         note = flat[flat.index(title):]
         note = note[:note.index("## 8. Conformance")]
-        subs = ("**The stage:**", "**The leg:**", "**The web's reads:**", "**The serve process:**")
+        subs = ("**The stage:**", "**The leg:**", "**The worker:**", "**The web's reads:**", "**The serve process:**")
         self.assertEqual([note.index(s) for s in subs], sorted(note.index(s) for s in subs))
-        for phrase in ("`{run_id, epic, stage, leg, story?}`", "`review pass <n> of <m>`", "`policy_snapshot.limits",
+        for phrase in ("`{run_id, epic, stage, leg, worker, story?}`", "`review pass <n> of <m>`", "`policy_snapshot.limits",
                        "the engine defaults 2 and 3", "never below `<n>`",
                        "A change of `stage` alone is an epic-only `office.progress`.", "`dev attempt <n> of <m>`",
                        "`waiting for a ruling`", "`host verify leg`", "`between sessions`", "`GET /stories/{id}`",
                        "`POST /runs/{id}/cancel`", "the CSRF token of `GET /inbox?project=`", "`GET /status` (JSON)",
-                       "No route, field or event is added beyond `stage` and `leg`.",
+                       "No route, field or event is added beyond `stage`, `leg` and `worker`.",
                        "`leg`", "`{since}`", "A change of `leg` alone is an epic-only `office.progress`",
-                       "the web re-reads `GET /runs/{id}` when the run's `state`, `stage` or `leg` changes",
+                       "`worker`", "A change of `worker` alone is an epic-only `office.progress`",
+                       "of the run's latest `worker` queue event when no `requeued` event follows it",
+                       "a pause or the run's end does not clear it", "not that it is alive",
+                       "the web re-reads `GET /runs/{id}` when the run's `state`, `stage`, `leg` or `worker` changes",
                        "no fetch timer",
                        "`office.ts` runs in serve",
                        "Every other field, kind and route is unchanged."):

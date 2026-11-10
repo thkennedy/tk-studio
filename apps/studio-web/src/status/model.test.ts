@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { createOfficeStore } from "../live/store";
 import type { RunAnswer, RunEvent } from "../run/model";
-import { fetchStatus, LOADING_START, liveSignature, mergeDetails, NONE, PENDING, queueRows, STATUS_PAGE_URL, statusView, type StatusAnswer, type StatusLiveRun } from "./model";
+import { beginCancel, cancelButtons, CANCELLING, fetchStatus, LOADING_QUEUE, LOADING_START, liveSignature, queueNotice, mergeDetails, NONE, PENDING, queueRows, STATUS_PAGE_URL, statusView, type StatusAnswer, type StatusLiveRun } from "./model";
 
 const epic = (done: number, total: number, current: string | null) => ({ spec_folder: "spec-epic-30", done, deferred: 0, failed: 0, total, current_story: current });
 
@@ -195,7 +195,39 @@ describe("the queue (Story 39.5, Settled shape 7)", () => {
   it("Cancel: an external run is disabled with its words; the signature names each run's state and stage", () => {
     const ext: StatusAnswer = { ...status, live: [base({ run_id: "r-x", state: "external" })] };
     expect(queueRows(ext, {}, store().getState(), T0)[0].cancel).toEqual({ show: true, enabled: false, note: "Started outside the queue: the supervisor never cancels it" });
-    expect(liveSignature(store().getState())).toBe("r-running:running:review pass 2 of 2:");
+    expect(liveSignature(store().getState())).toBe("r-running:running:review pass 2 of 2::");
+  });
+
+  it("the signature changes when a run's worker does (operator ruling 2026-11-10, the second)", () => {
+    const s = store();
+    const before = liveSignature(s.getState());
+    const since = "2026-11-10T08:00:00Z";
+    s.applyDelta("b-9", "office.progress", { run_id: "r-running", epic: s.getState().view!.runs[0].epic, stage: "review pass 2 of 2", leg: null, worker: { since } });
+    const started = liveSignature(s.getState());
+    expect(started).not.toBe(before);
+    expect(started).toContain(since);
+    s.applyDelta("b-10", "office.progress", { run_id: "r-running", epic: s.getState().view!.runs[0].epic, stage: "review pass 2 of 2", leg: null, worker: null });
+    expect(liveSignature(s.getState())).toBe(before);
+  });
+
+  it("R4: a failed first GET /status stands in place of Loading the queue…, never both", () => {
+    expect(queueNotice(null, null)).toEqual({ loading: LOADING_QUEUE });
+    expect(queueNotice(null, "/status answered 502")).toEqual({ error: "/status answered 502" });
+    expect(queueNotice(status, null)).toBeNull();
+    expect(queueNotice(status, "/status answered 502")).toEqual({ error: "/status answered 502" }); // a failed re-read: the queue stays
+  });
+
+  it("R5: a run's Cancel in flight disables its buttons and says so; a second click posts nothing", () => {
+    const none = new Set<string>();
+    expect(cancelButtons("r-1", { enabled: true }, none)).toEqual({ disabled: false, label: null });
+    expect(cancelButtons("r-1", { enabled: false }, none)).toEqual({ disabled: true, label: null });
+    const flying = beginCancel(none, "r-1")!;
+    expect([...flying]).toEqual(["r-1"]);
+    expect(cancelButtons("r-1", { enabled: true }, flying)).toEqual({ disabled: true, label: CANCELLING });
+    expect(CANCELLING).toBe("Cancelling…");
+    expect(cancelButtons("r-2", { enabled: true }, flying)).toEqual({ disabled: false, label: null }); // another row
+    expect(beginCancel(flying, "r-1")).toBeNull(); // the second click: nothing to post
+    expect([...beginCancel(flying, "r-2")!].sort()).toEqual(["r-1", "r-2"]);
   });
 
   it("the signature changes when a run's leg does (operator ruling 2026-11-10)", () => {

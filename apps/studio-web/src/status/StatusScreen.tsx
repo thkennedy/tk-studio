@@ -5,13 +5,17 @@
 // paused — each a link to its run page with its job, story, start and clock, Cancel (its consequence first), and for a
 // paused run the reason in words and the inbox item that resolves it. `GET /status` and each live run's
 // `GET /runs/{id}` are re-read on mount and whenever the store's live-run signature changes, never on a timer; the 1 s
-// tick moves the clocks only. The old "Live runs" list is the queue now.
-import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
+// tick moves the clocks only. The old "Live runs" list is the queue now. A failed first `GET /status` stands in place
+// of `Loading the queue…` (`queueNotice`); while a run's Cancel is in flight its buttons are disabled and read
+// `Cancelling…`, so a second click posts nothing (`cancelButtons`, `beginCancel`).
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { fetchInbox } from "../inbox/model";
 import type { OfficeStore } from "../live/store";
 import { safeHref } from "../office/model";
 import { CANCEL_CONSEQUENCE, fetchRun, requestCancel, type RunAnswer } from "../run/model";
-import { fetchStatus, LOADING_QUEUE, liveSignature, mergeDetails, queueRows, STATUS_PAGE_URL, statusView, type StatusAnswer } from "./model";
+import {
+  beginCancel, cancelButtons, fetchStatus, liveSignature, mergeDetails, queueNotice, queueRows, STATUS_PAGE_URL, statusView, type StatusAnswer,
+} from "./model";
 
 const font = "13px/1.4 ui-monospace, Menlo, Consolas, monospace";
 const link = { color: "#9cf" } as const;
@@ -30,6 +34,9 @@ export function StatusScreen({ store, onNavigate }: { store: OfficeStore; onNavi
   const [now, setNow] = useState(() => Date.now());
   const [confirming, setConfirming] = useState<string | null>(null);
   const [words, setWords] = useState<Record<string, string>>({});
+  // The runs whose Cancel is in flight: the ref guards a second click before the re-render, the state draws it.
+  const inFlightRef = useRef<ReadonlySet<string>>(new Set());
+  const [inFlight, setInFlight] = useState<ReadonlySet<string>>(() => new Set());
 
   // The queue and each live non-queued run's detail: on mount, on a store change of the live runs, after a cancel.
   useEffect(() => {
@@ -64,12 +71,24 @@ export function StatusScreen({ store, onNavigate }: { store: OfficeStore; onNavi
     onNavigate(path);
   };
   const cancel = async (runId: string, project: string | null) => {
-    // No project, a failed inbox read or no token: refused up front in words, never a post without the token.
-    const r = await requestCancel(runId, project, fetchInbox);
-    setWords((w) => ({ ...w, [runId]: r.words }));
-    setConfirming(null);
-    if (r.ok) setWake((n) => n + 1);
+    const started = beginCancel(inFlightRef.current, runId);
+    if (started === null) return; // a Cancel of this run is in flight: post nothing
+    inFlightRef.current = started;
+    setInFlight(started);
+    try {
+      // No project, a failed inbox read or no token: refused up front in words, never a post without the token.
+      const r = await requestCancel(runId, project, fetchInbox);
+      setWords((w) => ({ ...w, [runId]: r.words }));
+      setConfirming((c) => (c === runId ? null : c)); // only this run's confirmation, never one opened since on another row
+      if (r.ok) setWake((n) => n + 1);
+    } finally {
+      const rest = new Set(inFlightRef.current);
+      rest.delete(runId);
+      inFlightRef.current = rest;
+      setInFlight(rest);
+    }
   };
+  const notice = queueNotice(status, statusError);
 
   return (
     <div style={{ position: "absolute", inset: 0, overflow: "auto", padding: "48px 16px 48px", font, color: "#e8e8e8", background: "#161616" }}>
@@ -82,14 +101,15 @@ export function StatusScreen({ store, onNavigate }: { store: OfficeStore; onNavi
       {!v.loaded && <div style={muted}>waiting for the office snapshot</div>}
 
       <h2 style={h2}>Queue{queue ? ` (${queue.length})` : ""}</h2>
-      {statusError && <div style={{ color: "#ff8080" }}>{statusError}</div>}
+      {notice && "error" in notice && <div style={{ color: "#ff8080" }}>{notice.error}</div>}
       {queue === null ? (
-        <div style={muted}>{LOADING_QUEUE}</div>
+        notice && "loading" in notice ? <div style={muted}>{notice.loading}</div> : null
       ) : queue.length === 0 ? (
         <div style={muted}>no queued, claimed, running or paused runs</div>
       ) : (
         queue.map((q) => {
           const project = status?.live.find((r) => r.run_id === q.run_id)?.project_id ?? null;
+          const buttons = cancelButtons(q.run_id, q.cancel, inFlight);
           return (
             <div key={q.run_id} style={card}>
               <a href={q.href} onClick={go(q.href)} style={link}>
@@ -116,16 +136,16 @@ export function StatusScreen({ store, onNavigate }: { store: OfficeStore; onNavi
                   {confirming === q.run_id ? (
                     <>
                       <div style={{ color: "#e0b040" }}>{CANCEL_CONSEQUENCE}</div>
-                      <button type="button" style={{ font }} onClick={() => void cancel(q.run_id, project)}>
-                        Cancel run {q.run_id}
+                      <button type="button" style={{ font }} disabled={buttons.disabled} onClick={() => void cancel(q.run_id, project)}>
+                        {buttons.label ?? `Cancel run ${q.run_id}`}
                       </button>{" "}
-                      <button type="button" style={{ font }} onClick={() => setConfirming(null)}>
+                      <button type="button" style={{ font }} disabled={buttons.disabled} onClick={() => setConfirming(null)}>
                         Keep it running
                       </button>
                     </>
                   ) : (
-                    <button type="button" style={{ font }} disabled={!q.cancel.enabled} title={q.cancel.note ?? undefined} onClick={() => setConfirming(q.run_id)}>
-                      Cancel…
+                    <button type="button" style={{ font }} disabled={buttons.disabled} title={q.cancel.note ?? undefined} onClick={() => setConfirming(q.run_id)}>
+                      {buttons.label ?? "Cancel…"}
                     </button>
                   )}
                   {q.cancel.note && <span style={muted}> {q.cancel.note}</span>}

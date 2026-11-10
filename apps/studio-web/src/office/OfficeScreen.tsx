@@ -10,7 +10,7 @@
 // Story 39.5 (CAP-17): the HUD shows the run's stage, its clock and a phased bar (the epic the project bar, its stories
 // the phases, the epic's open findings a count to drain). `GET /board?project=` is re-read on a project change and when
 // the live run's `epic.done` or `stage` changes; `GET /runs/<live run>` when `hudRunKey` changes (the live run, its
-// `state`, `stage` or open host-verify leg `leg.since`, operator ruling 2026-11-10) — never on a timer; a failed read
+// `state`, `stage`, open host-verify leg `leg.since` or worker `worker.since`, the operator rulings 2026-11-10) — never on a timer; a failed read
 // keeps the last answer and the clock names the failure. Every HUD value is held 1 s and the clock and the bars lerp (`hudMotion`); `now` runs on
 // `requestAnimationFrame` while a tween is in flight, on the 1 s timer otherwise.
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
@@ -161,7 +161,7 @@ export function OfficeScreen({ store, onStats, project, onProject }: {
     return () => {
       cancelled = true;
     };
-    // `runKey` carries the run id, its state, stage and leg (`hudRunKey`).
+    // `runKey` carries the run id, its state, stage, leg and worker (`hudRunKey`).
   }, [liveRunId, runKey]);
 
   // A pose change swaps frames in place; a new desk set rebuilds only the desks.

@@ -436,6 +436,19 @@ describe("the HUD after the review pass (Story 39.5)", () => {
     expect(hudRunKey(at([row]), "other")).toBe("");
   });
 
+  it("hudRunKey: the GET /runs re-read key changes on the live run's worker (Settled shape 12)", () => {
+    const at = (runs: Record<string, unknown>[]) => {
+      const store = createOfficeStore({ now: () => 0 });
+      store.applySnapshot("b-1", { at: "", problems: [], agents: [], runs });
+      return store.getState();
+    };
+    const row = { run_id: "r1", project: "p", state: "running", engine_run_id: null, stage: "launching", leg: null, worker: null };
+    const before = hudRunKey(at([row]), "p");
+    const started = hudRunKey(at([{ ...row, worker: { since: "2026-11-10T00:00:00Z" } }]), "p");
+    expect(started).not.toBe(before);
+    expect(hudRunKey(at([{ ...row, worker: { since: "2026-11-10T00:05:00Z" } }]), "p")).not.toBe(started);
+  });
+
   it("every HUD value is held: the state, the phase, the counts and the engine id stay at least 1 s", () => {
     let m = hudMotion(null, base, 0);
     expect([m.shown.state, m.shown.phase, m.shown.counts, m.shown.engine_run_id]).toEqual(["running", "dev", "done 0 · failed 0 · total 2", "e"]);

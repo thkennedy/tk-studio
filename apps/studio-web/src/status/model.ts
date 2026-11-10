@@ -151,10 +151,34 @@ export interface QueueRow {
   refused: string | null;
 }
 
-/** The store's live-run signature (each `run_id:state:stage:leg.since`, the leg per the operator ruling 2026-11-10):
- * the queue is re-read when it changes. */
+/** The store's live-run signature (each `run_id:state:stage:leg.since:worker.since`, the leg and the worker per the
+ * operator rulings 2026-11-10): the queue is re-read when it changes. */
 export function liveSignature(state: LiveState): string {
-  return (state.view?.runs ?? []).map((r) => `${r.run_id}:${r.state ?? ""}:${r.stage ?? ""}:${r.leg?.since ?? ""}`).join("|");
+  return (state.view?.runs ?? []).map((r) => `${r.run_id}:${r.state ?? ""}:${r.stage ?? ""}:${r.leg?.since ?? ""}:${r.worker?.since ?? ""}`).join("|");
+}
+
+/** What stands where the queue goes (R4, review pass 3): the `GET /status` error, else `Loading the queue…` while no
+ * answer was read, never both; null once a queue is shown with no error. A failed re-read after an answer keeps the
+ * queue and names the error above it. */
+export function queueNotice(status: StatusAnswer | null, error: string | null): { error: string } | { loading: string } | null {
+  if (error !== null) return { error };
+  return status === null ? { loading: LOADING_QUEUE } : null;
+}
+
+export const CANCELLING = "Cancelling…";
+/** A queue row's Cancel buttons while a Cancel of that run is in flight (R5, review pass 3): disabled and saying so
+ * (`Cancelling…`), so a second click posts nothing; otherwise as `canCancel` gates them. */
+export function cancelButtons(
+  runId: string, gate: { enabled: boolean }, inFlight: ReadonlySet<string>,
+): { disabled: boolean; label: string | null } {
+  if (inFlight.has(runId)) return { disabled: true, label: CANCELLING };
+  return { disabled: !gate.enabled, label: null };
+}
+
+/** Starts a Cancel of `runId` unless one is in flight (R5): the in-flight set with it added, or null (post nothing). */
+export function beginCancel(inFlight: ReadonlySet<string>, runId: string): Set<string> | null {
+  if (inFlight.has(runId)) return null;
+  return new Set([...inFlight, runId]);
 }
 
 const claimedOf = (r: StatusLiveRun): boolean => r.state === "running" && !r.worker_pid && !r.engine_run_id;

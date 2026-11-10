@@ -66,7 +66,7 @@ describe("the office store", () => {
     const store = seeded();
     store.applyDelta("b-6", "office.progress", { run_id: "r2", epic: epic({ done: 0 }) });
     let r2 = store.getState().view?.runs.find((r) => r.run_id === "r2");
-    expect(r2).toEqual({ run_id: "r2", project: null, state: null, engine_run_id: null, stage: null, leg: null, epic: epic({ done: 0 }), stories: [] });
+    expect(r2).toEqual({ run_id: "r2", project: null, state: null, engine_run_id: null, stage: null, leg: null, worker: null, epic: epic({ done: 0 }), stories: [] });
     store.applyDelta("b-7", "office.run", { run_id: "r2", project: "proj", state: "running", from: null });
     r2 = store.getState().view?.runs.find((r) => r.run_id === "r2");
     expect(r2?.state).toBe("running");
@@ -408,5 +408,28 @@ describe("the run's leg (Story 39.5, operator ruling 2026-11-10)", () => {
     const store = seeded();
     store.applyDelta("b-6", "office.run", { run_id: "r3", project: "proj", state: "queued", from: null });
     expect(store.getState().view!.runs.find((r) => r.run_id === "r3")!.leg).toBeNull();
+  });
+});
+
+describe("the run's worker (Story 39.5, operator ruling 2026-11-10, the second)", () => {
+  const since = "2026-11-10T08:00:00Z";
+  it("rides the snapshot, is set and cleared by a progress delta carrying the key, kept by one without", () => {
+    const store = createOfficeStore();
+    const snap = snapshot();
+    store.applySnapshot("b-5", { ...snap, runs: [{ ...snap.runs[0], stage: "launching", leg: null, worker: { since } }] });
+    expect(store.getState().view!.runs[0].worker).toEqual({ since });
+    store.applyDelta("b-6", "office.progress", { run_id: "r1", epic: epic(), stage: "launching", leg: null, worker: null });
+    expect(store.getState().view!.runs[0].worker).toBeNull();
+    const later = "2026-11-10T08:05:00Z";
+    store.applyDelta("b-7", "office.progress", { run_id: "r1", epic: epic(), stage: "launching", leg: null, worker: { since: later } });
+    expect(store.getState().view!.runs[0].worker).toEqual({ since: later });
+    store.applyDelta("b-8", "office.progress", { run_id: "r1", epic: epic({ done: 2 }) });
+    expect(store.getState().view!.runs[0].worker).toEqual({ since: later });
+  });
+
+  it("a row born of office.run has worker null", () => {
+    const store = seeded();
+    store.applyDelta("b-6", "office.run", { run_id: "r3", project: "proj", state: "queued", from: null });
+    expect(store.getState().view!.runs.find((r) => r.run_id === "r3")!.worker).toBeNull();
   });
 });

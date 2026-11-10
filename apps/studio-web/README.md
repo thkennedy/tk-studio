@@ -302,8 +302,9 @@ rules are `src/story/model.ts`, pinned by `src/story/model.test.ts`.
 `src/run/model.ts`, pinned by `src/run/model.test.ts`; every function is pure and takes its `now`.
 
 - **The reads.** `GET /runs/{id}` (the run row, its queue events, `cost_usd`) on mount and whenever the store's row for
-  the run changes (its state, `stage` or `leg`: `runRowKey`), never on a timer and never once the run has ended; `GET /stories/<ST id>?project=`
-  when the run's latest `plan-status` event names an `ST-NNN` story (39.4's Stage Log rows). A pending page reads
+  the run changes (its state, `stage`, `leg` or `worker`: `runRowKey`), never on a timer and never once the run has ended; `GET /stories/<ST id>?project=`
+  when the run's latest `plan-status` event names an `ST-NNN` story (39.4's Stage Log rows), read again whenever the
+  same store row changes (`runRowKey`), so a live run's Stage Log rows, sessions and stage cost follow its stage. A pending page reads
   `Loading the run…`; a 404 `No run <id> in the queue`.
 - **The leg** (operator ruling 2026-11-10, additive): the store's row carries `leg`, the open host-verify leg
   (`{since}` while the close-out's or a re-run's lease is held, else `null`), on the snapshot and on every
@@ -311,12 +312,18 @@ rules are `src/story/model.ts`, pinned by `src/story/model.test.ts`.
   only `leg`: its `since` is in every re-read key (the run page's `runRowKey`, the Status screen's `liveSignature`, the
   office HUD's `hudRunKey`), so the page re-reads `GET /runs/{id}` on it and the clock turns to the leg's guard. There is
   no fetch timer: `leg` is the signal, the clock still comes from the run's events.
+- **The worker** (operator ruling 2026-11-10, the second, additive): the store's row carries `worker`, the worker's
+  start (`{since}` of the run's latest `worker` event when no `requeued` follows it, else `null`), on the snapshot and
+  on every `office.progress`. The claim already moved the state to `running`, and a worker-only job writes no
+  `launched` (its stage stays `launching`), so the `worker` event changes only `worker`: its `since` is in every
+  re-read key as the leg's is, so the clock turns to `HH:MM:SS of <worker.guard_s>`.
 - **The page, in order:** the header (job, project, state, the story linking `/app/story/<id>`, else `no story yet`);
   the clock; the timeline; the cost; Cancel (or the ended run's final state in words, `Complete: <reason>`); the events,
   each a folded `<details>` (`<seq> · <local time> · <kind>` and ` · <from> → <to>` when the state moved, the detail as
   JSON).
 - **The timeline** (`runTimeline`): queued (`waiting for the checkout lock` after a `lock-wait`), launch (or `worker`
-  with no `launched` at all), engine, its sessions, the host leg (or a `re-run`) with its outcome and 38.1's per-suite
+  when that claim is followed by no `launched`; a supervisor restart's `requeued` closes the open launch or worker and engine segments
+  and opens a `queued` one up to the next `claimed`), engine, its sessions, the host leg (or a `re-run`) with its outcome and 38.1's per-suite
   seconds as sub-cells, close-out, paused (with its reason), ended (an `ended` or an `orphaned` event: the clock and
   the cost window end there too, and an ended run's clock reads `in all` even after a lease with no `host-verify`). Before Story 39.6 the queue events carry no engine
   session boundaries: the sessions are the Stage Log rows starting inside the engine span (`dev attempt <p>`,
@@ -338,7 +345,8 @@ The Status screen's **Queue** section (`queueRows`, `src/status/model.ts`) prece
 `GET /status`, grouped queued, claimed (a running run with neither worker nor engine), running, paused, then external,
 by `created` within a group; each row links `/app/run/<id>` and shows its job, its story (`no story yet`), its start and
 its clock (`Loading the start…` / `Loading the clock…` until its `GET /runs/{id}` is read; a failed re-read keeps the
-last answer, a run never read names the failure), Cancel, a refused claim's
+last answer, a run never read names the failure), Cancel (its buttons disabled and reading `Cancelling…` while that
+run's Cancel is in flight, so a second click posts nothing), a refused claim's
 reason, and for a paused run `Paused: <reason>` with the inbox item (`/app/inbox/<KEY>`) that resolves it. The old
 "Live runs" list is the queue now.
 
@@ -347,7 +355,7 @@ The office HUD shows the run's `stage` (`office.progress.stage`, contract 0.1.35
 deferred and failed full and coloured apart, the current one half, the rest empty, padded to `total`), and the epic's
 open findings from `GET /board` a count to drain (`Loading the findings…` while pending). The board is re-read on a
 project change and when the run's `epic.done` or `stage` changes, the run's `GET /runs/{id}` when the live run, its
-state, stage or `leg` changes (`hudRunKey`, `runRowKey` on the live row); a failed read names itself
+state, stage, `leg` or `worker` changes (`hudRunKey`, `runRowKey` on the live row); a failed read names itself
 (`The clock could not be read: …`).
 Every HUD value is held at least 1 s (`hold`, `HOLD_MS`; the clock's mode, guard and elapsed seconds as one value, so a
 guard hand-over changes them together; each phase by its position, so a story replacing a placeholder lerps) and the clock and the bars lerp over 0.5 s (`tween`,

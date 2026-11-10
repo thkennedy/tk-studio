@@ -11,7 +11,7 @@ import { createApi } from "../src/api";
 import { newEngagement, writeEngagement, type EngagementState } from "../src/engagement";
 import { SESSION_COOKIE, signSession } from "../src/auth";
 import {
-  blockedIssueFor, engagementBlockedIssue, INBOX_REL, legOf, OFFICE_MAP, OFFICE_STATES, OfficeHub, officeCachedPaths, officeStates, projectOffice, readInbox, type OfficeState,
+  blockedIssueFor, engagementBlockedIssue, INBOX_REL, legOf, OFFICE_MAP, OFFICE_STATES, OfficeHub, officeCachedPaths, officeStates, projectOffice, readInbox, workerOf, type OfficeState,
   type OfficeView,
 } from "../src/office";
 import { gatherPage, renderPage } from "../src/page";
@@ -409,13 +409,14 @@ describe("the stage (Story 39.5, contract 0.1.35 additive)", () => {
     appendFileSync(join(runDir, "journal.jsonl"), INFLIGHT.slice(CUT.dev, CUT.devEnded).join("\n") + "\n");
     const progress = hub.refresh().filter((e) => e.kind === "office.progress");
     expect(progress).toHaveLength(1);
-    expect(Object.keys(progress[0].data).sort()).toEqual(["epic", "leg", "run_id", "stage"]);
+    expect(Object.keys(progress[0].data).sort()).toEqual(["epic", "leg", "run_id", "stage", "worker"]);
     expect(progress[0].data.leg).toBeNull();
+    expect(progress[0].data.worker).toBeNull();
     expect(progress[0].data.stage).toBe("between sessions");
     appendFileSync(join(runDir, "journal.jsonl"), JSON.stringify({ ts: 1, kind: "story-done", story_key: S2, commit: "c" }) + "\n");
     const story = hub.refresh().filter((e) => e.kind === "office.progress");
     expect(story.length).toBeGreaterThan(0);
-    for (const e of story) { expect(e.data).toHaveProperty("stage"); expect(e.data).toHaveProperty("leg"); }
+    for (const e of story) { expect(e.data).toHaveProperty("stage"); expect(e.data).toHaveProperty("leg"); expect(e.data).toHaveProperty("worker"); }
     expect(story.some((e) => e.data.story)).toBe(true);
   });
 
@@ -455,15 +456,62 @@ describe("the stage (Story 39.5, contract 0.1.35 additive)", () => {
     const w = world();
     const { run } = await w.launch({ fixture: "complete" });
     const hub = new OfficeHub({ queue: w.queue, graceMs: 0 });
-    expect(hub.snapshot().runs[0]).toMatchObject({ stage: "host verify leg", leg: null });
+    expect(hub.snapshot().runs[0]).toMatchObject({ stage: "host verify leg", leg: null, worker: null });
     expect(hub.refresh()).toEqual([]);
     w.queue.note(run.run_id, "host-verify-leg", { owner: { pid: 1, host: "h", nonce: "n" }, by: "close-out" });
     const since = w.queue.events(run.run_id).findLast((e) => e.kind === "host-verify-leg")!.at;
     const progress = hub.refresh().filter((e) => e.kind === "office.progress");
     expect(progress).toHaveLength(1);
-    expect(Object.keys(progress[0].data).sort()).toEqual(["epic", "leg", "run_id", "stage"]);
-    expect(progress[0].data).toMatchObject({ run_id: run.run_id, stage: "host verify leg", leg: { since } });
+    expect(Object.keys(progress[0].data).sort()).toEqual(["epic", "leg", "run_id", "stage", "worker"]);
+    expect(progress[0].data).toMatchObject({ run_id: run.run_id, stage: "host verify leg", leg: { since }, worker: null });
     expect(hub.snapshot().runs[0].leg).toEqual({ since });
+    expect(hub.refresh().filter((e) => e.kind === "office.progress")).toEqual([]); // unchanged: no delta
+  });
+
+  test("worker (operator ruling 2026-11-10, the second): null before the event, {since} with it, null after a requeued, a new since after the next worker", async () => {
+    const workerOfView = (v: OfficeView) => v.runs[0]?.worker;
+    const w = world();
+    const run = await w.claim(w.enqueue());
+    expect(workerOfView(projectOffice(w.queue))).toBeNull();
+    w.queue.setWorker(run.run_id, 4242, null, 7200);
+    const first = w.queue.events(run.run_id).findLast((e) => e.kind === "worker")!;
+    expect(workerOfView(projectOffice(w.queue))).toEqual({ since: first.at });
+    expect(stage(projectOffice(w.queue))).toBe("launching");
+    w.queue.note(run.run_id, "requeued", { reason: "requeued: supervisor restart" });
+    expect(workerOfView(projectOffice(w.queue))).toBeNull();
+    await Bun.sleep(5);
+    w.queue.setWorker(run.run_id, 4343, null, 7200);
+    const next = w.queue.events(run.run_id).findLast((e) => e.kind === "worker")!;
+    expect(workerOfView(projectOffice(w.queue))).toEqual({ since: next.at });
+  });
+
+  test("workerOf: the latest worker event, cleared by a requeued after it, a new since after the next worker", () => {
+    const ev = (seq: number, kind: string, detail: Record<string, unknown> | null) =>
+      ({ seq, run_id: "r", at: `2026-11-10T00:00:0${seq}Z`, kind, from_state: "running", to_state: "running", detail });
+    expect(workerOf([])).toBeNull();
+    expect(workerOf([ev(1, "claimed", null), ev(2, "worker", { pid: 1, guard_s: 7200 })])).toEqual({ since: "2026-11-10T00:00:02Z" });
+    expect(workerOf([ev(1, "worker", { pid: 1 }), ev(2, "requeued", { reason: "x" })])).toBeNull();
+    expect(workerOf([ev(1, "worker", { pid: 1 }), ev(2, "requeued", { reason: "x" }), ev(3, "claimed", null), ev(4, "worker", { pid: 2 })]))
+      .toEqual({ since: "2026-11-10T00:00:04Z" });
+    // A pause or the run's end does not clear it.
+    expect(workerOf([ev(1, "worker", { pid: 1 }), ev(2, "paused", null), ev(3, "ended", null)])).toEqual({ since: "2026-11-10T00:00:01Z" });
+  });
+
+  test("a worker event on a running run whose stage stays launching emits exactly one epic-only progress with worker set, stage unchanged", async () => {
+    const w = world();
+    const run = await w.claim(w.enqueue());
+    const hub = new OfficeHub({ queue: w.queue, graceMs: 0 });
+    expect(hub.snapshot().runs[0]).toMatchObject({ state: "running", stage: "launching", leg: null, worker: null });
+    expect(hub.refresh()).toEqual([]);
+    w.queue.setWorker(run.run_id, 4242, null, 7200);
+    const since = w.queue.events(run.run_id).findLast((e) => e.kind === "worker")!.at;
+    const out = hub.refresh();
+    expect(out.filter((e) => e.kind === "office.run")).toEqual([]); // the state did not move
+    const progress = out.filter((e) => e.kind === "office.progress");
+    expect(progress).toHaveLength(1);
+    expect(Object.keys(progress[0].data).sort()).toEqual(["epic", "leg", "run_id", "stage", "worker"]);
+    expect(progress[0].data).toMatchObject({ run_id: run.run_id, stage: "launching", leg: null, worker: { since } });
+    expect(hub.snapshot().runs[0].worker).toEqual({ since });
     expect(hub.refresh().filter((e) => e.kind === "office.progress")).toEqual([]); // unchanged: no delta
   });
 });

@@ -51,11 +51,28 @@ export type RunDetail = Pick<RunAnswer, "run" | "events">;
 
 export const LOADING_RUN = "Loading the run…";
 
-/** The store's row for a run as the run page's re-read key (Settled shape 10 and 11): `GET /runs/{id}` is re-read
- * when the run's `state`, `stage` or open host-verify leg (`leg.since`, operator ruling 2026-11-10) changes. "" with
- * no row. */
-export function runRowKey(row: { state?: string | null; stage?: string | null; leg?: { since: string } | null } | null | undefined): string {
-  return row ? `${row.state ?? ""}:${row.stage ?? ""}:${row.leg?.since ?? ""}` : "";
+/** The store's row for a run as the run page's re-read key (Settled shapes 10–12): `GET /runs/{id}` (and the Stage
+ * Log's `GET /stories/{id}`) is re-read when the run's `state`, `stage`, open host-verify leg (`leg.since`, operator
+ * ruling 2026-11-10) or worker's start (`worker.since`, the second ruling) changes. "" with no row. */
+export function runRowKey(
+  row: { state?: string | null; stage?: string | null; leg?: { since: string } | null; worker?: { since: string } | null } | null | undefined,
+): string {
+  return row ? `${row.state ?? ""}:${row.stage ?? ""}:${row.leg?.since ?? ""}:${row.worker?.since ?? ""}` : "";
+}
+
+/** The Stage Log read's key (R2, review pass 3): `GET /stories/{id}` runs again when the story, the project, the run's
+ * last event `seq` or the store's row for the run (`runRowKey`) changes, so a live run's Stage Log rows, timeline
+ * sessions and stage cost follow its stage with no timer. Null: nothing to read (no story, or no project). */
+export function stageLogKey(o: { storyId: string | null; project: string | null; lastSeq: number; rowKey: string }): string | null {
+  if (o.storyId === null || o.project === null) return null;
+  return JSON.stringify([o.storyId, o.project, o.lastSeq, o.rowKey]);
+}
+/** The run page's Stage Log state after a re-read: a failed re-read keeps the story's earlier rows (the sessions and the
+ *  per-stage cost never vanish mid-run) and carries the error; another story's rows are never kept. */
+export interface StagesState { story: string; rows: StageRowLike[] | null; error: string | null }
+export function stagesAfterRead(prev: StagesState | null, storyId: string, r: StagesResult): StagesState {
+  if (r.ok) return { story: storyId, rows: r.rows, error: null };
+  return { story: storyId, rows: prev && prev.story === storyId ? prev.rows : null, error: r.error };
 }
 export const LOADING_CLOCK = "Loading the clock…";
 /** A run read that failed: the clock in words, never a loading label forever. */
@@ -239,7 +256,16 @@ export function runTimeline(input: TimelineInput): Timeline {
   const events = [...input.events].sort((a, b) => a.seq - b.seq);
   const segments: Segment[] = [];
   const open: Partial<Record<"queued" | "launch" | "engine" | "leg" | "closeout" | "paused", Segment>> = {};
-  const hasLaunched = events.some((e) => e.kind === "launched");
+  // Whether the claim at index `i` launched: a `launched` follows it before the cycle's boundary (the next `requeued`
+  // or `claimed`). A requeued cycle never launched (the supervisor's recover requeues only runs that never launched).
+  const claimLaunched = (i: number): boolean => {
+    for (let j = i + 1; j < events.length; j++) {
+      const k = events[j].kind;
+      if (k === "launched") return true;
+      if (k === "requeued" || k === "claimed") return false;
+    }
+    return false;
+  };
   const close = (k: keyof typeof open, at: string, extra: Partial<Segment> = {}) => {
     const s = open[k];
     if (!s) return;
@@ -253,7 +279,8 @@ export function runTimeline(input: TimelineInput): Timeline {
   };
   const latestPaused = findLastOf(events, (e) => e.kind === "paused");
 
-  for (const e of events) {
+  for (let i = 0; i < events.length; i++) {
+    const e = events[i];
     const d = e.detail;
     switch (e.kind) {
       case "enqueued":
@@ -262,9 +289,17 @@ export function runTimeline(input: TimelineInput): Timeline {
       case "lock-wait":
         if (open.queued) open.queued.label = "queued (waiting for the checkout lock)";
         break;
+      case "requeued":
+        // A supervisor restart put the run back in the queue: the open launch (or worker) and engine segments end
+        // here, and a `queued` segment runs to the next `claimed`.
+        close("launch", e.at);
+        close("engine", e.at);
+        close("queued", e.at);
+        begin("queued", { kind: "queued", label: "queued", start: e.at, end: null });
+        break;
       case "claimed":
         close("queued", e.at);
-        begin("launch", hasLaunched ? { kind: "launch", label: "launch", start: e.at, end: null } : { kind: "worker", label: "worker", start: e.at, end: null });
+        begin("launch", claimLaunched(i) ? { kind: "launch", label: "launch", start: e.at, end: null } : { kind: "worker", label: "worker", start: e.at, end: null });
         break;
       case "launched":
         if (open.launch?.kind === "launch") close("launch", e.at);
@@ -450,7 +485,8 @@ export function runClock(detail: RunDetail, now: number): RunClock {
       return make("guarded", ms(w.at), now, guardS, "worker");
     }
   }
-  if (run.state === "queued") return make("queued", ms(run.created), now);
+  // Queued: since the latest `requeued` (the timeline's queued segment starts there, R3), else since the run's creation.
+  if (run.state === "queued") return make("queued", ms(findLastOf(events, (e) => e.kind === "requeued")?.at ?? run.created), now);
   const claimed = findLastOf(events, (e) => e.kind === "claimed");
   if (run.state === "paused") return make("paused", ms(findLastOf(events, (e) => e.kind === "paused")?.at ?? run.updated ?? run.created), now);
   if (run.state === "running" || run.state === "external") {

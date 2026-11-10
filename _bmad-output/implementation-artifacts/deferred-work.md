@@ -1,6 +1,6 @@
 # Deferred Work
 
-<!-- deferred-work counter: last minted DW-218; mint through plansync.py deferred mint -->
+<!-- deferred-work counter: last minted DW-219; mint through plansync.py deferred mint -->
 
 ### DW-124: Contract §4 `submit` admitted a full job definition but the CLI/skill surface was id-only
 origin: migrated from legacy ledger ("Deferred from: code review of feat/tk-studio-connector (2026-08-06)"), 2026-10-29
@@ -1859,4 +1859,12 @@ source_spec: `handoff-phase1-loop-2026-10-09.md` 2026-11-10 day-9i update; `kb/a
 location: apps/supervisor/src/planstatus.ts `doneStories` (`git merge-base <base_ref> <run branch>`, then `git diff --name-only <base_ref>...<run branch>`), `reviewRun` (the skip `no story marked done by the run`) and the `done` phase that reuses it; apps/supervisor/src/stagepass.ts (the stage pass waits for a `plan-status` `done` event with `ok` and `stage: true`); the operator's landing recipe (the handoff, the runbook)
 severity: medium
 reason: Two causes, either one enough. (1) The operator's recipe read the queue's `active: []` as "the supervisor is idle" and merged 26 s after `ended`; a held plan lease is not in that list, and the review pass takes about a minute (in the Story 39.3 landing the review was recorded `ok` at 04:09:05Z, six seconds before the merge, by luck). The kill for the restart then cut the status call between its file write and its end, so no `plan-status` event was written for it. (2) The code cannot recover: `doneStories` names the run's story from the files the run branch changed against the base, and once the base (the served `main`) contains the merged branch, the three-dot diff is empty. The pass then reports that the run marked no story done — which is false, and reads like a fact about the run — and records the phase as settled, so it is never tried again. With no `done` event the stage pass never runs: the story stays `review` in the plan file, the index and its Jira issue, and the host-leg, close-out and merge rows are neither written to the spec nor posted. Nothing notifies; the queue is green. The same happens without any operator whenever a merge lands between `ended` and the review pass, and it will happen every time once a run's PR is merged automatically. Recovered by hand here from the served checkout with the supervisor idle: `plansync.py status --id ST-177 --status done` (caller `tk-studio-operator`, the note names the hole), `plansync.py stage --append` with the three supervisor rows, `plansync.py stage-post` (TKSTUDIO-241: start 9, stop 9, worklog 6, unposted 0). Fix to make: (a) recipe, in force from Story 39.5: after `ended`, wait for the `plan-status` event of phase `review` with `ok: true` before the merge, and never kill the supervisor tree while a plan lease is held; (b) code: `doneStories` survives the merge — diff from the base commit recorded when the run worktree was cut, or, when the diff is empty because the base already holds the branch, take the story from the run's own `in-progress` plan-status event; (c) a skip for "no story" on a run whose branch is merged is a failure to retry and to notify, not a settled phase; a test drives review and done against a base that already contains the run branch.
+status: open
+
+### DW-219: A requeued run's ended clock ("in all, claim to end") is anchored on the latest `claimed`, while the cost window (`runWindow`) starts at the first `claimed`.
+origin: spec-deferred 750399feb41d
+source_spec: `39-5-the-runs-timeline-and-the-progress-in-view-spec.md`
+location: apps/studio-web/src/run/model.ts:485
+severity: low
+reason: Blind Hunter, 39-5 review pass 4. apps/studio-web/src/run/model.ts:485 make("ended", ms(claimed?.at ...)) with claimed = the latest claim; runWindow uses the first claim. For a run requeued by a supervisor restart, the "in all" time drops the cycle before the requeue, so it covers a different span than the cost window and the timeline. The fix needs a choice between two readings of "in all, claim to end", so it is not patched here (AC1 clock, deferral class a).
 status: open

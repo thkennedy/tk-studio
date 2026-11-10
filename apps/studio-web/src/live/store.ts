@@ -20,7 +20,8 @@
 // snapshot's `runs[]` and on every `office.progress`; a delta carrying a string sets it, one without keeps the row's,
 // and a row born of an `office.run` has `stage: null` until a progress delta names it. Beside it, `leg` (operator
 // ruling 2026-11-10, additive): the open host-verify leg, `{since}` or `null`; a delta carrying the key (an object or
-// `null`) sets it, one without keeps the row's, and a row born of an `office.run` has `leg: null`.
+// `null`) sets it, one without keeps the row's, and a row born of an `office.run` has `leg: null`. `worker` (the
+// second ruling, additive) the same way: the worker's start, `{since}` or `null`, `worker: null` on an `office.run` row.
 
 // ------------------------------------------------------------ mirrored types (apps/supervisor/src/office.ts)
 // Mirrored, never imported across apps.
@@ -58,6 +59,9 @@ export interface OfficeRun {
   /** Story 39.5 (`leg`, operator ruling 2026-11-10): the open host-verify leg; null when none, absent from an older
    * supervisor's answer. A change of its `since` is a `GET /runs/{id}` re-read signal. */
   leg?: { since: string } | null;
+  /** Story 39.5 (`worker`, operator ruling 2026-11-10, the second): the worker's start; null when none, absent from an
+   * older supervisor's answer. A change of its `since` is a `GET /runs/{id}` re-read signal. */
+  worker?: { since: string } | null;
   epic: OfficeEpic;
   stories: OfficeStory[];
 }
@@ -201,6 +205,14 @@ function legOfDelta(d: Record<string, unknown>): Pick<OfficeRun, "leg"> {
   return isObj(d.leg) && typeof d.leg.since === "string" ? { leg: { since: d.leg.since } } : {};
 }
 
+/** `worker` from a progress delta, as `leg`: set when the delta carries the key (an object with a string `since`, or
+ * `null`). */
+function workerOfDelta(d: Record<string, unknown>): Pick<OfficeRun, "worker"> {
+  if (!("worker" in d)) return {};
+  if (d.worker === null) return { worker: null };
+  return isObj(d.worker) && typeof d.worker.since === "string" ? { worker: { since: d.worker.since } } : {};
+}
+
 function applyProgress(view: OfficeView, d: Record<string, unknown>): OfficeView | null {
   const runId = d.run_id;
   if (typeof runId !== "string" || !isObj(d.epic)) return null;
@@ -208,7 +220,7 @@ function applyProgress(view: OfficeView, d: Record<string, unknown>): OfficeView
   const story = isObj(d.story) && typeof d.story.key === "string" ? (d.story as unknown as OfficeStory) : null;
   const i = view.runs.findIndex((r) => r.run_id === runId);
   // A run new to the live set sends its progress before its `office.run`: create the row.
-  const base: OfficeRun = i >= 0 ? view.runs[i] : { run_id: runId, project: null, state: null, engine_run_id: null, stage: null, leg: null, epic, stories: [] };
+  const base: OfficeRun = i >= 0 ? view.runs[i] : { run_id: runId, project: null, state: null, engine_run_id: null, stage: null, leg: null, worker: null, epic, stories: [] };
   let stories = base.stories;
   if (story) {
     const j = stories.findIndex((s) => s.key === story.key);
@@ -217,7 +229,7 @@ function applyProgress(view: OfficeView, d: Record<string, unknown>): OfficeView
     const merged: OfficeStory = prev?.title !== undefined && story.title === undefined ? { ...story, title: prev.title } : story;
     stories = j >= 0 ? stories.map((s, k) => (k === j ? merged : s)) : [...stories, merged];
   }
-  const run: OfficeRun = { ...base, epic, stories, ...(typeof d.stage === "string" ? { stage: d.stage } : {}), ...legOfDelta(d) };
+  const run: OfficeRun = { ...base, epic, stories, ...(typeof d.stage === "string" ? { stage: d.stage } : {}), ...legOfDelta(d), ...workerOfDelta(d) };
   const runs = i >= 0 ? view.runs.map((r, k) => (k === i ? run : r)) : [...view.runs, run];
   return { ...view, runs };
 }
@@ -279,6 +291,7 @@ function applyRun(view: OfficeView, d: Record<string, unknown>): OfficeView | nu
     engine_run_id: null,
     stage: null,
     leg: null,
+    worker: null,
     epic: { spec_folder: null, done: 0, deferred: 0, failed: 0, total: 0, current_story: null },
     stories: [],
   };

@@ -4,15 +4,24 @@ type: 'feature'
 created: '2026-11-10'
 status: done
 # Operator ruling 2026-11-10 (agent seat, the run paused): option (ii) — the open host-verify leg travels on the office snapshot and deltas as `leg` (plan Settled shape 11); no fetch timer; see the Consult Log's last line
-baseline_revision: 702d340a4ec06a1050de395e9f652ac36b91f0fe
+# Operator ruling 2026-11-10, the second (agent seat, the run paused, the story committed at eb1de674): the worker's start travels on the office snapshot and deltas as `worker` (plan Settled shape 12); no fetch timer; the re-drive implements tasks R1–R5 only, on top of eb1de674 (the baseline now); see the Consult Log's last line
+baseline_revision: eb1de6749d95b89873a454e8a81ec1e6d50d6eff
 review_loop_iteration: 0
-followup_review_recommended: true
+followup_review_recommended: false
 deviation_score: 1
+reconcile_verdict: not-required
 context:
   - '{project-root}/_bmad-output/specs/spec-epic-39/plans/39-5.md'
   - '{project-root}/AGENTS.md'
 warnings: [oversized, multiple-goals]
-deferred: []
+deferred:
+  - summary: >-
+      A requeued run's ended clock ("in all, claim to end") is anchored on the latest `claimed`, while the cost window (`runWindow`) starts at the first `claimed`.
+    evidence: |-
+      Blind Hunter, 39-5 review pass 4. apps/studio-web/src/run/model.ts:485 make("ended", ms(claimed?.at ...)) with claimed = the latest claim; runWindow uses the first claim. For a run requeued by a supervisor restart, the "in all" time drops the cycle before the requeue, so it covers a different span than the cost window and the timeline. The fix needs a choice between two readings of "in all, claim to end", so it is not patched here (AC1 clock, deferral class a).
+    location: >-
+      apps/studio-web/src/run/model.ts:485
+    severity: low
 ---
 
 <intent-contract>
@@ -27,7 +36,7 @@ AC1. **Given** `GET /runs/{id}` (`api.ts:1249-1262`: the run row, its events, `c
 
 AC2. **Given** the Status screen (`apps/studio-web/src/status/*`) and the office snapshot **When** opened after this story **Then** it lists the queue (queued, claimed, running, paused runs with their job, story, start and clock) above the counts, each a link to its run page, with Cancel and, for a paused run, the reason in words and the inbox item that resolves it; the office HUD shows the current stage ("review pass 2 of 2") from `office.progress`, which gains the `stage` field (`office.ts`, the contract 0.1.35, additive), and its progress reads as a phased bar — the epic as the project bar, its stories as phases, the open review findings as a count to drain (the 2026-09-01 office grammar, addendum §3.4) — fed from `office.progress` and the board; every HUD value is held at least 1 s before it may change and the clock and the bars lerp between values (`src/office/model.test.ts` pins the hold); `src/status/model.test.ts` and `office.test.ts` pin the new fields.
 
-The shape of every rule above is SETTLED in `plans/39-5.md` "## Settled shape" items 1–11 (item 11, `leg`, by the operator ruling of 2026-11-10) and its "## Refresh — 39-4 gate" (they mirror SPEC.md design notes CAP-16/CAP-17). Implement them as written there.
+The shape of every rule above is SETTLED in `plans/39-5.md` "## Settled shape" items 1–12 (items 11, `leg`, and 12, `worker`, by the operator rulings of 2026-11-10) and its "## Refresh — 39-4 gate" (they mirror SPEC.md design notes CAP-16/CAP-17). Implement them as written there.
 
 ## Boundaries & Constraints
 
@@ -35,7 +44,8 @@ The shape of every rule above is SETTLED in `plans/39-5.md` "## Settled shape" i
 - Files boundary = `plans/39-5.md` "## Files" (19 files, 3 new). Anything else is a deviation the implementer reports.
 - Every pending value reads in words (`Loading the run…`, `Loading the clock…`, `Loading the Stage Log…`, `Loading the findings…`, `no story yet`), never a bare `—` (owner rule 2026-11-05).
 - Pure model functions (`runTimeline`, `runClock`, `costView`, `eventRows`, `canCancel`, `queueRows`, `phasedBar`, `hold`, `tween`, `valueAt`) take an injected `now`; no fetch timer anywhere (reads are triggered by store changes; a 1 s tick / rAF drives clocks and tweens only).
-- Operator ruling 2026-11-10 (plan Settled shape 11): the open host-verify leg reaches the store as `leg` (`null`, or `{since}` = the open lease's `at`) on the snapshot's `runs[]` and on every `office.progress`; every re-read of `GET /runs/{id}` (the run page, the Status screen, the office HUD) is keyed on the row's `state`, `stage` and `leg`. "No fetch timer anywhere" stands.
+- Operator ruling 2026-11-10 (plan Settled shape 11): the open host-verify leg reaches the store as `leg` (`null`, or `{since}` = the open lease's `at`) on the snapshot's `runs[]` and on every `office.progress`; every re-read of `GET /runs/{id}` (the run page, the Status screen, the office HUD) is keyed on the row's `state`, `stage`, `leg` and `worker` (the fourth by the second ruling, the next bullet). "No fetch timer anywhere" stands.
+- Operator ruling 2026-11-10, the second (plan Settled shape 12): the worker's start reaches the store as `worker` (`null`, or `{since}` = the `at` of the run's latest `worker` event with no `requeued` event after it) on the snapshot's `runs[]` and on every `office.progress`; a change of `worker` alone is one epic-only delta. The events the clock depends on, and the store field each moves: `enqueued`, `claimed`, `paused`, `close-out`, `engine-resume`, `requeued`, `ended`, `orphaned` → `state`; `worker` → `worker`; `launched`, the engine's sessions and its end (the journal's, or `engine-gone`) → `stage`; `host-verify-leg` → `leg`; `host-verify` → `leg` and `stage`. The events recorded with the state unchanged (`lock-wait`, `resumed`, `closing-out`, `closed_out`) are not claimed here: the rule that follows covers them. If a later pass finds one more event the display reads that moves no store field, that is a `defer` finding naming the event (the operator files it in the ledger), never a halt: one field per event, as `leg` and `worker`, is the accepted mechanism.
 - Contract change is additive inside 0.1.35 (no version pin flips); the 39.4 contract test re-bounds its clause/note at 39.5's (planned, local).
 - AGENTS.md Windows rules: every `bun test` names `--timeout 30000`; no new text-mode open, `path.join` before a POSIX tail, or subprocess.
 - `office.ts` runs in `serve`: the operator stops the supervisor before `apps/supervisor` is built and restarts it after the merge (recorded in the README/contract paragraph).
@@ -47,7 +57,7 @@ The shape of every rule above is SETTLED in `plans/39-5.md` "## Settled shape" i
 **Never:**
 - No supervisor route change; `api.ts`, `stories.ts`, `board.ts`, `board/*` in the web untouched (moving the kanban card to `stage` is out of scope).
 - No `sessions[]`, `office.session` or any 39.6+ field; no movement toggle (39.8).
-- No edits to `epics.md`, plan files (the one exception is not the implementer's: the operator wrote Settled shape 11 and its contract text into `plans/39-5.md` on 2026-11-10, while the run was paused; that edit rides this story's commit as it is), `stories.yaml`, `routing.toml`, `policy.toml`, or anything under `supervision/`. No push/tag/PR.
+- No edits to `epics.md`, plan files (the one exception is not the implementer's: the operator wrote Settled shapes 11 and 12 and their contract text into `plans/39-5.md` on 2026-11-10, each while the run was paused; those edits ride this story's commits as they are), `stories.yaml`, `routing.toml`, `policy.toml`, or anything under `supervision/`. No push/tag/PR.
 
 ## I/O & Edge-Case Matrix
 
@@ -60,6 +70,7 @@ The shape of every rule above is SETTLED in `plans/39-5.md` "## Settled shape" i
 | Review stage | `policy_snapshot.limits.max_review_cycles: 2`, open `<story>-review-2` session | `stage: "review pass 2 of 2"` | limits absent → defaults 2/3; `<m>` never below `<n>` |
 | Stage-only change | stage changes, epic/stories unchanged | one epic-only `office.progress` `{run_id, epic, stage}` | — |
 | Leg-only change | a `host-verify-leg` lease with an owner lands while the stage already reads `host verify leg` | one epic-only `office.progress` `{run_id, epic, stage, leg: {since: <the lease's at>}}`, stage unchanged; the web re-reads `GET /runs/{id}` and the clock reads `… of <the leg's guard>`, guard `host leg` | the leg's `host-verify`, or a release (`owner: null`) → one delta with `leg: null` and one more re-read |
+| Worker-only change | a `worker` event lands on a run whose state is already `running` and whose stage stays `launching` (a worker-only job writes no `launched`) | one epic-only `office.progress` `{run_id, epic, stage, leg, worker: {since: <the event's at>}}`, stage unchanged; the web re-reads `GET /runs/{id}` and the clock reads `HH:MM:SS of <worker.guard_s>` | a `requeued` event → `worker: null`; the next `worker` event → a new `since` and one more re-read |
 | Cost source | story known, Stage Log rows in claim→end window | `Cost by stage, from the Stage Log of ST-NNN` | no costed rows / unknown story / 404 → run total with named label; `cost_usd` null → `Not metered yet` |
 | Cancel | 200 / 409 RunTerminal / 409 ExternalRun / 403 CsrfRefused / 404 | `Cancelled.` + re-read / `Already ended: <state>` / external words / `reload the page` / not found | other → `<url> answered <status> <error>` |
 | HUD hold | A→B→A within 1 s | B never shown | first value shows at once |
@@ -95,10 +106,23 @@ The investigation is `_bmad-output/specs/spec-epic-39/plans/39-5.md` — read it
 - `apps/supervisor/src/office.ts` + `test/office.test.ts` + `apps/supervisor/README.md`; `apps/studio-web/src/live/store.ts` + `store.test.ts`; `src/run/RunScreen.tsx`; `src/status/model.ts` (`liveSignature`) + `model.test.ts` + `StatusScreen.tsx`; `src/office/OfficeScreen.tsx`; `apps/studio-web/README.md`; the contract + `test_driver_contract.py` -- `leg` per plan Settled shape 11 and its contract text (operator ruling 2026-11-10; no file outside the plan's list) -- AC1 ("the leg's own guard during the leg").
 - `plugins/tk-studio/contracts/driver-contract.md` + `lib/tests/test_driver_contract.py` -- the settled 0.1.35 text and `test_0_1_35_story_39_5_the_runs_timeline_and_the_progress_in_view`; re-bound 39.4's test.
 
+**Re-drive scope (operator ruling 2026-11-10, the second; the run was paused with the story committed):**
+- Commit `eb1de674` is this re-drive's baseline. It implements every task above and passed three review passes. Those tasks are done and stay listed for the record: do not rewrite, move or revert any of that code. Implement only R1–R5 below, on top of it, then run the whole `## Verification` section.
+- R1 -- `worker` per plan Settled shape 12 and its contract text: `apps/supervisor/src/office.ts` (`OfficeRun.worker`, the delta, the hub's skip) + `test/office.test.ts` (the whole-object pins of snapshots and deltas gain `worker`) + `apps/supervisor/README.md`; `apps/studio-web/src/live/store.ts` + `store.test.ts`; `src/run/model.ts` (`runRowKey`) + `model.test.ts` + `RunScreen.tsx`; `src/status/model.ts` (`liveSignature`) + `model.test.ts` + `StatusScreen.tsx`; `src/office/OfficeScreen.tsx`; `apps/studio-web/README.md`; the contract + `test_driver_contract.py` (still 0.1.35, the same test) -- AC1 (a worker-only job's clock takes `worker.guard_s`).
+- R2 -- `apps/studio-web/src/run/RunScreen.tsx`: the Stage Log read (`GET /stories/{id}`) runs again whenever the run's store row changes (the same key as the `GET /runs/{id}` re-read, `runRowKey`), besides story, project and last `seq`; no timer -- review pass 3, medium (a live run's Stage Log rows, timeline sessions and stage cost went stale when the stage moved with no new queue event).
+- R3 -- `apps/studio-web/src/run/model.ts` (`runTimeline`) + `model.test.ts`: a `requeued` event closes the open launch (or worker) and engine segments at its `at` and opens a `queued` segment, which the next `claimed` closes -- review pass 3, medium.
+- R4 -- `apps/studio-web/src/status/StatusScreen.tsx`: when the first `GET /status` fails, the error stands in place of `Loading the queue…` (never both on screen) -- review pass 3, low.
+- R5 -- `apps/studio-web/src/status/StatusScreen.tsx`: while a Cancel of a run is in flight, that row's Cancel buttons are disabled and say so (`Cancelling…`); a second click posts nothing -- review pass 3, low.
+- Where a pure function can carry a rule of R2, R4 or R5, put it in the model and pin it in the model's test.
+
 **Acceptance Criteria:**
 - Given a full run's events (queued, launch, engine with Stage Log sessions incl. two review passes, host leg with `suite_durations`, close-out, ended), when `runTimeline` runs, then `src/run/model.test.ts` pins each segment, suite sub-cells and the ended words.
 - Given the Status screen, when rendered, then the Queue section precedes the counts and each row links to `/app/run/<id>`.
 - Given a live run whose stage already reads `host verify leg`, when its `host-verify-leg` lease lands, then `office.test.ts` pins exactly one epic-only `office.progress` with `leg: {since}` and the stage unchanged, and `leg: null` after the leg's `host-verify` and after a release; `store.test.ts` pins `leg` from the snapshot, set and cleared by a delta and kept by a delta without the key; the web's tests pin that a change of `leg` changes every key that triggers the `GET /runs/{id}` re-read.
+- Given a worker-only job (no `launched`) whose state is already `running`, when its `worker` event lands, then `office.test.ts` pins exactly one epic-only `office.progress` with `worker: {since}` and the stage unchanged, `worker: null` after a `requeued`, and a new `since` after the next `worker`; `store.test.ts` pins `worker` from the snapshot, set and cleared by a delta and kept by a delta without the key; the web's tests pin that a change of `worker` changes every key that triggers the `GET /runs/{id}` re-read.
+- Given a run requeued by a supervisor restart, when `runTimeline` runs, then `model.test.ts` pins the launch and engine segments closed at the `requeued` event and a `queued` segment up to the next `claimed`.
+- Given a live run whose stage moves with no new queue event, when its store row changes, then the Stage Log is read again.
+- Given a failed first `GET /status`, then the error shows without `Loading the queue…`; given a Cancel in flight on the Status screen, then that row's Cancel buttons are disabled and a second click posts nothing.
 - Given the verify gate, when run, then lib suite green and conformance `ok: true`.
 
 ## Spec Change Log
@@ -141,6 +165,46 @@ The investigation is `_bmad-output/specs/spec-epic-39/plans/39-5.md` — read it
   - `[low]` `[patch]` Status Cancel posts with no CSRF token when `project_id` is null or the inbox read fails; the run page likewise on a failed inbox read — refuse up front with a stated reason
   - `[low]` `[patch]` a `pending-N` placeholder phase replaced by a real story jumps instead of lerping (office/model.ts:313/404) — tween by position
   - `[low]` `[patch]` a takeover `host-verify-leg` while a leg is open may leave the earlier leg segment open (run/model.ts:272-276) — verify and close it
+
+### 2026-11-10 — Review pass (pass 3, a follow-up review of the done story at HEAD `eb1de6749d95b89873a454e8a81ec1e6d50d6eff`)
+- layers: blind-hunter and edge-case-hunter, both claude-opus-5-5 / medium (band L). The diff since baseline `702d340a`, excluding `_bmad-output/` (~369 KB), was handed over by its scratchpad path. Edge-case-hunter's two findings duplicate blind-hunter's worker and `requeued` findings.
+- intent_gap: 1 (medium 1)
+  - `[medium]` `[intent_gap]` The `worker` event (`guard_s`) changes no store field. `queue.setWorker` (apps/supervisor/src/queue.ts:1541, called from cli.ts:2077) runs after the claim flips the run to `running` (queue.ts:1414-1417) and after the sbx pin. `runRowKey` (run/model.ts:57), the Status `liveSignature` and the HUD key read only `state`, `stage` and `leg`. A worker-only job never writes `launched`, so its stage stays `launching` (office.ts:130, :634). Its run page, Status row and HUD clock therefore read `… since the claim (the guard starts with the worker)` for the whole run, never `HH:MM:SS of <worker.guard_s>` (AC1). Every fix widens the key set and contract pinned inside `<intent-contract>` (Boundaries, line 38; plan Settled shape 11), or adds a timer, which is ruled out. The consult escalated it (see Consult Log). Per the consult's DO line, the code is NOT reverted. The attempt is the committed range `702d340a4ec06a1050de395e9f652ac36b91f0fe..eb1de6749d95b89873a454e8a81ec1e6d50d6eff`, so no patch file was written.
+- bad_spec: 0
+- patch: 0 (four were found and left untriaged by the consult's ruling, for the pass that follows the operator's ruling: `[medium]` RunScreen.tsx:82, the Stage Log (`GET /stories/{id}`) is keyed on story, project and last `seq`, not on the store's stage, so a live run's Stage Log rows, timeline sessions and stage cost go stale when the stage moves; `[medium]` run/model.ts:265-325, a `requeued` event (supervisor restart) neither closes the open launch/engine segments nor opens a `queued` segment; `[low]` StatusScreen.tsx:87, after a failed first `GET /status` the error shows next to `Loading the queue…`, which stays on screen; `[low]` StatusScreen.tsx:119, the Status Cancel buttons are not disabled while a Cancel is in flight, so a double click posts twice and `Already ended: cancelled` replaces `Cancelled.`)
+- defer: 0
+- reject: 1 (low 1): a host-verify re-run lease on an already ended run is not followed live, and its clock reads "in all, claim to end". Pass 2's consult-accepted patch rules that the ended state wins on the clock, and a re-run after the end is outside AC1's live run.
+- addressed_findings:
+  - none
+- operator triage 2026-11-10 (the second ruling; see the Consult Log's last line): the intent_gap is closed by plan Settled shape 12 (`worker`), task R1: a `patch`-class addition on top of `eb1de674`, not `bad_spec`. The four findings this pass left untriaged are all `patch`: tasks R2–R5.
+
+### 2026-11-10 — Review pass (pass 4, re-drive R1–R5)
+- intent_gap: 0
+- bad_spec: 0
+- patch: 3 (high 0, medium 2, low 1)
+- defer: 1 (high 0, medium 0, low 1)
+- reject: 1 (high 0, medium 0, low 1)
+- addressed_findings:
+  - `[medium]` `[patch]` `runClock`: a queued run's clock counted from `run.created` after a `requeued`, including the earlier claim. It now counts from the latest `requeued` (run/model.ts; pinned in run/model.test.ts).
+  - `[medium]` `[patch]` RunScreen: a failed Stage Log re-read (R2) dropped the earlier rows mid-run. The new pure `stagesAfterRead` keeps them for the same story and sets the error (run/model.ts + test; RunScreen.tsx).
+  - `[low]` `[patch]` StatusScreen `cancel`: a finished Cancel closed a confirmation opened on another row. It now clears only its own (`setConfirming((c) => c === runId ? null : c)`).
+- rejected: the Stage Log is read twice per row change, because the key keeps `lastSeq` beside `rowKey`. R2 keeps last `seq` in the key on purpose; the cost is one extra GET and nothing on screen is wrong.
+- deferred: an ended requeued run's "in all, claim to end" anchor (latest claim) differs from `runWindow` (first claim). This needs a choice between two readings (deferral class a; see the frontmatter `deferred`).
+- skipped-layer: none (M-band story; both layers ran)
+
+### 2026-11-10 — Review pass (pass 5, follow-up review on f0783db5)
+- intent_gap: 0
+- bad_spec: 0
+- patch: 2 (high 0, medium 0, low 2)
+- defer: 0
+- reject: 3 (high 0, medium 0, low 3)
+- addressed_findings:
+  - `[low]` `[patch]` `runTimeline`: `hasLaunched` was a whole-run flag. If a worker-only claim was requeued and a later claim launched, the first claim's segment read `launch`. The label is now decided per claim (`claimLaunched(i)`: a `launched` before the next `requeued`/`claimed`). Pinned by a new R3 test in run/model.test.ts; the README phrase now says "per claim". Found by both layers; deduped.
+  - `[low]` `[patch]` test_driver_contract.py: the 0.1.35 **The worker:** rules were not pinned. Three phrases are now pinned: "when no `requeued` event follows it", "a pause or the run's end does not clear it", "not that it is alive" (deferral class b, so patched rather than deferred).
+- rejected: a host-verify leg, re-run or close-out segment left open across a `requeued`. `recover` requeues only a run that never minted a studio run (queue.ts:2546-2558), so no engine or leg is open at a requeue.
+- rejected: two Stage Log reads per stage move (`rowKey` + `lastSeq` in `stageLogKey`). This was already rejected in pass 4. R2 needs `rowKey` (a stage move comes from `state.json`, not a queue event), and the extra GET changes nothing on screen.
+- rejected: the `office.ts` header's `leg` paragraph still gives the pre-`worker` progress shape. Each paragraph records the shape as of the field it added, as the `stage` paragraph already does; this is a comment only.
+- skipped-layer: none (band L; both layers ran). The reviewers were given the diff by its scratchpad path instead of inline, because two pinned-text lines make it ~227 KB.
 
 ## Design Notes
 
@@ -207,6 +271,30 @@ DRIFT: the HUD clock is one held value with its elapsed tween keyed by mode and 
 DRIFT: the HUD's engine id is held — AC2 "every HUD value" — affects: none
 DRIFT: `requestCancel` added to `run/model.ts` — never post Cancel without a CSRF token; the inbox read is a parameter to avoid an import cycle — affects: none
 
+### pass 4 (2026-11-10, implementer — re-drive R1–R5 on `eb1de674`)
+
+- (planned move, score 0 by consult) planned: R1 names only `OfficeScreen.tsx` on the office side / actual: also `office/model.ts` (the `hudRunKey` doc comment) and `office/model.test.ts` (a test that `hudRunKey` changes with `worker`) / why: the AC requires the web's tests to pin that `worker` changes every re-read key; both files are in the plan's Files / may affect: none
+- (planned move, score 0 by consult) planned: R2 names only `RunScreen.tsx` / actual: a pure export `stageLogKey` in `run/model.ts`, tested in `run/model.test.ts` / why: the spec's "put the rule in the model and pin it" / may affect: none
+- (planned move, score 0 by consult) planned: R4 and R5 in `StatusScreen.tsx` / actual: new exports `queueNotice`, `cancelButtons`, `beginCancel`, `CANCELLING` in `status/model.ts`, tested; the screen no longer imports `LOADING_QUEUE` / why: the same rule / may affect: none
+- (planned move, score 0 by consult) planned: existing `liveSignature` pins unchanged / actual: the whole-string pin `"r-running:running:review pass 2 of 2:"` became `"…::"` / why: `worker.since` is a new part of the signature / may affect: none
+- planned: R5 disables "that row's Cancel buttons" / actual: the confirm step's "Keep it running" button is disabled while the Cancel is in flight too / why: it is one of the row's Cancel controls; dismissing mid-flight would hide the result / may affect: none
+- planned: R3 closes launch (or worker) and engine segments and opens `queued` / actual: it also closes any still-open `queued` segment before opening the new one / why: two queued segments are never open at once / may affect: none
+- planned: the `office.test.ts` snapshot shows `worker: null` after a `requeued` / actual: the `requeued` event is written with `queue.note` (state stays `running`) rather than driving a real restart; a 5 ms sleep separates the second `worker` event's `at` / why: a real restart needs a dead-owner fixture outside this test's scope; `workerOf` reads only the events / may affect: none
+
+Consult 2026-11-10 (deviation-gt-0): the first four entries are planned moves (score 0); the last three are accepted deviations at score 1.
+
+DEVIATION SCORE: 1
+
+DRIFT: "Keep it running" is disabled during an in-flight Cancel — a row Cancel control; dismissing mid-flight hides the result — affects: none
+DRIFT: a `requeued` also closes a still-open `queued` segment — never two open queued segments — affects: none
+DRIFT: the snapshot test writes `requeued` via `queue.note` instead of a real restart — a restart needs a dead-owner fixture out of scope — affects: none
+
+### pass 5 (2026-11-10, implementer — the three review patches of review pass 4)
+
+- planned: only the three patches and their tests / actual: an exported `StagesState` interface beside `stagesAfterRead` in run/model.ts, and the now-unused `StageRowLike` import removed from RunScreen.tsx / why: the helper needs a named state type / may affect: none
+
+DEVIATION SCORE (pass 5): 0; the story's `deviation_score` stays 1 (pass 4).
+
 ## Consult Log
 
 - 2026-11-10T07:54:04Z — trigger: deviation-gt-0 — question: accept the 11 implementer deviations at score 1, or does any (contract wording vs test_0_1_24, runClock widening vs 39.6, Story 30.6 status-test relaxation) rise to 2 or need rejection? — ruling: accept-deviation score 1 — do: Record all 11 deviations at score 1; change deviation (d)'s "may affect: 39.6" and its DRIFT line to "affects: none"; keep the contract wording and the rewritten Story 30.6 Status check — rule candidate: when a plan's settled contract text names an identifier an earlier contract pin forbids, use the plain-words paraphrase and record a score-1 deviation without a consult; a widening of a web-internal function's answer scores 1 unless a later plan names that symbol.
@@ -215,6 +303,9 @@ DRIFT: `requestCancel` added to `run/model.ts` — never post Cancel without a C
 - 2026-11-10T08:21:00Z — operator ruling on the escalation (agent seat; the run paused, nothing committed) — ruling: **(ii)**, an additive field inside contract 0.1.35. The open host-verify leg travels on the office snapshot's `runs[]` and on every `office.progress` as `leg` (`null`, or `{since}` = the open lease's `at`); a change of `leg` alone is an epic-only delta; the web's store carries it, and every re-read of `GET /runs/{id}` is keyed on `state`, `stage` and `leg`. The shape is plan Settled shape 11 and its contract text, written by the operator; this spec's Boundaries, matrix, Tasks and Acceptance Criteria are amended to match. Option (i) is refused: "no fetch timer anywhere" stands (Story 39.4 ruled a timer re-read out as well). The 11 accepted deviations stand. — do: the attempt is restored from `39-5-attempt-1.patch` and this spec is `in-review`. Implement Settled shape 11 on top of the restored code as a `patch` (the code does not yet match the amended spec; this is NOT a `bad_spec`, revert nothing), re-run the Verification commands, then triage the six findings the halted pass never processed, with whatever the new pass finds, as usual. No consult is owed on `leg` itself: it is in the plan now. — why (ii): the epic's design is "reads follow store changes, the tick drives clocks only"; the snapshot already carries data rather than triggering extra reads (0.1.25); `office.ts` already reads the run's queue events (`closingOutHeld`), so no route, no timer and no file outside the plan's list is needed.
 - 2026-11-10T08:35:43Z — trigger: deviation-gt-0 — question: accept the leg patch's deviations ((a) pure `runRowKey` in run/model.ts, (b) `leg` also on the supervisor README's `GET /office` runs[] row, (c) HUD key read from the store row) at score 1? — ruling: accept-deviation score 1 — do: keep (a) runRowKey in run/model.ts with its RunScreen use and test; keep (b) the README `GET /office` row; keep (c) at score 0; record all three as reported and continue — rule candidate: a test-driven move of a screen key into its sibling model.ts is a planned move (score 0); adding a ruled field to every README row listing the same shape is following the ruling, not a deviation.
 - 2026-11-10T08:48:57Z — trigger: deviation-gt-0 — question: accept the patch pass's deviations ((a) one held clock value with the elapsed tween keyed by mode+guard, so a worker→leg hand-over swaps without a lerp; (b) engine id held; (c) `requestCancel` in run/model.ts) at score 1, given AC2's "the clock … lerp[s] between values"? — ruling: accept-deviation score 1 — do: keep (a), (b) and (c) as they are; report all three at score 1; pin a hand-over with no backward lerp and no false "(over the guard)" in model.test.ts (already pinned: office/model.test.ts:449) — rule candidate: a tween runs only between successive values of the same quantity; when its identity changes (the clock's mode or guard, a phase's key) the new value replaces the old after the hold and starts its own tween, never a lerp from the old one.
+- 2026-11-10T09:01:43Z — trigger: halt — question: is the unsignalled `worker` event (a worker-only job's clock never takes `worker.guard_s` because re-reads are keyed on state/stage/leg only) an intent_gap to halt on, a patch inside the bounds, or a residual risk? — ruling: escalate — do: HALT blocked "intent gap"; do not revert (the code is committed at HEAD eb1de674; precedent at the 08:05:07Z entry); apply none of the four remaining patches now and list them in the halt record as untriaged for the pass after the operator's ruling — rule candidate: When a SPEC pins "re-reads keyed on store fields X", the planner lists every event an AC's display reads (claimed, worker, launched, the leg lease, requeued) and maps each to a field in X, or adds that field to the contract in the same story; an unmapped event blocks planning. (observe record: ok)
+- 2026-11-10T10:18:05Z — operator ruling on the second escalation (agent seat; the run paused, the story committed at `eb1de674`, PR 386 a draft) — ruling: the worker's start travels on the office snapshot's `runs[]` and on every `office.progress` as `worker` (`null`, or `{since}`), exactly as `leg` does; additive inside contract 0.1.35. The shape is plan Settled shape 12 and its contract text, written by the operator; this spec's Boundaries, matrix, Tasks (R1–R5) and Acceptance Criteria are amended to match. A fetch timer stays ruled out. A generic change counter on the row was weighed and set aside: every event would cost a delta, and the frame sequences the supervisor's tests pin would all move. — do: this resume is a plain one. The engine advanced the baseline to `eb1de674`; nothing is reverted and nothing is restored. Implement R1–R5 only, on top of the committed code, run the Verification commands, then review the new diff as usual. The four findings pass 3 left untriaged are `patch` (R2–R5), by the operator. No consult is owed on `worker` itself: it is in the plan now. — standing rule for the rest of this story: if a pass finds one more event the display reads that moves no store field, do not halt and do not escalate. Record it as a `defer` finding that names the event; the operator files it in the ledger with this story's records. — why: the reasoning of the `leg` ruling (reads follow store changes, the tick drives clocks only); the planner rule the consult proposed (map every event an AC's display reads to a store field, or add the field in the same story) goes to the ledger.
+- 2026-11-10T10:33:58Z — trigger: deviation-gt-0 — question: accept pass 4's seven deviations (R1–R5 re-drive) at score 1, score some 0, or reject (e) Keep-it-running disabled / (g) requeued via queue.note? — ruling: accept-deviation score 1 — do: Record (a), (b), (c) and (d) as planned moves at score 0, not as deviations. Record (e), (f) and (g) as accepted deviations at score 1. Change no code; run the whole Verification section and go on to review. — rule candidate: When a SPEC holds a standing "put pure rules in the model and pin them" line, or an AC names the tests that must pin a field, the implementer records the helpers, tests and widened pins it causes as planned (score 0), not as deviations.
 
 ## Stage Log
 
@@ -223,61 +314,51 @@ DRIFT: `requestCancel` added to `run/model.ts` — never post Cancel without a C
 | plan | — | 2026-11-09T17:24:14Z | 2026-11-09T17:48:19Z | — | claude-opus-5-5 | high | — | — | — | done |
 | plan | — | 2026-11-10T05:56:44Z | 2026-11-10T05:57:45Z | — | claude-opus-5-5 | high | — | — | — | done |
 | dev | 1 | 2026-11-10T07:30:37Z | 2026-11-10T08:05:36Z | 99f3ce2c-d9b8-42e6-ac88-55cb620d6a77 | claude-opus-5-5 | medium | 25448085 | 170398 | 13.0363 | blocked |
+| dev | 2 | 2026-11-10T08:21:22Z | 2026-11-10T08:55:38Z | e60354ae-3253-42f8-a9a0-62c74cfd945e | claude-opus-5-5 | medium | 13449746 | 96384 | 8.0212 | completed |
+| review | 1 | 2026-11-10T08:55:39Z | 2026-11-10T09:02:27Z | f8fff14b-3943-4e14-a77e-9eb60b54522b | claude-opus-5-5 | medium | 8417070 | 50033 | 4.9717 | blocked |
+| dev | 3 | 2026-11-10T10:18:12Z | 2026-11-10T10:52:16Z | 84607c25-0db7-4d7c-abd1-c152937294bc | claude-opus-5-5 | medium | 12939552 | 79317 | 7.7282 | completed |
+| review | 2 | 2026-11-10T10:52:17Z | 2026-11-10T10:59:28Z | d496d516-fef7-43d2-a430-13f9a6134f6f | claude-opus-5-5 | medium | 3983427 | 34633 | 3.1775 | completed |
+| gate | 1 | 2026-11-10T10:59:29Z | 2026-11-10T11:01:34Z | 066fddc7-0d9f-4827-b818-fec39f5944de | claude-opus-5-5 | medium | 1977500 | 12032 | 1.3454 | completed |
+
 
 ## Auto Run Result
 
 Status: done
 
-Studio: activated as developer; working set bmm, tea, bmb, bmad-loop, gds; drift drift; fixes: run `uv run <plugin>/lib/plansync.py sync-back --directory <project-root>` and declare the atlassian-sync-back job in .tk-studio/config.yaml jobs | nothing to do on a box with no engine sandbox; on the engine box set TK_SUPERVISOR_CONFIG to the supervisor config naming jobs.<project>/<job>.sandbox; routing implementer=claude-opus-5-5 reviewers=claude-opus-5-5 consult=claude-opus-5-5; knowledge spine absent
+Studio: activated as developer; working set bmm, tea, bmb, bmad-loop, gds; drift drift; fixes: run `uv run <plugin>/lib/plansync.py sync-back --directory /c/agent-work/worktrees/tk-studio/q-run-epic-39-20261110T072828Z-1762b1` and declare the atlassian-sync-back job in .tk-studio/config.yaml jobs | nothing to do on a box with no engine sandbox; on the engine box set TK_SUPERVISOR_CONFIG to the supervisor config naming jobs.<project>/<job>.sandbox; routing implementer=claude-opus-5-5 reviewers=claude-opus-5-5 consult=claude-opus-5-5; knowledge spine absent
 
-**Summary.** This session resumed the spec at `in-review` after the operator's ruling (ii). The implementer added Settled shape 11: the open host-verify leg goes on the office snapshot and on every `office.progress` as `leg` (`null` or `{since}`). A change of `leg` alone is an epic-only delta. The web store carries `leg`, and every key that triggers a `GET /runs/{id}` re-read includes it (run page `runRowKey`, Status `liveSignature`, HUD `hudRunKey`). There is no fetch timer. A second review pass (both layers) re-found the six findings the halted pass never processed and added four new ones. All ten were triaged `patch` and fixed with pinning tests.
+**Summary:** This was a follow-up review pass (pass 5) over everything since baseline `eb1de674`, which is the R1–R5 re-drive committed at `f0783db5`, because the previous pass recommended one (score 7). Both layers ran. Two low-severity patches were applied:
+- **The timeline label:** the run timeline's `launch`/`worker` label is now decided per claim. Before, a worker-only claim that was requeued read `launch` when a later claim launched.
+- **The contract pins:** the 0.1.35 **The worker:** contract rules are now pinned in the contract test.
 
-**Files changed (whole story, since baseline 702d340a4ec06a1050de395e9f652ac36b91f0fe):**
-- `apps/supervisor/src/office.ts` — the `stage` column and the stage computation; `leg` from the run's queue events; the hub emits a delta on a `stage` or `leg` change.
-- `apps/supervisor/test/office.test.ts` — the stage values, the stage-only and leg-only epic deltas, `leg` across the lease, its `host-verify`, a release and a takeover.
-- `apps/supervisor/README.md` — the `GET /office` and `GET /office/events` shapes with `stage` and `leg`.
-- `apps/studio-web/src/live/store.ts`, `store.test.ts` — `stage` and `leg` on the mirrored run.
-- `apps/studio-web/src/run/model.ts`, `model.test.ts`, `RunScreen.tsx` (new) — the run page: timeline, clock, cost, events, Cancel (`requestCancel`), with `orphaned` handled as an end.
-- `apps/studio-web/src/status/model.ts`, `model.test.ts`, `StatusScreen.tsx` — the queue above the counts, links, Cancel, the paused reason and its inbox item, `mergeDetails` keeping the last read.
-- `apps/studio-web/src/office/model.ts`, `model.test.ts`, `OfficeScreen.tsx` — the HUD's stage, clock and phased bar; hold and lerp; `hudRunKey`.
-- `apps/studio-web/src/screen.ts`, `screen.test.ts`, `App.tsx` — the route `/app/run/<id>` goes to `RunScreen`.
-- `apps/studio-web/README.md` — the 39.5 section.
-- `plugins/tk-studio/contracts/driver-contract.md`, `plugins/tk-studio/lib/tests/test_driver_contract.py` — 0.1.35 additive: `stage` and `leg`, and their pin.
+No consult trigger fired. The deviation for this pass is 0, so `deviation_score` stays 1.
 
-**Review findings.** Pass 2: 10 patches applied (medium 7, low 3), 0 deferred, 0 rejected, 0 bad_spec, 0 intent_gap.
+**Files changed (this pass):**
+- `apps/studio-web/src/run/model.ts`: `claimLaunched(i)` replaces the whole-run `hasLaunched` and picks the claim segment's label.
+- `apps/studio-web/src/run/model.test.ts`: a new R3 test. A worker-only claim is requeued, then a later claim launches; the segments must be `worker`, `queued`, `launch`.
+- `apps/studio-web/README.md`: the label rule now says "when that claim is followed by no `launched`".
+- `plugins/tk-studio/lib/tests/test_driver_contract.py`: pins three defining phrases of the worker clause.
 
-**Follow-up review recommendation:** true. Patched findings: high 0, medium 7, low 3. Score = 3×7 + 1×3 = 24, which is ≥ 5.
+**Review findings:** 2 patches applied (low 2). None deferred. 3 rejected (low 3; the reasons are in the Review Triage Log, pass 5).
 
-**Verification (run by this session after the patch pass):**
-- `plugins/tk-studio/lib`, `uv run python -m unittest discover tests`: 3167 tests, OK (skipped=5).
-- `plugins/tk-studio/lib`, `uv run python ../contracts/conformance/runner.py run`: `ok: true`.
-- `apps/supervisor`, `bun test --timeout 30000`: 2358 tests, 0 fail (88 skip). `bunx tsc --noEmit -p .`: clean.
-- `apps/studio-web`, run through `bun node_modules/...`: tsc `--noEmit` clean; vitest 15 files, 304 passed; vite build ok (only the usual chunk-size warning).
+**Follow-up review recommended:** false. Patched findings: high 0, medium 0, low 2. Score = 3×0 + 2 = 2, which is below 5.
 
-**Unverifiable here (the operator runs these after the merge and the serve restart):**
-- Open `/app/run/<id>` for a live sbx run. The clock reads `HH:MM:SS of 01:00:00`, and during the close-out leg `… of 02:00:00`.
-- During a review session the office HUD reads `review pass <n> of <m>`.
-- The Status screen lists the queue above the counts.
-- `office.ts` runs in serve. Stop the supervisor before building `apps/supervisor`, then restart it through the scheduled task.
+**Verification:** all commands passed.
+- lib unittest: OK, 3167 tests (5 skipped).
+- conformance: `ok: true`, no failures.
+- studio-web:
+  - `tsc --noEmit` is clean.
+  - vitest passed 317/317.
+  - `vite build` succeeded, with only the existing chunk-size warning.
+  - Re-checked by this session: `tests.test_driver_contract` OK (106 tests), and `src/run/model.test.ts` 33/33.
+- supervisor: not re-run, because this pass does not touch it. Pass 4 recorded `bun test --timeout 30000` at 2273 pass and 0 fail.
 
 **Residual risks:**
-- The story is oversized (band L, about 20 files), and the follow-up review is recommended.
-- At a clock hand-over the HUD swaps clocks after the hold rather than lerping. This is the consult-accepted reading of AC2.
-- The web gate ran through `bun node_modules/...`. `bun run verify` (the frozen install) was not run here.
+- The live checks are still `unverifiable-here`. After the merge and a serve restart, the operator opens `/app/run/<id>` for a worker-only sbx run and checks that it reads `HH:MM:SS of <worker.guard_s>`. During the close-out leg it should read `… of 02:00:00`.
+- The R4/R5 wiring is still checked only through the pure models and tsc, because there are no DOM tests.
+- The deferral from pass 4 (DW-219, the "in all" anchor for a requeued run) is unchanged.
 
-DRIFT: contract text says "one per row of the office mapping table" instead of naming `OFFICE_MAP` — an existing contract test forbids supervisor internals in the contract — affects: none
-DRIFT: Story 30.6's no-timer/no-fetch status check relaxed to one now-tick interval and fetch only as a model default — the settled design adds store-triggered reads and a 1 s tick — affects: none
-DRIFT: StatusScreen gains an `onNavigate` prop wired in App.tsx — router links instead of full reloads — affects: none
-DRIFT: `runClock` answer widened with `mode`/`context`, plus `clockLabel` and `HudLive.clockText` — the HUD re-labels eased elapsed time — affects: none
-DRIFT: `costView` input gains `error` and `now` (and `project`) — the could-not-be-read label, open windows and the no-project fallback — affects: none
-DRIFT: paused segment reason falls back through `detail.engine.paused_reason` — `markPaused` never sets `run.reason` — affects: none
-DRIFT: a released `host-verify-leg` lease (`owner: null`) closes the host-leg segment — the table had no closing rule for it — affects: none
-DRIFT: "no suite red" read from `verdicts` lines — the event has no per-suite verdict field — affects: none
-DRIFT: close-out clock anchor defined as the first engine-gone/owned lease/host-verify after the latest claim/close-out/engine-resume — the plan left it undefined — affects: none
-DRIFT: three whole-object test assertions widened to the new fields — additive fields break whole-object compares — affects: none
-DRIFT: extra model exports for screens and tests — needed by the hold/lerp wiring and pins — affects: none
-DRIFT: `runRowKey` moved into `run/model.ts` as a pure export — shape 11's key test runs without a DOM — affects: none
-DRIFT: `leg` also on the supervisor README's `GET /office` runs[] row — that row lists `stage`; shape 11 puts `leg` on every snapshot entry — affects: none
-DRIFT: the HUD clock is one held value with its elapsed tween keyed by mode and guard — a cross-clock lerp ran backwards past a guard that does not apply — affects: none
-DRIFT: the HUD's engine id is held — AC2 "every HUD value" — affects: none
-DRIFT: `requestCancel` added to `run/model.ts` — never post Cancel without a CSRF token; the inbox read is a parameter to avoid an import cycle — affects: none
+## Reconcile
+
+- 2026-11-10 — score 1; reconcile not required.
+- Gate: Part A not-required; Part B story accepted, planned 39-6-sessions-and-sub-agents-as-characters

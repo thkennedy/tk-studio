@@ -3,7 +3,7 @@
 import { describe, expect, it } from "vitest";
 import {
   CANCEL_CONSEQUENCE, canCancel, clockLabel, costView, CSRF_WORDS, endedWords, eventRows, EXTERNAL_WORDS, fetchRun, fetchStoryStages, fmtClock,
-  LOADING_STAGE, LOADING_STAGE_LOG, NO_TOKEN_PROJECT, postCancel, requestCancel, runClock, runRowKey, runTimeline, runWindow, storyIdOf, type RunEvent, type RunRow,
+  LOADING_STAGE, LOADING_STAGE_LOG, NO_TOKEN_PROJECT, postCancel, requestCancel, runClock, runRowKey, runTimeline, runWindow, stageLogKey, stagesAfterRead, storyIdOf, type RunEvent, type RunRow,
   type StageRowLike,
 } from "./model";
 import { fetchInbox } from "../inbox/model";
@@ -279,6 +279,92 @@ describe("the run page's row key (Settled shape 11: leg)", () => {
     expect(runRowKey({ ...row, stage: "close-out" })).not.toBe(before);
     expect(runRowKey({ ...row, state: "paused" })).not.toBe(before);
     expect(runRowKey({ state: "running", stage: "host verify leg" })).toBe(before); // an older supervisor: no leg
+  });
+
+  it("changes when the run's worker does (Settled shape 12)", () => {
+    const row = { state: "running", stage: "launching", leg: null, worker: null as { since: string } | null };
+    const before = runRowKey(row);
+    expect(runRowKey({ ...row, worker: { since: at(61) } })).not.toBe(before);
+    expect(runRowKey({ ...row, worker: { since: at(90) } })).not.toBe(runRowKey({ ...row, worker: { since: at(61) } }));
+    expect(runRowKey({ state: "running", stage: "launching", leg: null })).toBe(before); // an older supervisor: no worker
+  });
+});
+
+describe("the Stage Log read's key (R2, review pass 3)", () => {
+  it("changes when the store's row for the run does, besides story, project and last seq; null with nothing to read", () => {
+    const rowKey = runRowKey({ state: "running", stage: "dev attempt 1 of 2", leg: null, worker: { since: at(61) } });
+    const base = { storyId: "ST-178", project: "tk-studio", lastSeq: 7, rowKey };
+    const before = stageLogKey(base);
+    expect(before).not.toBeNull();
+    const moved = runRowKey({ state: "running", stage: "review pass 1 of 3", leg: null, worker: { since: at(61) } });
+    expect(stageLogKey({ ...base, rowKey: moved })).not.toBe(before); // the stage moved, no new queue event
+    expect(stageLogKey({ ...base, lastSeq: 8 })).not.toBe(before);
+    expect(stageLogKey({ ...base, storyId: "ST-179" })).not.toBe(before);
+    expect(stageLogKey({ ...base })).toBe(before);
+    expect(stageLogKey({ ...base, storyId: null })).toBeNull();
+    expect(stageLogKey({ ...base, project: null })).toBeNull();
+  });
+});
+
+describe("a requeued run (R3, review pass 3)", () => {
+  it("a requeued event closes the launch and engine segments at its at and opens a queued segment the next claimed closes", () => {
+    seq = 0;
+    const events = [
+      ev(0, "enqueued", {}, null, "queued"), ev(60, "claimed", {}, "queued", "running"), ev(61, "worker", { guard_s: 7200 }),
+      ev(120, "launched", {}), ev(900, "requeued", { reason: "requeued: supervisor restart" }, "running", "queued"),
+      ev(1000, "claimed", {}, "queued", "running"), ev(1001, "worker", { guard_s: 7200 }), ev(1100, "launched", {}),
+    ];
+    const t = runTimeline({ run: run({ state: "running", reason: null }), events, stageRows: [], liveStage: null, now: T0 + 2_000_000 });
+    expect(t.segments.filter((s) => s.kind !== "session").map((s) => [s.kind, s.start, s.end])).toEqual([
+      ["queued", at(0), at(60)], ["launch", at(60), at(120)], ["engine", at(120), at(900)],
+      ["queued", at(900), at(1000)], ["launch", at(1000), at(1100)], ["engine", at(1100), null],
+    ]);
+  });
+
+  it("a worker-only run requeued: the worker segment ends at the requeued event", () => {
+    seq = 0;
+    const events = [
+      ev(0, "enqueued", {}, null, "queued"), ev(60, "claimed", {}, "queued", "running"), ev(61, "worker", { guard_s: 600 }),
+      ev(300, "requeued", { reason: "requeued: supervisor restart" }, "running", "queued"),
+    ];
+    const t = runTimeline({ run: run({ state: "queued", reason: "requeued: supervisor restart", engine_run_id: null }), events, stageRows: [], liveStage: null, now: T0 + 400_000 });
+    expect(t.segments.map((s) => [s.kind, s.start, s.end])).toEqual([["queued", at(0), at(60)], ["worker", at(60), at(300)], ["queued", at(300), null]]);
+  });
+
+  it("the launch-or-worker label is per claim: a worker-only claim requeued, then a claim that launched", () => {
+    seq = 0;
+    const events = [
+      ev(0, "enqueued", {}, null, "queued"), ev(60, "claimed", {}, "queued", "running"), ev(61, "worker", { guard_s: 600 }),
+      ev(300, "requeued", { reason: "requeued: supervisor restart" }, "running", "queued"),
+      ev(400, "claimed", {}, "queued", "running"), ev(401, "worker", { guard_s: 7200 }), ev(500, "launched", {}),
+    ];
+    const t = runTimeline({ run: run({ state: "running", reason: null }), events, stageRows: [], liveStage: null, now: T0 + 600_000 });
+    expect(t.segments.filter((s) => s.kind !== "session").map((s) => [s.kind, s.start, s.end])).toEqual([
+      ["queued", at(0), at(60)], ["worker", at(60), at(300)], ["queued", at(300), at(400)],
+      ["launch", at(400), at(500)], ["engine", at(500), null],
+    ]);
+  });
+});
+
+describe("review pass 4 (Story 39.5)", () => {
+  it("a requeued run's queued clock counts from the latest requeued event, not the run's creation", () => {
+    seq = 0;
+    const events = [
+      ev(0, "enqueued", {}, null, "queued"), ev(60, "claimed", {}, "queued", "running"), ev(61, "worker", { guard_s: 600 }),
+      ev(300, "requeued", { reason: "requeued: supervisor restart" }, "running", "queued"),
+      ev(400, "claimed", {}, "queued", "running"), ev(500, "requeued", { reason: "requeued: supervisor restart" }, "running", "queued"),
+    ];
+    const c = runClock({ run: run({ state: "queued", created: at(0) }), events }, T0 + 530_000);
+    expect(c).toMatchObject({ mode: "queued", elapsed_s: 30, label: "00:00:30 queued (no guard until a worker starts)" });
+  });
+
+  it("a failed Stage Log re-read keeps the story's earlier rows and carries the error; another story's rows are dropped", () => {
+    const rows: StageRowLike[] = [{ stage: "dev" } as StageRowLike];
+    const ok = stagesAfterRead(null, "ST-178", { ok: true, rows });
+    expect(ok).toEqual({ story: "ST-178", rows, error: null });
+    expect(stagesAfterRead(ok, "ST-178", { ok: false, error: "boom" })).toEqual({ story: "ST-178", rows, error: "boom" });
+    expect(stagesAfterRead(ok, "ST-179", { ok: false, error: "boom" })).toEqual({ story: "ST-179", rows: null, error: "boom" });
+    expect(stagesAfterRead(null, "ST-178", { ok: false, error: "boom" })).toEqual({ story: "ST-178", rows: null, error: "boom" });
   });
 });
 

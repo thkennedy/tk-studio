@@ -242,8 +242,8 @@ export interface HudExtras {
   detailError?: { run_id: string; error: string } | null;
 }
 
-/** The HUD's `GET /runs/{id}` re-read key (Settled shape 11): the live run's id and its store row's `runRowKey` (its
- * `state`, `stage` and open host-verify `leg.since`); "" with no live run. The screen re-reads when it changes. */
+/** The HUD's `GET /runs/{id}` re-read key (Settled shapes 11 and 12): the live run's id and its store row's `runRowKey`
+ * (its `state`, `stage`, open host-verify `leg.since` and the worker's `worker.since`); "" with no live run. The screen re-reads when it changes. */
 export function hudRunKey(state: LiveState, project: string): string {
   const run = liveRunOf(state, project);
   return run ? `${run.run_id}|${runRowKey(run)}` : "";

@@ -2,16 +2,16 @@
 // link), the clock against the guard that applies, the timeline (a bar of segments proportional to their spans, the
 // engine's sessions under it, the host leg's suites as sub-cells), the cost per stage (else the run total), Cancel with
 // its consequence first (or the ended run's final state in words), and the events with `detail` folded.
-// `GET /runs/{id}` is read on mount and again when the store's row for the run changes (its state, stage or open host-verify
-// `leg`: `runRowKey`), never on a
+// `GET /runs/{id}` is read on mount and again when the store's row for the run changes (its state, stage, open host-verify
+// `leg` or `worker`: `runRowKey`), never on a
 // timer and never once the run has ended; the story's Stage Log (`GET /stories/{id}`) when a `plan-status` event names
-// it. A 1 s tick drives the clock only, while the run is live. The rules are `model.ts`.
+// it, read again whenever that row key or the run's last event changes (`stageLogKey`). A 1 s tick drives the clock only, while the run is live. The rules are `model.ts`.
 import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { fetchInbox } from "../inbox/model";
 import type { OfficeStore } from "../live/store";
 import {
   CANCEL_CONSEQUENCE, canCancel, costView, eventRows, fetchRun, fetchStoryStages, isTerminalState, LOADING_RUN, NO_STORY_YET, requestCancel, runClock, runRowKey, runTimeline,
-  runWindow, storyIdOf, type RunAnswer, type Segment, type StageRowLike,
+  runWindow, stageLogKey, stagesAfterRead, storyIdOf, type RunAnswer, type Segment, type StagesState,
 } from "./model";
 
 const font = "13px/1.4 ui-monospace, Menlo, Consolas, monospace";
@@ -31,7 +31,7 @@ export function RunScreen({ store, id, onNavigate }: { store: OfficeStore; id: s
   const [answer, setAnswer] = useState<RunAnswer | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [wake, setWake] = useState(0);
-  const [stages, setStages] = useState<{ story: string; rows: StageRowLike[] | null; error: string | null } | null>(null);
+  const [stages, setStages] = useState<StagesState | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const [confirming, setConfirming] = useState(false);
   const [cancelWords, setCancelWords] = useState<string | null>(null);
@@ -68,18 +68,21 @@ export function RunScreen({ store, id, onNavigate }: { store: OfficeStore; id: s
   const storyId = shown ? storyIdOf(shown.events) : null;
   const project = shown?.run.project_id ?? null;
   const lastSeq = shown?.events.at(-1)?.seq ?? 0;
+  // R2: the Stage Log is re-read on the store's row changing too (the same key as the run's re-read), not only on a new
+  // queue event.
+  const stagesKey = stageLogKey({ storyId, project, lastSeq, rowKey });
   useEffect(() => {
-    if (storyId === null || project === null) return;
+    if (stagesKey === null || storyId === null || project === null) return;
     let cancelled = false;
     setStages((s) => (s && s.story === storyId ? s : { story: storyId, rows: null, error: null }));
     void fetchStoryStages(project, storyId).then((r) => {
       if (cancelled) return;
-      setStages(r.ok ? { story: storyId, rows: r.rows, error: null } : { story: storyId, rows: null, error: r.error });
+      setStages((s) => stagesAfterRead(s, storyId, r));
     });
     return () => {
       cancelled = true;
     };
-  }, [storyId, project, lastSeq]);
+  }, [stagesKey]);
 
   // The clock's tick, while the run is live.
   useEffect(() => {

@@ -35,6 +35,10 @@
  * on every `office.progress` (`{run_id, epic, stage, leg, story?}`) — `{since: <at>}` while the latest
  * `host-verify-leg` lease has a non-null owner and no `host-verify` follows it, else null (`legOf`). A change of `leg`
  * alone (compared by its `since`) is an epic-only `office.progress`, so the web re-reads `GET /runs/{id}` on it.
+ * `worker` (operator ruling 2026-11-10, the second, additive): the worker's start beside `stage` and `leg` on the
+ * snapshot's `runs[]` and on every `office.progress` (`{run_id, epic, stage, leg, worker, story?}`) — `{since: <at>}`
+ * of the run's latest `worker` event when no `requeued` event follows it, else null (`workerOf`). A change of `worker`
+ * alone (compared by its `since`) is an epic-only `office.progress`, so the web re-reads `GET /runs/{id}` on it.
  */
 import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -355,8 +359,9 @@ export interface OfficeStory {
 }
 export interface OfficeEpic { spec_folder: string | null; done: number; deferred: number; failed: number; total: number; current_story: string | null }
 /** `stage` (Story 39.5, contract 0.1.35, additive): the run's stage by its `OFFICE_MAP` row (`stageOf`). */
-/** `leg` (operator ruling 2026-11-10, additive): the open host-verify leg (`legOf`), else null. */
-export interface OfficeRun { run_id: string; project: string | null; state: string; engine_run_id: string | null; stage: string; leg: { since: string } | null; epic: OfficeEpic; stories: OfficeStory[] }
+/** `leg` (operator ruling 2026-11-10, additive): the open host-verify leg (`legOf`), else null. `worker` (the
+ * second ruling, additive): the worker's start (`workerOf`), else null. */
+export interface OfficeRun { run_id: string; project: string | null; state: string; engine_run_id: string | null; stage: string; leg: { since: string } | null; worker: { since: string } | null; epic: OfficeEpic; stories: OfficeStory[] }
 /** `reason` (Story 30.4, contract 0.1.25, additive): what a `waiting-for-human` or `blocked` agent waits for; null in
  * every other state. */
 export interface OfficeAgent {
@@ -471,6 +476,15 @@ export function legOf(events: readonly QueueEvent[]): { since: string } | null {
   return owner !== null && owner !== undefined ? { since: events[at].at } : null;
 }
 
+/** Story 39.5 (`worker`, operator ruling 2026-11-10, the second): the worker's start — `{since: <at>}` of the run's
+ * latest `worker` event when no `requeued` event follows it, else null. A pause or the run's end does not clear it
+ * (the state carries those); a new `worker` event gives a new `since`. Not a liveness probe. */
+export function workerOf(events: readonly QueueEvent[]): { since: string } | null {
+  const at = lastIndex(events, kindIn("worker"));
+  if (at < 0 || lastIndex(events, kindIn("requeued")) > at) return null;
+  return { since: events[at].at };
+}
+
 /** Awaiting a ruling (Story 30.5 exports the rule `analyseRun` uses, for the board): the latest of the
  * pause/ruling/move-out kinds, when it is `awaiting-ruling` (the page's ruling check, `page.ts`, with `resumed`): a
  * close-out, a failed close-out, an engine resume or a newer pause ends it. Null otherwise. */
@@ -519,7 +533,7 @@ function pausedStoryOf(run: QueueRun, events: readonly QueueEvent[], entries: re
   return str(entries[at].story_key);
 }
 
-interface RunAnalysis { signals: Omit<OfficeSignals, "run">; leg: { since: string } | null; epic: OfficeEpic; stories: OfficeStory[]; waitReason: string | null; pausedStory: string | null }
+interface RunAnalysis { signals: Omit<OfficeSignals, "run">; leg: { since: string } | null; worker: { since: string } | null; epic: OfficeEpic; stories: OfficeStory[]; waitReason: string | null; pausedStory: string | null }
 
 /** Progress (AC2, planner ruling on the denominator): the first `stories-validated.count` manifest entries are the
  * run's stories, later ones `extra`; with no manifest the journal's `story-start` keys, the first `count` of them
@@ -641,7 +655,7 @@ function analyseRun(run: QueueRun, events: readonly QueueEvent[], problems: stri
       phase, limits: limitsOf(state), closingOut: closingOutHeld(events),
       attempt: posInt(task?.attempt), reviewCycle: posInt(task?.review_cycle),
     },
-    leg: legOf(events), epic, stories, waitReason, pausedStory: pausedStoryOf(run, events, entries),
+    leg: legOf(events), worker: workerOf(events), epic, stories, waitReason, pausedStory: pausedStoryOf(run, events, entries),
   };
 }
 
@@ -696,7 +710,7 @@ function projectCore(queue: Queue, given?: readonly QueueRun[]): {
       const a = analysis(r);
       return {
         run_id: r.run_id, project: r.project_id, state: r.state, engine_run_id: r.engine_run_id, stage: stageOf({ run: r, ...a.signals }),
-        leg: a.leg, epic: a.epic, stories: a.stories,
+        leg: a.leg, worker: a.worker, epic: a.epic, stories: a.stories,
       };
     }),
     lastRuns: () => {
@@ -918,13 +932,14 @@ export class OfficeHub {
       const p = prevRuns.get(r.run_id);
       const before = new Map((p?.stories ?? []).map((s) => [s.key, JSON.stringify(s)]));
       const changed = r.stories.filter((s) => before.get(s.key) !== JSON.stringify(s));
-      // Story 39.5: a change of `stage` or `leg` (by its `since`) alone is an epic-only progress delta; every delta
-      // carries both.
+      // Story 39.5: a change of `stage`, `leg` or `worker` (each by its `since`) alone is an epic-only progress delta;
+      // every delta carries all three.
       const leg = r.leg ?? null;
+      const worker = r.worker ?? null;
       if (p && !changed.length && JSON.stringify(p.epic) === JSON.stringify(r.epic) && (p.stage ?? null) === (r.stage ?? null)
-        && (p.leg?.since ?? null) === (leg?.since ?? null)) continue;
-      if (!p || !changed.length) this.emit(out, "office.progress", { run_id: r.run_id, epic: r.epic, stage: r.stage, leg });
-      else for (const s of changed) this.emit(out, "office.progress", { run_id: r.run_id, epic: r.epic, stage: r.stage, leg, story: s });
+        && (p.leg?.since ?? null) === (leg?.since ?? null) && (p.worker?.since ?? null) === (worker?.since ?? null)) continue;
+      if (!p || !changed.length) this.emit(out, "office.progress", { run_id: r.run_id, epic: r.epic, stage: r.stage, leg, worker });
+      else for (const s of changed) this.emit(out, "office.progress", { run_id: r.run_id, epic: r.epic, stage: r.stage, leg, worker, story: s });
     }
     const nextRuns = new Map(next.runs.map((r) => [r.run_id, r]));
     for (const r of next.runs) {
