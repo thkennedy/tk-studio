@@ -329,4 +329,7 @@ Gate: Part A adjust-stories; Part B story accepted, planned 39-3-the-studio-chat
 | review | 1 | 2026-11-09T21:55:05Z | 2026-11-09T22:31:23Z | ef7063e8-cb4a-4267-812e-f517d6ce422a | claude-opus-5-5 | medium | 9053170 | 82832 | 6.6483 | completed |
 | review | 2 | 2026-11-09T22:31:23Z | 2026-11-09T22:51:24Z | 23ebf148-ce25-4c16-8d18-088ef490a7ef | claude-opus-5-5 | medium | 6889256 | 60517 | 5.3721 | completed |
 | gate | 1 | 2026-11-09T22:51:25Z | 2026-11-09T22:54:23Z | a633f83f-e24a-4fb5-b6e0-0d849229e6db | claude-opus-5-5 | medium | 3717020 | 18133 | 2.1021 | completed |
+| host-leg | 1 | 2026-11-09T22:54:47Z | 2026-11-10T00:24:36Z | — | — | — | — | — | — | green |
+| close-out | 1 | 2026-11-10T00:24:36Z | 2026-11-10T00:24:44Z | — | — | — | — | — | — | PR |
+| merge | — | 2026-11-10T00:26:54Z | 2026-11-10T00:26:54Z | — | — | — | — | — | — | merged |
 
