@@ -406,6 +406,38 @@ class JobTestCase(unittest.TestCase):
             self.assertNotIn(key, defn)
         self.assertEqual(joblib.load_instances(self.root)["jobs"], [])
 
+    # ---------------- Story 39.3: the shipped studio-chat job type
+
+    def test_studio_chat_ships_as_a_one_shot_host_engage_job(self):
+        entry = joblib.load_types()["studio-chat"]
+        self.assertEqual(entry["problems"], [])
+        self.assertEqual(entry["path"], "jobs/studio-chat.json")
+        defn = entry["definition"]
+        self.assertEqual(defn["id"], "studio-chat")
+        self.assertIn("Story 39.3", defn["description"])
+        self.assertEqual(defn["target"], {"skill": "tk-studio-engage",
+                                          "payload": {"verb": "studio-reply"}})
+        self.assertNotIn("core", defn["target"])
+        self.assertEqual(defn["trigger"], "one-shot")
+        self.assertNotIn("cadence", defn)
+        self.assertEqual(defn["requires"], {"tier": "host"})
+        self.assertEqual(defn["guards"], {"max_turns": 40,
+                                          "max_wall_clock_seconds": 600})
+        # each owner line is one run of the job: a far `until`, never
+        # `max_runs` (`jobrun.evaluate_stop` counts every run) or `on_status`
+        self.assertEqual(defn["stop"], {"until": "9999-12-31T23:59:59Z"})
+        self.assertNotIn("max_runs", defn["stop"])
+        self.assertNotIn("on_status", defn["stop"])
+        # the planner leg's model and effort are passed at enqueue
+        for key in ("model", "effort", "on_status"):
+            self.assertNotIn(key, defn)
+        path = joblib.PLUGIN_ROOT / "jobs" / "studio-chat.json"
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            code = joblib.main(["validate", "--file", str(path)])
+        self.assertEqual(code, 0)
+        self.assertIs(json.loads(out.getvalue())["ok"], True)
+        self.assertEqual(joblib.load_instances(self.root)["jobs"], [])
+
     # ---------------- Story 35.7: the shipped run-sweep job type
 
     def test_run_sweep_ships_in_run_epics_shape(self):

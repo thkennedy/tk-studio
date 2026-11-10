@@ -549,6 +549,9 @@ export const isSweep = (defn: Record<string, any> | null | undefined): boolean =
 export const VALIDATE_RESOLUTION_JOB = "validate-resolution";
 /** Story 32.2: the shipped job the chat route queues (`chat.ts`), one run per owner line (`enqueue`'s `stack`). */
 export const ENGAGEMENT_CHAT_JOB = "engagement-chat";
+/** Story 39.3: the shipped job the studio chat route queues (`studiochat.ts`), one run per owner line (`stack`, as
+ * `ENGAGEMENT_CHAT_JOB`), on its own lock lane `<lock checkout>#studio-chat`. */
+export const STUDIO_CHAT_JOB = "studio-chat";
 
 /** The worker options a run records while `queued` (Story 21.4). */
 export interface RunOptionsRecord { tier?: string | null; sandbox?: string | null; model?: string | null; effort?: string | null; base_ref?: string | null }
@@ -698,7 +701,7 @@ CREATE TABLE IF NOT EXISTS runs (
   created TEXT NOT NULL, updated TEXT NOT NULL,
   FOREIGN KEY (job_id, checkout) REFERENCES jobs (job_id, checkout)
 );
-CREATE UNIQUE INDEX IF NOT EXISTS runs_one_live ON runs (job_id, checkout) WHERE state IN ('queued','running','paused','external') AND job_id <> 'engagement-chat';
+CREATE UNIQUE INDEX IF NOT EXISTS runs_one_live ON runs (job_id, checkout) WHERE state IN ('queued','running','paused','external') AND job_id NOT IN ('engagement-chat','studio-chat');
 CREATE TABLE IF NOT EXISTS events (
   seq INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, at TEXT NOT NULL, kind TEXT NOT NULL,
   from_state TEXT, to_state TEXT NOT NULL, detail TEXT
@@ -778,14 +781,16 @@ const ADDED_RUN_COLUMNS = [
 
 /** Story 27.1: the one-live-run index — a `paused` run is the job's live run too (enqueue mints no second);
  * Story 27.2: so is an `external` one. Story 32.2: `engagement-chat` (the one job `enqueue`'s `stack` applies to) is
- * left out, so a chat turn mints behind a live one; every other job keeps one live run per checkout. */
-const LIVE_INDEX = `CREATE UNIQUE INDEX IF NOT EXISTS runs_one_live ON runs (job_id, checkout) WHERE state IN ('queued','running','paused','external') AND job_id <> '${ENGAGEMENT_CHAT_JOB}'`;
+ * left out, so a chat turn mints behind a live one; every other job keeps one live run per checkout. Story 39.3: so is
+ * `studio-chat`. */
+const LIVE_INDEX = `CREATE UNIQUE INDEX IF NOT EXISTS runs_one_live ON runs (job_id, checkout) WHERE state IN ('queued','running','paused','external') AND job_id NOT IN ('${ENGAGEMENT_CHAT_JOB}','${STUDIO_CHAT_JOB}')`;
 
-/** Story 27.1/27.2: an index from before `paused` or `external` (Story 32.2: or the `engagement-chat` exclusion) is
- * dropped and recreated with them. */
+/** Story 27.1/27.2: an index from before `paused` or `external` (Story 32.2: or the `engagement-chat` exclusion; Story
+ * 39.3: or the `studio-chat` one) is dropped and recreated with them. */
 function widenLiveIndex(db: Database): void {
   const row = db.query("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'runs_one_live'").get() as { sql: string } | null;
-  if (row?.sql.includes("'paused'") && row.sql.includes("'external'") && row.sql.includes(`'${ENGAGEMENT_CHAT_JOB}'`)) return;
+  if (row?.sql.includes("'paused'") && row.sql.includes("'external'") && row.sql.includes(`'${ENGAGEMENT_CHAT_JOB}'`)
+    && row.sql.includes(`'${STUDIO_CHAT_JOB}'`)) return;
   db.exec("DROP INDEX IF EXISTS runs_one_live");
   db.exec(LIVE_INDEX);
 }
@@ -1197,8 +1202,9 @@ export class Queue {
     payload?: Record<string, unknown> | null;
   } & RunOptionsRecord): { run: QueueRun; minted: boolean } {
     const checkout = checkoutKey(input.root);
-    // Story 32.2: `stack` applies to `engagement-chat` only (the live-run index leaves only it out); any other job adopts.
-    const stack = input.stack === true && input.jobId === ENGAGEMENT_CHAT_JOB;
+    // Story 32.2: `stack` applies to `engagement-chat` (Story 39.3: and `studio-chat`) only (the live-run index leaves only
+    // them out); any other job adopts.
+    const stack = input.stack === true && (input.jobId === ENGAGEMENT_CHAT_JOB || input.jobId === STUDIO_CHAT_JOB);
     return this.db.transaction(() => {
       const live = stack ? null : this.db.query(
         "SELECT * FROM runs WHERE job_id = ? AND checkout = ? AND state IN ('queued','running','paused','external') ORDER BY created LIMIT 1",

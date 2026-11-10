@@ -1,6 +1,6 @@
 ---
 name: tk-studio-engage
-description: The planner leg of an engagement — `reply` reads the engagement's memory (the record, the chat so far, the plan under `_bmad-output/planning-artifacts/`, `kb/` and `kb/confluence/`) and writes the planner's reply line, with optional proposals the owner can press, to the engagement's `chat.jsonl`; `questions` writes at most three multiple-choice clarifying questions, each with a default, for the owner's inbox; `scope` writes and publishes the scope of work; `quote` prices the scope as a seeded 50/85/95 band with a hard cap from the studio's own history and proposes `go`; `closeout` (run by the supervisor once the engagement's last run ends, never by the planner) writes and publishes the delivery report. Use when a supervisor `engagement-chat` payload names this skill, or the user says "reply in the engagement chat" or "tk engage reply".
+description: The planner leg of an engagement — `reply` reads the engagement's memory (the record, the chat so far, the plan under `_bmad-output/planning-artifacts/`, `kb/` and `kb/confluence/`) and writes the planner's reply line, with optional proposals the owner can press, to the engagement's `chat.jsonl`; `questions` writes at most three multiple-choice clarifying questions, each with a default, for the owner's inbox; `scope` writes and publishes the scope of work; `quote` prices the scope as a seeded 50/85/95 band with a hard cap from the studio's own history and proposes `go`; `closeout` (run by the supervisor once the engagement's last run ends, never by the planner) writes and publishes the delivery report; `studio-reply` answers one line of the studio chat (`studiochat.py`) with proposals. Use when a supervisor `engagement-chat` or `studio-chat` payload names this skill, or the user says "reply in the engagement chat" or "tk engage reply".
 ---
 
 # tk-studio-engage
@@ -314,6 +314,73 @@ presses through the supervisor's `POST /engagements/{id}/input`.
 
 If the deterministic core is unrunnable — a tool call denied by permissions, `uv`/python unavailable — end `blocked` with the status block naming the unrunnable core as `reason`: never a question, never a headless run that ends without the block (AD-11).
 
+## The studio chat: studio-reply (Story 39.3)
+
+The owner's chat at `/app/chat` is a conversation with the studio, not with
+an engagement (design addendum 2026-11-07 §3.8, AD-11). Each owner line
+queues one run of the shipped one-shot `studio-chat` job: a `claude -p`
+session of the planner leg, on the host, with this plugin and the payload
+`{verb: "studio-reply", project, project_root, seq, run_id}`. The session
+runs the `tk-studio-orchestrator` core headless and answers one line. It
+moves no state, holds no bearer and no CSRF token, and commits nothing: an
+action is a proposal, a button the owner presses.
+
+1. **Read the context** (read-only):
+
+   ```bash
+   uv run "${CLAUDE_PLUGIN_ROOT}/lib/studiochat.py" context \
+     --directory <project_root> --seq <seq>
+   ```
+
+   The result is `{ok, dry_run, mode: "context", seq, line, chat[], reads,
+   routing, voice, shell?, not_yet[], notes[], written[]}` with the status
+   block last: `line` the owner's line, `chat[]` the last 40 lines of
+   `_bmad-output/tracking/studio-chat.jsonl` up to it, `reads` the
+   supervisor's reads written at post time (`studio-chat-reads/<seq>.json`:
+   the board, the office, the status and live runs, the project's last ten
+   runs with their ledger cost, the inbox — what `GET /board`, `GET /office`,
+   `GET /status`, `GET /runs/{id}` and `GET /inbox` answer), or `null` with
+   a note; `routing` the orchestrator core's own answer, exactly what
+   `orchestrate.py resolve --directory <project_root>` prints; `voice`
+   `council` when the line names the council, else `plain`; `shell` the
+   council persona shell, present only for the council voice. Refusals:
+   `UnknownLine` (no owner line `seq`), `ChatUnreadable`.
+
+2. **Handle the outcome.** `routing.outcome` `needs-onboarding` ends
+   `blocked` naming `routing.gaps[]` (the orchestrator's headless rule;
+   never invent a working set). Otherwise answer the line from `reads` and
+   the routing's framing: "what is running" costs a read, never a plan. Use
+   the plain studio voice; the council shell is presentation only, used
+   when `voice` is `council`, and never changes the routing.
+
+3. **Emit the reply** once, between `<reply>` and `</reply>`, before the
+   record is written: the supervisor streams the text between the markers
+   to the page as it is produced. The status block (step 4) is still the
+   session's last output (AD-11).
+
+4. **Write the record** with the same text (UTF-8 files, never the command
+   line):
+
+   ```bash
+   uv run "${CLAUDE_PLUGIN_ROOT}/lib/studiochat.py" reply \
+     --directory <project_root> --seq <seq> --run-id <run_id> \
+     --body-file <path> [--proposals-file <path>] [--dry-run]
+   ```
+
+   It appends `{seq, at, author: "planner", body, run_id, reply_to,
+   proposals[]}` (`reply_to` the owner line's `seq`; one reply per line).
+   `proposals[]` is at most 6 objects `{kind, label (1–80)}` plus the
+   kind's fields and no other: `queue {project, job}`, `answer {id,
+   letter, note, issue}` (`id` the question's id as its inbox item asks
+   it, `letter` A–Z, `note` possibly empty, `issue` the inbox item's key),
+   `open {route}` (a page under `/app`), `engagement {title}`.
+   `stop-after-story` and `open-studio` are refused by name
+   (`ProposalNotYet: <kind> lands in Story 39.7`): drop them and say in the
+   body that the action arrives with Story 39.7. Its other refusals (exit
+   2): `BodyEmpty`, `BodyTooLarge`, `RunIdRequired`, `UnknownLine`,
+   `AlreadyAnswered`, `ProposalInvalid: <index>: <why>`, `ChatBusy`,
+   `ChatUnwritable`. Relay the status block as in step 8 above.
+
 ## Rules
 
 - The planner never moves state, never sends an input, and never holds a
@@ -324,6 +391,8 @@ If the deterministic core is unrunnable — a tool call denied by permissions, `
   record's `scope_page` and the Confluence scope page (Story 32.4), and the
   record's `quote` (Story 32.5; its `basis.epics[].usd_estimate`, never
   `.tk-studio/budget-bands.yaml`); the supervisor's `closeout` (Story 32.8) writes
-  `closeout.md`, its Confluence page and the record's `closeout`; nothing
+  `closeout.md`, its Confluence page and the record's `closeout`; the
+  studio chat's reply (Story 39.3) is one line of
+  `_bmad-output/tracking/studio-chat.jsonl`; nothing
   is committed, nothing is promoted.
 - All paths resolve through `${CLAUDE_PLUGIN_ROOT}`.

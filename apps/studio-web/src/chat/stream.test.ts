@@ -205,3 +205,40 @@ describe("the chat stream", () => {
     expect(FakeEventSource.instances).toHaveLength(1);
   });
 });
+
+// Story 39.3: the studio chat's stream — no id: `/chat?project=&since=`, its `chat-delta` frames reach onDelta, a
+// malformed delta is ignored, and the delta listener is removed with the source.
+describe("the studio chat stream", () => {
+  const emitDelta = (src: FakeEventSource, data: unknown) => {
+    if (src.readyState === 0) src.connect();
+    for (const fn of [...(src.listeners.get("chat-delta") ?? [])]) fn({ data: typeof data === "string" ? data : JSON.stringify(data) } as MessageEvent);
+  };
+
+  it("opens on /chat?project= (no id) and replays after since", () => {
+    openChatStream({ project: "p q", since: 0, onLine: () => {} }, { EventSource: FakeEventSource, visibility: vis });
+    expect(latest().url).toBe("/chat?project=p%20q");
+    openChatStream({ project: "p", since: 4, onLine: () => {} }, { EventSource: FakeEventSource, visibility: vis });
+    expect(latest().url).toBe("/chat?project=p&since=4");
+  });
+
+  it("delivers a chat-delta to onDelta and ignores a malformed one", () => {
+    const deltas: unknown[] = [];
+    const s = openChatStream({ project: "p", since: 0, onLine: (l) => got.push(l), onDelta: (d) => deltas.push(d) }, { EventSource: FakeEventSource, visibility: vis });
+    emitDelta(latest(), { run_id: "r1", reply_to: 1, from: 0, text: "Hel" });
+    emitDelta(latest(), "{not json");
+    emitDelta(latest(), { run_id: "r1", reply_to: 1, from: -1, text: "x" });
+    emitDelta(latest(), { run_id: "r1", reply_to: "1", from: 3, text: "x" });
+    emitDelta(latest(), { run_id: "r1", reply_to: 1, from: 3, text: "lo" });
+    expect(deltas).toEqual([
+      { run_id: "r1", reply_to: 1, from: 0, text: "Hel" },
+      { run_id: "r1", reply_to: 1, from: 3, text: "lo" },
+    ]);
+    // a delta carries no seq: the last seq is unchanged
+    expect(s.lastSeq()).toBe(0);
+    latest().emit(line(1, "owner"));
+    expect(got.map((l) => l.seq)).toEqual([1]);
+    const first = latest();
+    s.close();
+    expect(first.listenerCount()).toBe(0);
+  });
+});

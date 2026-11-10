@@ -173,6 +173,37 @@ desktop or the iPad, without a terminal. The switch gains Chat (`src/screen.ts`)
   across projects (none: no count). The open engagement is remembered per browser under `tk-studio.web.chat` as
   `{project, id}`.
 
+## The studio chat (Story 39.3)
+
+`/app/chat` is a conversation with the studio itself (addendum §3.8, F-C), not with an engagement: the engagement
+chats stay at `/app/chat/<id>` (the Chat screen above). `src/App.tsx` mounts `src/chat/StudioChatScreen.tsx` for the
+route `chat` (in place of 39.1's "Not built yet: Story 39.3" strip, so `PLACEHOLDER` no longer lists `chat`) and
+`ChatScreen` for the route `engagement`. The rules are the `// the studio chat (Story 39.3)` section of
+`src/chat/model.ts` (vitest, `environment: "node"`); the stream is `src/chat/stream.ts` without an `id`.
+
+- **What it reads and sends.** A served project (`GET /agents`, the remembered office project), its CSRF token (`GET
+  /inbox?project=`; with none, Send and every press are disabled), the lines (`GET /chat?project=`, then the stream
+  `GET /chat?project=&since=<last seq>`). Send posts `POST /chat {project, text}`: the text is at most 4,000
+  characters (code points), its count shown past 3,500; a `400 LineTooLong` is shown by name and the text is kept. The
+  answer's `note` ("Queued behind the reply to '…'") is shown under the line. One line "Engagement chats:" links each
+  of the project's engagements (`GET /engagements?project=`) to `/app/chat/<id>`.
+- **The conversation.** The owner's lines, the planner's replies (a failure reply in red), the press lines `pressed:
+  <label>`, the streaming reply ending in a cursor `▍` until its reply lands, and the pending label: position 1
+  "Waiting for the planner's reply (about a minute)", position n ≥ 2 "… — queued behind the reply to '<excerpt>'
+  (position <n>)", the excerpt the previous pending line's body with whitespace collapsed, cut at 40 code points with
+  `…` (`excerpt`, the supervisor's fixtures).
+- **The stream.** `event: chat` lines as the engagement chat's, plus `event: chat-delta` `{run_id, reply_to, from,
+  text}` (no `id:`; a malformed delta ignored). `applyDelta` is `text.slice(0, from) + delta.text` while `from` is
+  within the text (in order, an overlap, from 0 after a reconnect); a `from` past the end is ignored. The record is
+  authoritative: a reply with `reply_to` R drops R's streaming text, and a later delta for R is dropped.
+- **The proposals.** Each proposal is a button (`proposalAction`): `queue` → `POST /jobs {project, job, proposal:
+  {chat, seq, index}}` with the CSRF token (the cookie is admitted only for a recorded matching proposal); `answer` →
+  `POST /inbox/{issue}/reply {project, body}` with the body `<id>: <letter>` and the note on its own line when it is
+  not blank; `open` → the router's navigation to its `/app` route; `engagement` → `POST /engagements?project=`
+  `{project, request: title}`. On a 2xx (for `open`, before navigating) the screen posts `POST /chat {project,
+  pressed: {seq, index}}` and the supervisor records the press line; a pressed proposal renders disabled ("Pressed").
+  `stop-after-story` and `open-studio` render disabled, "Not built yet: Story 39.7".
+
 ## The addresses (Story 39.1)
 
 The web has URLs under `/app` (addendum §3.3), served by the supervisor's single-page fallback. `src/screen.ts` is the
@@ -189,7 +220,7 @@ the History API (`createRouter(win)`, the browser's `window` or a fake; no route
 | `/app/run/<run-id>` | `Not built yet: Story 39.5` |
 | `/app/inbox` | the Inbox |
 | `/app/inbox/<KEY>[?project=]` | the Issue screen; the project is `?project=`, else the open inbox row's (`Loading the inbox…` while it loads; with none, the failed inbox reads `error <project>: <msg>`, one per line, when a read failed, else `Not in the inbox: <KEY>`) |
-| `/app/chat` | the engagement Chat screen under the strip `Not built yet: Story 39.3` (the studio chat) |
+| `/app/chat` | the studio chat (Story 39.3; until then the engagement Chat screen under the strip `Not built yet: Story 39.3`) |
 | `/app/chat/<engagement-id>[?project=]` | the Chat screen opened on it; the project is `?project=`, else the store's single project for the id, else (once the store's snapshot is in; before it, no project: the screen waits) the remembered chat project |
 | `/app/checkin/<engagement-id>/<n>[?project=]` (`n` ≥ 1) | `Not built yet: Story 39.7` |
 | `/app/status` | the Status screen |

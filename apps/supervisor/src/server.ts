@@ -275,6 +275,9 @@ export function runProcess(
      * If it throws, the child's tree is killed and the call fails `worker record failed: <cause>`
      * (a worker is never left running unrecorded). */
     onSpawn?: (pid: number) => void;
+    /** Story 39.3: each stdout chunk as it arrives (the studio chat's tap); called in a try/catch, so a throwing tap
+     * never reaches the child or the result. */
+    onStdout?: (chunk: string) => void;
   },
 ): Promise<RunResult> {
   return new Promise((resolve, reject) => {
@@ -316,7 +319,10 @@ export function runProcess(
     }, opts.timeoutS * 1000);
     child.stdout!.setEncoding("utf-8");
     child.stderr!.setEncoding("utf-8");
-    child.stdout!.on("data", (c: string) => { stdout += c; });
+    child.stdout!.on("data", (c: string) => {
+      stdout += c;
+      if (opts.onStdout) { try { opts.onStdout(c); } catch { /* the tap never reaches the worker */ } }
+    });
     child.stderr!.on("data", (c: string) => { stderr += c; });
     child.on("error", (e) => {
       untrack();
@@ -466,8 +472,10 @@ export function validateDenyProfile(path: string, read: (p: string) => string = 
   return { path: canonical, deny: deny as string[] };
 }
 
-/** The `claude -p` command line: `--output-format json` always (the status
- * block rides `result`, the cost rides `total_cost_usd`); model/effort
+/** The `claude -p` command line: `--output-format json` (the status
+ * block rides `result`, the cost rides `total_cost_usd`) — Story 39.3: `stream-json` for the studio chat only
+ * (`--output-format stream-json --verbose --include-partial-messages`: NDJSON whose last object is the same result,
+ * so `parseWorkerResult` reads it unchanged); model/effort
  * forwarded verbatim when present (§5 — never escalated). A deny-only
  * settings profile (validated, else DenyProfileRefused) rides `--settings`;
  * it can only add denials — settings.json `permissions.deny` stays intact. */
@@ -481,6 +489,8 @@ export function buildWorkerCommand(opts: {
    * (the same id — never `--fork-session`). */
   sessionId?: string;
   resume?: boolean;
+  /** Story 39.3: default `json`; `stream-json` (the studio chat) adds `--verbose --include-partial-messages`. */
+  outputFormat?: "json" | "stream-json";
 }): WorkerCommand {
   const tier = checkTier(opts.tier);
   const mode = opts.permissionMode ?? HOST_PERMISSION_MODE;
@@ -489,7 +499,9 @@ export function buildWorkerCommand(opts: {
     const allowed = tier === "host" ? PERMISSION_MODES.filter((m) => m !== "bypassPermissions") : PERMISSION_MODES;
     throw new Error(`permission_mode must be one of ${allowed.join("|")}`);
   }
-  const argv = ["-p", opts.prompt, "--output-format", "json", "--permission-mode", mode];
+  const argv = opts.outputFormat === "stream-json"
+    ? ["-p", opts.prompt, "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--permission-mode", mode]
+    : ["-p", opts.prompt, "--output-format", "json", "--permission-mode", mode];
   if (opts.denyProfile !== undefined) {
     const profile = validateDenyProfile(opts.denyProfile).path; // exactly the file validated
     argv.push("--settings", tier === "host" ? profile : vmDenyProfile(opts.denyProfile, profile, opts.root));
@@ -615,13 +627,16 @@ export function buildWorkerEnv(
 
 export type Spawner = (cmd: string, args: string[], opts: {
   cwd?: string; timeoutS: number; env?: Record<string, string | undefined>; onSpawn?: (pid: number) => void;
+  /** Story 39.3: each stdout chunk as it arrives (the studio chat's tap). */
+  onStdout?: (chunk: string) => void;
 }) => Promise<RunResult>;
 
 async function runClaude(
   cmd: WorkerCommand, cwd: string, timeoutS: number, spawner: Spawner, onSpawn?: (pid: number) => void, extraEnv: Record<string, string> = {},
+  onStdout?: (chunk: string) => void,
 ): Promise<RunResult> {
   try {
-    return await spawner(cmd.bin, cmd.argv, { cwd, timeoutS, env: { ...buildWorkerEnv(), ...extraEnv }, ...(onSpawn ? { onSpawn } : {}) });
+    return await spawner(cmd.bin, cmd.argv, { cwd, timeoutS, env: { ...buildWorkerEnv(), ...extraEnv }, ...(onSpawn ? { onSpawn } : {}), ...(onStdout ? { onStdout } : {}) });
   } catch (e) {
     // A timeout and a failed worker record keep their own names.
     throw e instanceof Error && !/timed out/.test(e.message) && !e.message.startsWith(WORKER_RECORD_FAILED)
@@ -1089,6 +1104,10 @@ export interface InvokeOptions {
   /** Story 34.5: read after the pin — the run's live engine MCP env (`TK_ENGINE_MCP_URL`, `TK_ENGINE_MCP_BEARER`), passed
    * into the sandbox by name (`sbx exec -e <NAME>`), the values in the spawn env only; undefined: none. sbx tier only. */
   engineMcpEnv?: () => Record<string, string> | undefined;
+  /** Story 39.3: the worker's output format (default `json`; the studio chat's `stream-json`). */
+  outputFormat?: "json" | "stream-json";
+  /** Story 39.3: each worker stdout chunk as it arrives (the studio chat's tap; errors swallowed by `runProcess`). */
+  onStdout?: (chunk: string) => void;
 }
 
 /** The one `-p` item of a resumed worker (`--resume <session-id>`): the session's
@@ -1146,6 +1165,7 @@ export async function invokeSkill(
     effort: typeof args.effort === "string" ? args.effort : undefined,
     denyProfile: args.deny_profile === undefined ? undefined : String(args.deny_profile),
     ...(opts.sessionId ? { sessionId: opts.sessionId, resume: opts.resume === true } : {}),
+    ...(opts.outputFormat ? { outputFormat: opts.outputFormat } : {}),
   });
   let cmd = vmRoot ? buildSbxCommand({ sandbox: sandbox!, vmRoot, worker: workerCmd, guardS: timeoutS }) : workerCmd;
 
@@ -1177,7 +1197,7 @@ export async function invokeSkill(
   // above are not part of the guard's budget (the host timer starts here).
   opts.beforeSpawn?.();
   const spawnedMs = performance.now();
-  const res = await runClaude(cmd, root, timeoutS, spawner, opts.onSpawn, mcpEnv ?? {});
+  const res = await runClaude(cmd, root, timeoutS, spawner, opts.onSpawn, mcpEnv ?? {}, opts.onStdout);
   const workerElapsedS = (performance.now() - spawnedMs) / 1000;
   const worker = parseWorkerResult(res.stdout);
   const block = extractStatusBlock(worker.text);

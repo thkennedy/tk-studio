@@ -26,11 +26,11 @@ export type Route =
 export const HOME_PATH = "/app/office";
 
 /** The screens not built yet, each naming the story that builds it. Story 39.2: `/app/settings` is the Settings screen
- * (the Sandbox login card); `settings` names its part still to build, Story 39.8's model and effort. */
+ * (the Sandbox login card); `settings` names its part still to build, Story 39.8's model and effort. Story 39.3:
+ * `/app/chat` is the studio chat (`chat/StudioChatScreen.tsx`), no longer a placeholder. */
 export const PLACEHOLDER = {
   story: "Not built yet: Story 39.4",
   run: "Not built yet: Story 39.5",
-  chat: "Not built yet: Story 39.3",
   checkin: "Not built yet: Story 39.7",
   settings: "Not built yet: Story 39.8",
 } as const;

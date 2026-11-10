@@ -40,7 +40,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { findSpec, jiraBound, trackBlockSincePause } from "./closeout";
 import { readInbox } from "./office";
-import { checkoutKey, ENGAGEMENT_CHAT_JOB, isTerminal, servedRoot, VALIDATE_RESOLUTION_JOB, type Queue, type QueueRun } from "./queue";
+import { checkoutKey, ENGAGEMENT_CHAT_JOB, isTerminal, servedRoot, STUDIO_CHAT_JOB, VALIDATE_RESOLUTION_JOB, type Queue, type QueueRun } from "./queue";
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const clip = (s: string, n = 500) => s.replace(/\/\/[^/@\s]+@/g, "//[redacted]@").trim().slice(0, n);
@@ -276,19 +276,21 @@ export async function resolutionPass(queue: Queue, deps: ResolutionDeps): Promis
   return out;
 }
 
-/** The jobs whose queued runs carry an enqueued payload (Story 31.7 `validate-resolution`, Story 32.2 `engagement-chat`). */
-const PAYLOAD_JOBS: ReadonlySet<string> = new Set([VALIDATE_RESOLUTION_JOB, ENGAGEMENT_CHAT_JOB]);
+/** The jobs whose queued runs carry an enqueued payload (Story 31.7 `validate-resolution`, Story 32.2 `engagement-chat`,
+ * Story 39.3 `studio-chat`). */
+const PAYLOAD_JOBS: ReadonlySet<string> = new Set([VALIDATE_RESOLUTION_JOB, ENGAGEMENT_CHAT_JOB, STUDIO_CHAT_JOB]);
 
 /** Story 31.7: the definition a `validate-resolution` run is driven with — `defn` with the queue's stored
  * definition's `target.payload` (the payload the pass enqueued) overlaid; any other job, or no stored payload,
  * answers `defn` unchanged. Story 32.2: an `engagement-chat` run is driven with its own payload (`run.payload`, the
  * `enqueued` event's: `{engagement, project, seq}`, never the job row's, which the latest mint overwrites) plus its
- * `run_id`, over the definition's `target.payload` (`{verb: "reply"}`); no per-run payload answers `defn` unchanged. */
+ * `run_id`, over the definition's `target.payload` (`{verb: "reply"}`); no per-run payload answers `defn` unchanged.
+ * Story 39.3: a `studio-chat` run likewise (`{project, project_root, seq}` over `{verb: "studio-reply"}`). */
 export function withStoredPayload(
   jobId: string, defn: Record<string, any>, stored: Record<string, any> | null | undefined,
   run?: { run_id: string; payload?: Record<string, unknown> | null } | null,
 ): Record<string, any> {
-  if (jobId === ENGAGEMENT_CHAT_JOB) {
+  if (jobId === ENGAGEMENT_CHAT_JOB || jobId === STUDIO_CHAT_JOB) {
     const own = run?.payload;
     if (!run || !own || typeof own !== "object") return defn;
     return { ...defn, target: { ...(defn.target ?? {}), payload: { ...(defn.target?.payload ?? {}), ...own, run_id: run.run_id } } };

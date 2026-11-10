@@ -122,7 +122,7 @@ import {
   closeOut, closeOutDetail, launchedCloseOutInput, launchedNoEngine, meteredCost, pendingCloseOut, prepareWorktree, priorPr, sweepEngines, WorktreeFailed, type WorktreeDeps,
 } from "./worktree";
 import {
-  checkoutKey, defaultProbes, engineRoot, type EngineWhere, servedRoot, isTerminal, LAUNCH_SKILL, VALIDATE_RESOLUTION_JOB, ENGAGEMENT_CHAT_JOB, ORPHANED_REASON, probeLaunchEngine, processStartTime, Queue, RunTerminal, selfOwner, STUDIO_END_RETRY_LIMIT, workerMayRun,
+  checkoutKey, defaultProbes, engineRoot, type EngineWhere, servedRoot, isTerminal, LAUNCH_SKILL, VALIDATE_RESOLUTION_JOB, ENGAGEMENT_CHAT_JOB, STUDIO_CHAT_JOB, ORPHANED_REASON, probeLaunchEngine, processStartTime, Queue, RunTerminal, selfOwner, STUDIO_END_RETRY_LIMIT, workerMayRun,
   type Holder, type LaunchEngine, type Owner, type QueueRun, type RecoverReport, type RunState, type StudioEnder, type StudioFinder, type StudioOps, type StudioResumer, type TerminalState,
   type SandboxLoginLease, type WorkerKill,
 } from "./queue";
@@ -135,6 +135,7 @@ import { runEngineStop } from "./runners";
 import { launchedPass, mergePass, reviewPass, startedStories, storyStarted, type PlanStatusDeps } from "./planstatus";
 import { resolutionPass, withQueuedPayload, withStoredPayload, type ResolutionDeps } from "./resolution";
 import { chatSpendPass, type ChatDeps, type ChatSpendDeps } from "./chat";
+import { studioChatPass, studioChatTap } from "./studiochat";
 import { questionsPass, type QuestionsDeps } from "./questions";
 import { scopePass, type ScopeDeps } from "./scope";
 import { approvePass, engagementRunPass, engagementRunSpendPass, type ApproveDeps, type RunSpendDeps, type Submitter } from "./approve";
@@ -328,6 +329,8 @@ export interface RunOptions {
   resolution?: Partial<ResolutionDeps> | false;
   /** Story 32.2: the chat-spend pass (`chatSpendQuietly`) — injected deps, or `false` to skip it. */
   chatSpend?: Partial<ChatSpendDeps> | false;
+  /** Story 39.3: the studio-chat pass (`studioChatQuietly`) — injected deps, or `false` to skip it. */
+  studioChat?: { now?: () => number } | false;
   /** Story 32.3: the engagement questions pass (`questionsQuietly`) — injected deps, or `false` to skip it. */
   questions?: Partial<QuestionsDeps> | false;
   /** Story 32.4: the engagement scope pass (`scopeQuietly`) — injected deps, or `false` to skip it. */
@@ -726,6 +729,7 @@ export async function recoverQueue(opts: RunOptions = {}, verbRunner: VerbRunner
     await closeOutPaused(queue, pausedDeps(opts)); // Story 27.3: a paused run whose story landed is closed out
     await resolveQuietly(queue, opts); // Story 31.7: queue validate-resolution from resolved items; re-arm on a pass
     chatSpendQuietly(queue, opts); // Story 32.2: the chat runs' costs into each engagement's spend.planning_usd
+    studioChatQuietly(queue, opts); // Story 39.3: a studio-chat turn that ended without a reply, and its files
     runSpendQuietly(queue, opts); // Story 32.6: the engagement runs' costs into each engagement's spend.runs_usd
     await questionsQuietly(queue, opts); // Story 32.3: the planner's questions applied, blocked, answered and closed
     await scopeQuietly(queue, opts); // Story 32.4: a revise body becomes the scope and its Confluence page
@@ -810,6 +814,14 @@ async function resolveQuietly(queue: Queue, opts: RunOptions): Promise<void> {
 function chatSpendQuietly(queue: Queue, opts: RunOptions): void {
   if (opts.chatSpend === false || (opts.chatSpend === undefined && underBunTest())) return;
   try { chatSpendPass(queue, { ledgerFile: ledgerPath(opts.hygiene?.env ?? process.env), ...(opts.chatSpend ?? {}) }); } catch { /* the next tick */ }
+}
+
+/** Story 39.3: the studio-chat pass (src/studiochat.ts) right after the chat-spend pass at every `finally` site
+ * (`recover`, `drain`, `run`): a terminal studio-chat run with no reply gets the failure reply once, and its stream and
+ * reads files are removed; under `bun test` it runs only with injected deps (as `chatSpendQuietly`). Never throws. */
+function studioChatQuietly(queue: Queue, opts: RunOptions): void {
+  if (opts.studioChat === false || (opts.studioChat === undefined && underBunTest())) return;
+  try { studioChatPass(queue, opts.studioChat ?? {}); } catch { /* the next tick */ }
 }
 
 /** Story 32.3: the engagement questions pass (src/questions.ts) right after the chat-spend pass at every `finally`
@@ -919,6 +931,18 @@ export function chatDeps(guardCapS?: number): ChatDeps {
   };
 }
 
+/** Story 39.3: the studio chat route's production deps — the `studio-chat` definition for a served root as `validate`
+ * resolves it, and `resolveCheckout` (the lane is `<lock checkout>#studio-chat`, `mintStudioTurn`). */
+export function studioChatDeps(guardCapS?: number): ChatDeps {
+  return {
+    resolveJob: async (root) => {
+      const v = await validate(STUDIO_CHAT_JOB, root, undefined, guardCapS);
+      return { projectId: v.projectId, root: v.root, definition: v.defn, target: v.target };
+    },
+    checkout: resolveCheckout,
+  };
+}
+
 /** Story 27.5 (DW-13): every `cancelled` run whose recorded studio run no record shows ended
  * (`Queue.cancelledLeftovers`: a driver's late `setStudioRun` the cancel's end missed, a cancel that died after its
  * end, a failed ender) has it ended by the same ender (`studioRunEnder`: core `cancel`, skill `finish`), recorded
@@ -1014,6 +1038,7 @@ export async function drainQueue(opts: RunOptions = {}, verbRunner: VerbRunner =
     await closeOutPaused(queue, pausedDeps(opts)); // Story 27.3
     await resolveQuietly(queue, opts); // Story 31.7
     chatSpendQuietly(queue, opts); // Story 32.2
+    studioChatQuietly(queue, opts); // Story 39.3
     runSpendQuietly(queue, opts); // Story 32.6
     await questionsQuietly(queue, opts); // Story 32.3
     await scopeQuietly(queue, opts); // Story 32.4
@@ -1675,7 +1700,9 @@ export async function runJob(jobId: string, directory: string, permissionMode?: 
     // holder's run id (its reason's pid, host and detail may change between passes), and answers it as `claim_refused`
     // beside the existing `waited` (additive).
     let lockRefused: ClaimRefused | undefined;
-    if (!claim.claimed && opts.runId && claim.why === "lock") {
+    // Story 39.3: a studio-chat turn waiting on its own lane records no refusal and sends no line (the page shows its
+    // queue position); every other job's lock wait (and every sandbox-login, max-login or pin refusal) still records.
+    if (!claim.claimed && opts.runId && claim.why === "lock" && run.job_id !== STUDIO_CHAT_JOB) {
       lockRefused = await recordedRefusal(queue, run.run_id, { key: `lock:${claim.holder?.run_id ?? "unknown"}`, reason: claim.reason, resolves: LOCK_RESOLVES }, opts.hygiene);
     }
     if (!claim.claimed) {
@@ -1721,6 +1748,7 @@ export async function runJob(jobId: string, directory: string, permissionMode?: 
     await closeOutPaused(queue, pausedDeps(opts)); // Story 27.3: a paused run whose story landed is closed out
     await resolveQuietly(queue, opts); // Story 31.7: queue validate-resolution from resolved items; re-arm on a pass
     chatSpendQuietly(queue, opts); // Story 32.2: the chat runs' costs into each engagement's spend.planning_usd
+    studioChatQuietly(queue, opts); // Story 39.3: a studio-chat turn that ended without a reply, and its files
     runSpendQuietly(queue, opts); // Story 32.6: the engagement runs' costs into each engagement's spend.runs_usd
     await questionsQuietly(queue, opts); // Story 32.3: the planner's questions applied, blocked, answered and closed
     await scopeQuietly(queue, opts); // Story 32.4: a revise body becomes the scope and its Confluence page
@@ -2600,7 +2628,8 @@ export async function finishRun(
   const knowledge = directive.knowledge && typeof directive.knowledge === "object" ? directive.knowledge : undefined;
   // Story 32.2: an engagement-chat run keeps the queue run id its overlaid payload carries (the contract: every chat
   // run_id is the queue run id; the spend pass maps it via studio_run_id); every other job gets the studio run id.
-  const payloadRunId = jobId === ENGAGEMENT_CHAT_JOB && typeof directive.payload?.run_id === "string" && directive.payload.run_id
+  // Story 39.3: so does a studio-chat run.
+  const payloadRunId = (jobId === ENGAGEMENT_CHAT_JOB || jobId === STUDIO_CHAT_JOB) && typeof directive.payload?.run_id === "string" && directive.payload.run_id
     ? directive.payload.run_id as string : runId;
   // §5: the submission's override, else the resolved job's routing — verbatim; neither → none (AD-14).
   const model = s.model ?? routing.model, effort = s.effort ?? routing.effort;
@@ -2627,6 +2656,11 @@ export async function finishRun(
     pendingCost = undefined;
     try { rec?.accounted([], { turns: 0, tokens: 0 }, c); } catch { /* not recorded: the sum misses it on a restart */ }
   };
+  // Story 39.3: a studio-chat worker streams (`stream-json`) and its stdout is tapped into the reply's stream file
+  // at the served root (`project_root`); every other job keeps `json`. One tap per run (never per iteration): a
+  // resumed worker appends to the same accumulated text, so the stream file only grows; closed once after the loop.
+  const tapRoot = typeof directive.payload?.project_root === "string" && directive.payload.project_root ? directive.payload.project_root as string : root;
+  const tap = jobId === STUDIO_CHAT_JOB ? studioChatTap(tapRoot, payloadRunId) : null;
   for (;;) {
     accountedLast = false; tripped = undefined; block = undefined; reason = undefined; ownBlock = undefined;
     try {
@@ -2643,6 +2677,7 @@ export async function finishRun(
         ...(sid ? { sessionId: sid, ...(resuming ? { resume: true } : {}) } : {}), ...recording,
         ...(rec?.pin ? { pin: (sb: string) => rec.pin!(sb), ...(rec.pinOwnBlock ? { pinOwnBlock: () => rec.pinOwnBlock!() } : {}) } : {}),
         ...(rec?.engineMcpEnv ? { engineMcpEnv: () => rec.engineMcpEnv!() } : {}),
+        ...(tap ? { outputFormat: "stream-json" as const, onStdout: (c: string) => tap.write(c) } : {}),
       });
       // The worker's own time, from its spawn (invokeSkill's worker_elapsed_s) —
       // not the auth preflight or drift check before it; the injected clock only
@@ -2732,6 +2767,7 @@ export async function finishRun(
     }
     break;
   }
+  tap?.close();
   // AC2: one worker iteration ran — account its turns/tokens before `finish`
   // (account refuses a run that is no longer resumable). A wall-clock trip is
   // not accounted (the iteration was killed), nor one a resume check already

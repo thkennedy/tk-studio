@@ -1,6 +1,6 @@
 # Deferred Work
 
-<!-- deferred-work counter: last minted DW-215; mint through plansync.py deferred mint -->
+<!-- deferred-work counter: last minted DW-216; mint through plansync.py deferred mint -->
 
 ### DW-124: Contract §4 `submit` admitted a full job definition but the CLI/skill surface was id-only
 origin: migrated from legacy ledger ("Deferred from: code review of feat/tk-studio-connector (2026-08-06)"), 2026-10-29
@@ -1835,4 +1835,12 @@ source_spec: `handoff-phase1-loop-2026-10-09.md` 2026-11-10 day-9g update; `kb/a
 location: plugins/tk-studio/lib/plansync.py `_atomic_write` (the `os.replace` at the end of the helper; `stagelog.py` writes `stage-posts.json` through it once per posted boundary); plugins/tk-studio/lib/_core.py `_write_atomic`; plugins/tk-studio/lib/jirabackend.py `_atomic_write` (the sync-back's state and comment logs); 22 `os.replace` call sites across 18 library modules in all
 severity: low
 reason: On Windows a replace is refused while another process holds the destination open without delete sharing (an indexer, Defender, a reader in a concurrent pass); the refusal is transient and the store's read path already outlasts it with five attempts and a doubling 10 ms backoff, but the write helpers raise at once. Here the stage pass is re-run by the supervisor and dedupes by lookup, so the cost was one failed event and ten seconds; a helper whose caller does not retry (the sync-back's state file, a plan file's status write) would end its verb `blocked` on the same transient, and the shipped sync-back type stops on one blocked tick (hole 93). Fix to size: one shared retrying replace (retry `PermissionError` only, bounded, the last failure raised unchanged) used by `plansync._atomic_write`, `_core._write_atomic` and `jirabackend._atomic_write`, with a test that holds the destination open for the first attempts; a sweep's work.
+status: open
+
+### DW-216: Follow-up review still recommended for 39-3-the-studio-chat after the damping cap was spent
+origin: review-budget-followup
+source_spec: `39-3-the-studio-chat-spec.md`
+location: n/a
+severity: low
+reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261110-005232-1b9e; this entry preserves the lingering recommendation for a deliberate later review.
 status: open
