@@ -1,0 +1,10 @@
+{
+  "job_schema_version": 1,
+  "id": "atlassian-sync-back",
+  "type": "atlassian-sync-back",
+  "description": "tk-studio's instance of the shipped atlassian-sync-back job type (Story 31.4), declared 2026-11-10 on the owner's `SYNC: A` (TKSTUDIO-262): the tick hourly (`0 * * * *`) instead of the type's ten minutes. A core target on the host tier: no placement entry in the supervisor's per-job config, no model session; it runs `plansync.py sync-back` on the served checkout under the checkout lock, so a tick queued while a story run holds the checkout waits for it. No timer fires the schedule on this box yet (hole 126, DW-214; the fix is Story 41.1, \"the supervisor fires declared timed jobs\"): until it lands, the operator POSTs one tick at every landing (`POST /jobs {project: tk-studio, job: atlassian-sync-back}`) and runs a hand tick when the owner says he answered. The verb commits nothing: a tick that writes a ledger `decision:` line or a plan status leaves it in the served checkout's working tree, and the next landing's docs PR carries it to main.",
+  "cadence": {
+    "mode": "fixed",
+    "schedule": "0 * * * *"
+  }
+}
