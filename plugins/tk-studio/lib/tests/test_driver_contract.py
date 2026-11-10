@@ -4199,12 +4199,14 @@ class DriverContractTestCase(unittest.TestCase):
         self.assertEqual(header.count("0.1.35 (Story 39.3, additive)"), 1)
         self.assertLess(header.index("0.1.35 (Story 39.2, additive)"),
                         header.index("0.1.35 (Story 39.3, additive)"))
-        clause = " ".join(header[header.index("0.1.35 (Story 39.3, additive)"):].split())
+        # Story 39.4 re-bounds the clause at its own (the header no longer ends with 39.3's)
+        clause = " ".join(header[header.index("0.1.35 (Story 39.3, additive)"):
+                                 header.index("0.1.35 (Story 39.4, additive)")].split())
         for phrase in ("the studio chat", "`POST /chat`", "`GET /chat` (`chat-delta`)",
                        "`chat-queued` `{chat: \"studio\", …}`", "the `studio-chat` job", "`studio-reply`",
                        "the cookie's proposal-bound `POST /jobs`"):
             self.assertIn(phrase, clause)
-        self.assertTrue(clause.endswith("— additive) |"))
+        self.assertTrue(clause.endswith("— additive;"))
         rulings = next(line for line in self.text.splitlines() if line.startswith("| Story / rulings"))
         self.assertRegex(rulings, r"Story 38\.7 \(Epic 38\), Story 39\.1(, Story 39\.\d+)* \(Epic 39\)")
         self.assertIn("Story 39.3", rulings)
@@ -4213,7 +4215,7 @@ class DriverContractTestCase(unittest.TestCase):
         self.assertEqual(flat.count(title), 1)
         self.assertLess(flat.index("**0.1.35 (Story 39.2, additive).**"), flat.index(title))
         note = flat[flat.index(title):]
-        note = note[:note.index("## 8. Conformance")]
+        note = note[:note.index("**0.1.35 (Story 39.4, additive).**")]
         subs = ("**The job:**", "**The record:**", "**The routes:**", "**The stream:**", "**The press:**",
                 "**The session:**", "**The serve process:**")
         self.assertEqual([note.index(s) for s in subs], sorted(note.index(s) for s in subs))
@@ -4258,6 +4260,62 @@ class DriverContractTestCase(unittest.TestCase):
         self.assertIn("- **The shipped `studio-chat` job (0.1.35, Story 39.3):**", self.text)
         self.assertLess(self.text.index("- **The shipped `engagement-chat` job (0.1.27, Story 32.2):**"),
                         self.text.index("- **The shipped `studio-chat` job (0.1.35, Story 39.3):**"))
+
+    def test_0_1_35_story_39_4_the_kanban_and_the_story(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.35**", header)
+        self.assertNotIn("**0.1.36**", header)
+        self.assertEqual(header.count("0.1.35 (Story 39.4, additive)"), 1)
+        self.assertLess(header.index("0.1.35 (Story 39.3, additive)"),
+                        header.index("0.1.35 (Story 39.4, additive)"))
+        clause = " ".join(header[header.index("0.1.35 (Story 39.4, additive)"):].split())
+        for phrase in ("the kanban and the story", "`GET /stories/{id}?project=<id>`", "`POST /stories/{id}/status`",
+                       "the owner's one transition `draft → ready`",
+                       "the `plan-status` service event with `actor: \"owner\"`",
+                       "`GET /board`'s story `band`, `jira_key`, `cost_usd` and `needs_you`"):
+            self.assertIn(phrase, clause)
+        self.assertTrue(clause.endswith("— additive) |"))
+        rulings = next(line for line in self.text.splitlines() if line.startswith("| Story / rulings"))
+        self.assertRegex(rulings, r"Story 38\.7 \(Epic 38\), Story 39\.1(, Story 39\.\d+)* \(Epic 39\)")
+        self.assertIn("Story 39.3, Story 39.4", rulings)
+        flat = " ".join(self.text.split())
+        title = "**0.1.35 (Story 39.4, additive).**"
+        self.assertEqual(flat.count(title), 1)
+        self.assertLess(flat.index("**0.1.35 (Story 39.3, additive).**"), flat.index(title))
+        note = flat[flat.index(title):]
+        note = note[:note.index("## 8. Conformance")]
+        subs = ("**The story read:**", "**The status request:**", "**The event:**", "**The board's story fields:**",
+                "**The web:**", "**The serve process:**")
+        self.assertEqual([note.index(s) for s in subs], sorted(note.index(s) for s in subs))
+        for phrase in ("`404 UnknownStory {project, story}`", "`400 BadStory {story}`", "`^ST-\\d{3,}$`",
+                       "`{spec, stage, pass, started, ended, session_id, model, effort, tokens_in, tokens_out, cost_usd, outcome, buffered, posted}`",
+                       "`sha1(\"<sid>|<stage>|<pass>|<started>\")[:12]` over UTF-8 bytes",
+                       "`_bmad-output/tracking/stage-posts.json`", "`39-4-` never matches `39-40-`",
+                       "`https://<planning.jira.site>/browse/<KEY>`",
+                       "`409 StoryStatusNotOwnerWritable {project, story, from, to, column, owner}`",
+                       "`409 StoryLeaseHeld {project, story, run_id, phase, holder: {pid, host}, since}`",
+                       "`409 StoryStatusRefused {project, story, status, reason}`",
+                       "`500 StoryStatusFailed {project, story, detail}`",
+                       "`uv run <plugin>/lib/plansync.py status --directory <root> --id <id> --status ready",
+                       "Neither refusal calls or records anything.",
+                       "`plan-status {phase: \"ready\", project, story_key, id, owner, directory, actor: \"owner\", source: \"cookie\"|\"bearer\", ok,",
+                       "The loop's run-scoped `plan-status` events are unchanged and carry no `actor`.",
+                       "One `GET /board` serves every card: no per-card read.",
+                       "\"Requests plansync status ready; the loop owns every other column\"",
+                       "`Refused: <from> → <to>. <owner>. Only draft → ready is yours.`",
+                       "\"Loading the story…\"",
+                       "Every other field, kind and route is unchanged."):
+            self.assertIn(phrase, note)
+        lines = self.text.splitlines()
+        rows = [line for line in lines if line.startswith("| the story (Story 39.4, 0.1.35) |")
+                or line.startswith("| the story's status (Story 39.4, 0.1.35) |")]
+        self.assertEqual([r.split(" | ")[1] for r in rows],
+                         ["`GET /stories/{id}?project=<id>`", "`POST /stories/{id}/status?project=<id>`"])
+        studio_get = next(i for i, line in enumerate(lines)
+                          if line.startswith("| the studio chat (Story 39.3, 0.1.35) | `GET /chat?project="))
+        self.assertTrue(lines[studio_get + 1].startswith("| the story (Story 39.4, 0.1.35) |"))
+        self.assertTrue(lines[studio_get + 2].startswith("| the story's status (Story 39.4, 0.1.35) |"))
 
     def test_story_35_7_the_skill_sweep_waits_540_s_inside_the_bash_cap(self):
         # the skill's one sweep call must print its block inside the Bash tool's 600 s cap

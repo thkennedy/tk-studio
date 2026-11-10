@@ -48,7 +48,19 @@
  *   GET  /board?project=<id> the board (Story 30.5, `board.ts`, contract 0.1.25): {ok, project, built_at, plan, epics,
  *                            triage} — the served project's plan epics and stories with their statuses, each story's
  *                            latest run and open findings, per epic the metered spend against its band, and the
- *                            Needs-you / Working / Done triage of its runs; 400 ProjectRequired, 404 UnknownProject
+ *                            Needs-you / Working / Done triage of its runs; 400 ProjectRequired, 404 UnknownProject. Story 39.4
+ *                            (0.1.35 additive): each story's `band`, `jira_key`, `cost_usd` (its Stage Log total) and `needs_you`
+ *   GET  /stories/{id}?project=<id>  Story 39.4 (0.1.35 additive, `stories.ts` `storyFor`): one plan story — {ok, project,
+ *                            built_at, story {id, key, title, status, parent, epic, band, jira_key, jira_url, updated},
+ *                            plan_text, stage_log {specs, rows, total}, runs, pr, findings, needs_you}; 400 BadStory |
+ *                            ProjectRequired, 404 UnknownProject | UnknownStory {project, story}. Readable by the cookie too
+ *   POST /stories/{id}/status?project=<id>  {status} (Story 39.4, `stories.ts` `setStoryStatus`): the owner's one transition,
+ *                            `draft → ready`, through `plansync.py status` on the host and one `plan-status` service event
+ *                            with `actor: "owner"`; 200 {ok, project, story, previous_status, sync, reason?}; 400 MalformedJson |
+ *                            SchemaError | BadStory | ProjectRequired, 403 CsrfRefused, 404 UnknownProject | UnknownStory, 409
+ *                            StoryStatusNotOwnerWritable {from, to, column, owner} | StoryLeaseHeld {run_id, phase, holder,
+ *                            since} | StoryStatusRefused {status, reason} (the refusals call and record nothing), 500
+ *                            StoryStatusFailed {detail}
  *   GET  /inbox?project=<id> the inbox (Story 31.5, contract 0.1.26 additive): {ok, project, generated_at, items} — the
  *                            served project's `_bmad-output/tracking/inbox.json` (the sync-back's) items exactly as
  *                            written; a missing file is `items: []` with `generated_at: null`, never a 404; 400
@@ -145,6 +157,7 @@
  * `POST /runs/{id}/cancel`, (Story 31.6) `POST /inbox/{key}/reply` and (Story 32.1) `POST /engagements` and
  * `POST /engagements/{id}/input` with the page's CSRF token (else 403 CsrfRefused); never `POST /jobs`. Story 39.2:
  * `GET /sandbox/login` (its answer carries `X-CSRF-Token`), and `POST /sandbox/login/start` and `/code` with CSRF.
+ * Story 39.4: `GET /stories/{id}`, and `POST /stories/{id}/status` with CSRF.
  * Story 39.3: `GET /chat` and `POST /chat` with CSRF; and `POST /jobs` only as a studio chat press — exactly `{project,
  * job, proposal: {chat, seq, index}}` with CSRF, the reply `seq` of `chat`'s studio chat holding a `queue` proposal at
  * `index` with the same `{project, job}` and no press line for it yet (else 403 ProposalRefused {detail}, "already
@@ -195,6 +208,8 @@ import { contentType, resolveWebPath, WEB_BUILD_COMMAND, webRoot, type WebOption
 import { registryShow } from "./server";
 import { ApiBindRefused, checkBind } from "./bind";
 import { isTerminal, Queue, RunTerminal, type QueueEvent, type QueueRun } from "./queue";
+import { checkStatusBody, setStoryStatus, storyFor, STORY_ID_RE as STORY_ID, type Answer } from "./stories";
+import type { StatusResult } from "./planstatus";
 import { loadSupervisorConfig, type SupervisorConfig } from "./config";
 import {
   appendStudioLineHeld, behindNote, checkStudioChatBody, deltaFrame, dropStudioLineHeld, findProposal, lastStudioSeq, markUnqueuedHeld, mintStudioTurn, NOT_YET_KINDS,
@@ -286,6 +301,9 @@ export interface ApiDeps {
   /** Story 39.2: the sandbox login's seams — the `sbx` deps, the pane waits, and the supervisor config the sandbox
    * defaults from (default `loadSupervisorConfig()`, TK_SUPERVISOR_CONFIG). */
   sandboxLogin?: SandboxLoginDeps;
+  /** Story 39.4: the owner's `ready` verb (default `callStatus(root, id, "ready", note, {env})`: `plansync.py status` on
+   * the host). */
+  storyStatusVerb?: (root: string, id: string, note: string) => Promise<StatusResult>;
 }
 
 /** Story 39.2: the sandbox login routes' seams. */
@@ -459,6 +477,12 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
     registry, board, studioRunId: (id) => queue.get(id)?.studio_run_id ?? null, env: deps.env, ledger: deps.ledger,
   }));
   const reply = deps.reply ?? ((key: string, body: ReplyBody) => postReply(key, body, { registry, env: deps.env }));
+  // Story 39.4: the story read and the owner's status request share the board's parts and seams.
+  const storyDeps = () => ({
+    queue, now: clock, env: deps.env, ledger: deps.ledger, registry, liveRuns: () => office.snapshot().runs,
+    ...(deps.storyStatusVerb ? { verb: deps.storyStatusVerb } : {}),
+  });
+  const answered = (a: Answer) => json(a.status, a.body);
   const chat = deps.chat ?? chatDeps();
   const studioChat = deps.studioChat ?? studioChatDeps();
   const afterInput = deps.afterEngagementInput ?? ((root: string, id: string) => afterEngagementInput(queue, root, id));
@@ -1453,18 +1477,19 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
   }
 
   /** What a valid cookie session may do: the GET routes, and cancel, the reply, (Story 32.1) the engagement's create
-   * and typed inputs, (Story 32.2) the chat's message and (Story 39.2) the sandbox login's start and code with CSRF.
+   * and typed inputs, (Story 32.2) the chat's message, (Story 39.2) the sandbox login's start and code and (Story 39.4) the
+   * story's status request with CSRF.
    * Anything else 401. */
   async function cookieRoute(req: Request, url: URL, path: string, method: string, cookie: string): Promise<Response> {
     const csrf = csrfToken(secret!, cookie);
     const readRoute = path === "/" || path === "/jobs" || path === "/status" || path === "/events" || path === "/agents"
-      || path === "/board" || path === "/inbox" || path === "/office" || path === "/office/events" || /^\/runs\/[^/]+$/.test(path)
+      || path === "/board" || /^\/stories\/[^/]+$/.test(path) || path === "/inbox" || path === "/office" || path === "/office/events" || /^\/runs\/[^/]+$/.test(path)
       || path === "/engagements" || /^\/engagements\/[^/]+$/.test(path) || /^\/chat\/[^/]+$/.test(path)
       || path === "/sandbox/login" || path === "/chat" || path === "/app" || path.startsWith("/app/");
     if (method === "GET" && readRoute) return await route(req, url, path, method, csrf, "cookie");
     if (method === "POST" && (/^\/runs\/[^/]+\/cancel$/.test(path) || /^\/inbox\/[^/]+\/reply$/.test(path)
       || path === "/engagements" || /^\/engagements\/[^/]+\/input$/.test(path) || /^\/chat\/[^/]+$/.test(path)
-      || path === "/sandbox/login/start" || path === "/sandbox/login/code" || path === "/chat")) {
+      || path === "/sandbox/login/start" || path === "/sandbox/login/code" || path === "/chat" || /^\/stories\/[^/]+\/status$/.test(path))) {
       const given = await csrfGiven(req);
       if (!given || !safeEqual(given, csrf)) return fail(403, "CsrfRefused");
       return await route(req, url, path, method, undefined, "cookie");
@@ -1550,6 +1575,31 @@ export function createApi(deps: ApiDeps): (req: Request) => Promise<Response> {
         if (!project) return fail(400, "ProjectRequired", { detail: "the board needs ?project=<id>" });
         const answer = await board(project);
         return answer ? json(200, answer) : fail(404, "UnknownProject", { project });
+      }
+      // Story 39.4: one story, and the owner's one status transition (contract 0.1.35 additive).
+      const storyStatusMatch = /^\/stories\/([^/]+)\/status$/.exec(path);
+      if (storyStatusMatch) {
+        if (method !== "POST") return allow("POST");
+        const id = decodeId(storyStatusMatch[1]);
+        if (id === null || !STORY_ID.test(id)) return fail(400, "BadStory", { story: id ?? storyStatusMatch[1] });
+        const project = url.searchParams.get("project")?.trim();
+        if (!project) return fail(400, "ProjectRequired", { detail: "the story needs ?project=<id>" });
+        let raw: unknown;
+        try { raw = JSON.parse(await req.text()); }
+        catch (e) { return fail(400, "MalformedJson", { detail: `the body is not JSON: ${e instanceof Error ? e.message : String(e)}` }); }
+        const checked = checkStatusBody(raw);
+        if (!checked.ok) return fail(400, "SchemaError", { detail: checked.detail });
+        const answer = await setStoryStatus(project, id, checked.status, via, storyDeps());
+        return answered(answer.status === 500 ? { ...answer, body: { ...answer.body, detail: redact(String(answer.body.detail ?? "")) } } : answer);
+      }
+      const storyMatch = /^\/stories\/([^/]+)$/.exec(path);
+      if (storyMatch) {
+        if (method !== "GET") return allow("GET");
+        const id = decodeId(storyMatch[1]);
+        if (id === null || !STORY_ID.test(id)) return fail(400, "BadStory", { story: id ?? storyMatch[1] });
+        const project = url.searchParams.get("project")?.trim();
+        if (!project) return fail(400, "ProjectRequired", { detail: "the story needs ?project=<id>" });
+        return answered(await storyFor(project, id, storyDeps()));
       }
       if (path === "/inbox") {
         if (method !== "GET") return allow("GET");

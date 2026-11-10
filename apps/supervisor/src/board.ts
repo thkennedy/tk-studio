@@ -23,16 +23,32 @@
  *   engagements  Story 32.1 (contract 0.1.27, additive): the served root's engagement records waiting on the owner
  *             (`awaiting-answers`, `quoted`) as Needs-you items `{engagement, state, title}`, after the run items,
  *             newest first (`engagement.ts` `listEngagements`, cached on the records' files).
+ *
+ * Story 39.4 (contract 0.1.35, additive): the story's cached parts, shared with `stories.ts` (`GET /stories/{id}`), which
+ * only `api.ts` imports (they live here so `board.ts` never imports `stories.ts`):
+ *   files     one readdir per folder of `<root>/_bmad-output/specs/*`: a story `N.M`'s specs `stories/<N>-<M>-*.md` and
+ *             `stories/<N>-<M>.md` (a split's halves and a `-r<n>` remediation are the story's cost too; `39-4-` never
+ *             matches `39-40-`), its buffers `stages/<N>-<M>-*.jsonl`, and its plans `plans/<N>-<M>.md`.
+ *   stage log every spec's `## Stage Log` table (`stagelog.py` `parse_stage_log`: the heading exactly, outside fences, to
+ *             the next `## `; the first `|` row the header; `|---` rules skipped; exactly 11 cells), plus the buffered
+ *             rows (`buffered: true`) whose row key (`sha1("<sid>|<stage>|<pass>|<started>")[:12]` over UTF-8 bytes) no
+ *             table holds; `posted` from `_bmad-output/tracking/stage-posts.json` (null when absent); sorted by
+ *             `started`, stable on file order; the total (rows, priced, tokens, cost rounded to 4 places, seconds).
+ *   band      the first sorted story plan whose frontmatter `band` is `S`, `M` or `L`, else null.
+ *   Every parse is cached on its file's `(size, mtimeMs)`. `GET /board`'s story gains `band`, `jira_key` (the entity's
+ *   `external.jira.key`), `cost_usd` (the Stage Log total's) and `needs_you` (its runs in the triage's Needs-you, or an
+ *   open inbox item naming its id or Jira key); `run` and `findings` are unchanged.
  */
+import { createHash } from "node:crypto";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { hostname, userInfo } from "node:os";
-import { join } from "node:path";
+import { join, relative, sep } from "node:path";
 import { load as loadYaml } from "js-yaml";
 import { frontmatter, pausedStory } from "./closeout";
 import { studioHome } from "./env";
 import { legVerdict, type HostVerifyResult } from "./hostverify";
 import { listEngagements, needsYou, titleOf } from "./engagement";
-import { awaitingRuling, lastRunOf, LIVE_RUN_STATES, runWaitReason } from "./office";
+import { awaitingRuling, lastRunOf, LIVE_RUN_STATES, readInbox, runWaitReason } from "./office";
 import { DEFERRED_REL } from "./planseams";
 import { PLAN_REL, runPr, storyNumber } from "./planstatus";
 import { isTerminal, type Queue, type QueueEvent, type QueueRun } from "./queue";
@@ -48,7 +64,13 @@ export const BANDS_REL = join(".tk-studio", "budget-bands.yaml");
 export type HostVerifyOutcome = "green" | "red" | "skipped" | "inconclusive";
 export interface BoardFinding { id: string; title: string; severity: string | null }
 export interface BoardStoryRun { run_id: string; state: string; pr: string | null; host_verify: HostVerifyOutcome | null; ended_at: string | null }
-export interface BoardStory { id: string; key: string; title: string; status: string; findings: BoardFinding[]; run: BoardStoryRun | null }
+export interface BoardStory {
+  id: string; key: string; title: string; status: string; findings: BoardFinding[]; run: BoardStoryRun | null;
+  /** Story 39.4 (0.1.35, additive): the story plan's band, the entity's Jira key, the Stage Log total's cost, and whether
+   * the story needs the owner (its runs in Needs-you, or an open inbox item naming it). `boardFor` always sets all four;
+   * optional in the type so an answer built before 0.1.35 (a test's stand-in board) still types. */
+  band?: Band | null; jira_key?: string | null; cost_usd?: number | null; needs_you?: boolean;
+}
 export interface BoardEpic { id: string; title: string; status: string; band_usd: number | null; spend_usd: number; findings: number; stories: BoardStory[] }
 export interface TriageItem { run_id: string; state: string; story_key: string | null; pr: string | null; ruling: string | null }
 /** Story 32.1 (contract 0.1.27, additive): an engagement waiting on the owner, in the Needs-you column. */
@@ -77,8 +99,8 @@ export interface BoardDeps {
 
 // ------------------------------------------------------------ cached file reads
 
-interface Stamp { size: number; mtimeMs: number }
-const stampOf = (path: string): Stamp | null => {
+export interface Stamp { size: number; mtimeMs: number }
+export const stampOf = (path: string): Stamp | null => {
   try {
     const st = statSync(path);
     return st.isFile() ? { size: st.size, mtimeMs: st.mtimeMs } : null;
@@ -93,7 +115,7 @@ function remember<V>(cache: Map<string, V>, key: string, value: V): void {
 }
 
 /** A file's parse cached on `(size, mtimeMs)`; a missing or unreadable file is `fallback`. */
-function cachedFile<T>(cache: Map<string, Stamp & { value: T }>, path: string, parse: (text: string) => T, fallback: T): T {
+export function cachedFile<T>(cache: Map<string, Stamp & { value: T }>, path: string, parse: (text: string) => T, fallback: T): T {
   const st = stampOf(path);
   if (!st) { cache.delete(path); return fallback; }
   const hit = cache.get(path);
@@ -109,7 +131,11 @@ const str = (v: unknown): string | null => (typeof v === "string" && v.trim() ? 
 
 // ------------------------------------------------------------ the plan
 
-export interface PlanStory { id: string; key: string | null; title: string; status: string; parent: string | null }
+export interface PlanStory {
+  id: string; key: string | null; title: string; status: string; parent: string | null;
+  /** Story 39.4: the entity's file, its `updated` and its `external.jira.key`. */
+  file: string; updated: string | null; jira_key: string | null;
+}
 export interface PlanEpic { id: string; number: string | null; title: string; status: string }
 export interface PlanPart { reason?: string; epics: PlanEpic[]; stories: PlanStory[] }
 
@@ -137,7 +163,8 @@ export function readPlan(root: string): PlanPart {
   const stories: PlanStory[] = [];
   for (const n of names) {
     let fm: Record<string, unknown> = {};
-    try { fm = frontmatter(readFileSync(join(dir, n), "utf-8")); } catch { continue; }
+    let text: string;
+    try { text = readFileSync(join(dir, n), "utf-8"); fm = frontmatter(text); } catch { continue; }
     const id = str(fm.id) ?? n.slice(0, -3);
     const source = str(fm.source) ?? "";
     const title = str(fm.title) ?? id;
@@ -145,7 +172,15 @@ export function readPlan(root: string): PlanPart {
     if (n.startsWith("EP-")) epics.push({ id, number: /^epics\.md#epic-(\d+)$/.exec(source)?.[1] ?? null, title, status });
     else {
       const m = /^epics\.md#story-(\d+)\.(\d+)$/.exec(source);
-      stories.push({ id, key: m ? `${Number(m[1])}.${Number(m[2])}` : null, title, status, parent: str(fm.parent) });
+      const external = fm.external && typeof fm.external === "object" ? fm.external as Record<string, unknown> : {};
+      const jira = external.jira && typeof external.jira === "object" ? external.jira as Record<string, unknown> : {};
+      // The frontmatter's own text (js-yaml reads a timestamp as a Date).
+      const rawUpdated = /^updated:[ \t]*["']?([^"'\r\n]*?)["']?[ \t]*\r?$/m.exec(text.split(/\r?\n---/)[0] ?? "")?.[1];
+      const updated = str(rawUpdated) ?? (fm.updated instanceof Date ? fm.updated.toISOString() : str(fm.updated));
+      stories.push({
+        id, key: m ? `${Number(m[1])}.${Number(m[2])}` : null, title, status, parent: str(fm.parent),
+        file: join(dir, n), updated, jira_key: str(jira.key),
+      });
     }
   }
   const value: PlanPart = { epics, stories };
@@ -266,6 +301,199 @@ export function readBands(root: string): Record<string, number> {
   return out;
 }
 
+// ------------------------------------------------------------ Story 39.4: the story's files, Stage Log and band
+
+export type Band = "S" | "M" | "L";
+export const SPECS_REL = join("_bmad-output", "specs");
+export const STAGE_POSTS_REL = join("_bmad-output", "tracking", "stage-posts.json");
+/** `stagelog.py` `STAGE_COLUMNS`, in table order. */
+export const STAGE_COLUMNS = ["stage", "pass", "started", "ended", "session_id", "model", "effort", "tokens_in", "tokens_out", "cost_usd", "outcome"] as const;
+export type StageColumn = (typeof STAGE_COLUMNS)[number];
+/** `stagelog.py` `NO_VALUE`: an empty cell. */
+export const NO_VALUE = "—";
+export type StageCells = Record<StageColumn, string>;
+
+export interface StageLogRow {
+  spec: string; stage: string | null; pass: string | null; started: string | null; ended: string | null; session_id: string | null;
+  model: string | null; effort: string | null; tokens_in: number | null; tokens_out: number | null; cost_usd: number | null;
+  outcome: string | null; buffered: boolean; posted: boolean | null;
+}
+export interface StageLogTotal { rows: number; priced: number; tokens_in: number | null; tokens_out: number | null; cost_usd: number | null; seconds: number }
+export interface StageLog { specs: string[]; rows: StageLogRow[]; total: StageLogTotal }
+
+const FENCE_RE = /^\s*(```|~~~)/;
+const TABLE_RULE_RE = /^\|\s*:?-/;
+
+/** The rows of a document's `## Stage Log` table, in table order (`stagelog.py` `parse_stage_log`, see the header). */
+export function parseStageLog(text: string): StageCells[] {
+  const lines = text.replace(/^﻿/, "").split("\n").map((l) => l.replace(/\r$/, ""));
+  const mask: boolean[] = [];
+  let inside = false;
+  for (const line of lines) {
+    if (FENCE_RE.test(line)) { mask.push(true); inside = !inside; continue; }
+    mask.push(inside);
+  }
+  const at = lines.findIndex((l, i) => !mask[i] && l.trim() === "## Stage Log");
+  if (at < 0) return [];
+  let end = lines.length;
+  for (let i = at + 1; i < lines.length; i++) if (!mask[i] && lines[i]!.startsWith("## ")) { end = i; break; }
+  const rows: StageCells[] = [];
+  let header = false;
+  for (let i = at + 1; i < end; i++) {
+    const line = lines[i]!.trim();
+    if (!line.startsWith("|") || TABLE_RULE_RE.test(line)) continue;
+    if (!header) { header = true; continue; }
+    const cells = line.replace(/^\|+/, "").replace(/\|+$/, "").split("|").map((c) => c.trim());
+    if (cells.length === STAGE_COLUMNS.length) rows.push(Object.fromEntries(STAGE_COLUMNS.map((c, k) => [c, cells[k]!])) as StageCells);
+  }
+  return rows;
+}
+
+/** `stagelog.py` `stage_story`: a spec stem `<key>-spec` names `<key>`. */
+const stageStory = (key: string) => { const k = key.trim(); return k.endsWith("-spec") ? k.slice(0, -"-spec".length) : k; };
+
+/** `stagelog.py` `stage_row_key`: `sha1("<sid>|<stage>|<pass>|<started>")[:12]` over the UTF-8 bytes, cells as written. */
+export function stageRowKey(story: string, row: Pick<StageCells, "stage" | "pass" | "started">): string {
+  return createHash("sha1").update(Buffer.from(`${stageStory(story)}|${row.stage}|${row.pass}|${row.started}`, "utf-8")).digest("hex").slice(0, 12);
+}
+
+/** One buffer's rows (`stagelog.py` `_read_buffer`): one JSON object per line, each column a cell (`—` when empty). */
+function parseBuffer(text: string): StageCells[] {
+  const out: StageCells[] = [];
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+    let raw: unknown;
+    try { raw = JSON.parse(line); } catch { continue; }
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+    const o = raw as Record<string, unknown>;
+    const cell = (v: unknown) => (v === null || v === undefined || v === "" ? NO_VALUE : typeof v === "boolean" ? String(v) : String(v));
+    out.push(Object.fromEntries(STAGE_COLUMNS.map((c) => [c, cell(o[c])])) as StageCells);
+  }
+  return out;
+}
+
+export interface StoryFiles { specs: string[]; buffers: string[]; plans: string[] }
+
+/** The names under each `_bmad-output/specs/<folder>/{stories,stages,plans}`, read once per call. */
+export function specIndex(root: string): { folder: string; stories: string[]; stages: string[]; plans: string[] }[] {
+  const base = join(root, SPECS_REL);
+  let folders: string[] = [];
+  try { folders = readdirSync(base, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name).sort(); } catch { return []; }
+  const names = (dir: string) => { try { return readdirSync(dir).sort(); } catch { return []; } };
+  return folders.map((f) => ({
+    folder: join(base, f), stories: names(join(base, f, "stories")), stages: names(join(base, f, "stages")), plans: names(join(base, f, "plans")),
+  }));
+}
+
+/** A story `N.M`'s specs, buffers and plans (see the header), from `index` (default: a fresh `specIndex(root)`). */
+export function storyFiles(root: string, story: string, index = specIndex(root)): StoryFiles {
+  const [n, m] = story.split(".");
+  const prefix = `${Number(n)}-${Number(m)}`;
+  const out: StoryFiles = { specs: [], buffers: [], plans: [] };
+  if (!/^\d+\.\d+$/.test(story)) return out;
+  for (const f of index) {
+    for (const name of f.stories) if (name === `${prefix}.md` || (name.startsWith(`${prefix}-`) && name.endsWith(".md"))) out.specs.push(join(f.folder, "stories", name));
+    for (const name of f.stages) if (name.startsWith(`${prefix}-`) && name.endsWith(".jsonl")) out.buffers.push(join(f.folder, "stages", name));
+    for (const name of f.plans) if (name === `${prefix}.md`) out.plans.push(join(f.folder, "plans", name));
+  }
+  out.plans.sort();
+  return out;
+}
+
+const tableCache = new Map<string, Stamp & { value: StageCells[] }>();
+const bufferCache = new Map<string, Stamp & { value: StageCells[] }>();
+const postsCache = new Map<string, Stamp & { value: Record<string, any> | null }>();
+const bandCache = new Map<string, Stamp & { value: Band | null }>();
+
+const parsePosts = (text: string): Record<string, any> | null => {
+  try { const doc = JSON.parse(text); return doc && typeof doc === "object" && !Array.isArray(doc) ? doc : {}; } catch { return {}; }
+};
+const cellText = (v: string): string | null => (v === NO_VALUE || v === "" ? null : v);
+const cellNumber = (v: string): number | null => {
+  const t = cellText(v);
+  if (t === null) return null;
+  const n = Number(t.replace(/,/g, ""));
+  return Number.isFinite(n) ? n : null;
+};
+const fileStem = (path: string, ext: string) => (path.split(/[\\/]/).pop() ?? "").slice(0, -ext.length);
+const stampMs = (s: string | null): number | null => { if (!s) return null; const t = Date.parse(s); return Number.isNaN(t) ? null : t; };
+
+/** A story `N.M`'s Stage Log (see the header): the specs' tables plus the buffered rows no table holds. */
+export function stageLogOf(root: string, story: string, files: StoryFiles = storyFiles(root, story)): StageLog {
+  const postsPath = join(root, STAGE_POSTS_REL);
+  const posts = stampOf(postsPath) ? cachedFile(postsCache, postsPath, parsePosts, null) : null;
+  const read: { spec: string; cells: StageCells; buffered: boolean }[] = [];
+  const held = new Set<string>();
+  for (const path of files.specs) {
+    const spec = stageStory(fileStem(path, ".md"));
+    for (const cells of cachedFile(tableCache, path, parseStageLog, [])) {
+      held.add(stageRowKey(spec, cells));
+      read.push({ spec, cells, buffered: false });
+    }
+  }
+  for (const path of files.buffers) {
+    const spec = fileStem(path, ".jsonl");
+    for (const cells of cachedFile(bufferCache, path, parseBuffer, [])) {
+      const key = stageRowKey(spec, cells);
+      if (held.has(key)) continue;
+      held.add(key);
+      read.push({ spec, cells, buffered: true });
+    }
+  }
+  const rows: StageLogRow[] = read.map(({ spec, cells, buffered }) => {
+    const ended = cellText(cells.ended);
+    let posted: boolean | null = null;
+    if (posts) {
+      const entry = posts[stageRowKey(spec, cells)];
+      const has = (v: unknown) => (typeof v === "string" && v !== "") || (!!v && typeof v === "object");
+      posted = !!entry && typeof entry === "object" && has(entry.start) && (ended === null || (has(entry.stop) && has(entry.worklog)));
+    }
+    return {
+      spec, stage: cellText(cells.stage), pass: cellText(cells.pass), started: cellText(cells.started), ended,
+      session_id: cellText(cells.session_id), model: cellText(cells.model), effort: cellText(cells.effort),
+      tokens_in: cellNumber(cells.tokens_in), tokens_out: cellNumber(cells.tokens_out), cost_usd: cellNumber(cells.cost_usd),
+      outcome: cellText(cells.outcome), buffered, posted,
+    };
+  });
+  const order = (a: StageLogRow, b: StageLogRow) => {
+    const ta = stampMs(a.started), tb = stampMs(b.started);
+    if (ta !== null && tb !== null) return ta - tb;
+    const sa = a.started ?? "", sb = b.started ?? "";
+    return sa < sb ? -1 : sa > sb ? 1 : 0;
+  };
+  rows.sort(order); // Array.prototype.sort is stable: equal stamps keep file order
+  const priced = rows.filter((r) => r.cost_usd !== null);
+  const sum = (k: "tokens_in" | "tokens_out") => { const v = rows.filter((r) => r[k] !== null); return v.length ? v.reduce((n, r) => n + r[k]!, 0) : null; };
+  let ms = 0;
+  for (const r of rows) {
+    const a = stampMs(r.started), b = stampMs(r.ended);
+    if (a !== null && b !== null && b >= a) ms += b - a;
+  }
+  return {
+    specs: files.specs.map((p) => relative(root, p).split(sep).join("/")),
+    rows,
+    total: {
+      rows: rows.length, priced: priced.length, tokens_in: sum("tokens_in"), tokens_out: sum("tokens_out"),
+      cost_usd: priced.length ? Math.round(priced.reduce((n, r) => n + r.cost_usd!, 0) * 1e4) / 1e4 : null,
+      seconds: Math.round(ms / 1000),
+    },
+  };
+}
+
+const parseBand = (text: string): Band | null => {
+  const b = frontmatter(text).band;
+  return b === "S" || b === "M" || b === "L" ? b : null;
+};
+
+/** A story's band: the first sorted plan whose frontmatter `band` is `S`, `M` or `L`, else null. */
+export function storyBand(files: StoryFiles): Band | null {
+  for (const path of files.plans) {
+    const band = cachedFile(bandCache, path, parseBand, null);
+    if (band) return band;
+  }
+  return null;
+}
+
 // ------------------------------------------------------------ the runs
 
 /** The latest `host-verify` event's outcome, null with none. */
@@ -287,7 +515,7 @@ function needsYouSince(events: readonly QueueEvent[]): boolean {
 const sameLocalDay = (a: Date, b: Date) =>
   a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
 
-interface RunFacts { run: QueueRun; events: QueueEvent[]; stories: Set<string>; weak: Set<string>; storyKey: string | null; pr: string | null; host: HostVerifyOutcome | null; endedAt: string | null }
+export interface RunFacts { run: QueueRun; events: QueueEvent[]; stories: Set<string>; weak: Set<string>; storyKey: string | null; pr: string | null; host: HostVerifyOutcome | null; endedAt: string | null }
 
 function factsOf(run: QueueRun, events: QueueEvent[], live: LiveRunProgress | undefined): RunFacts {
   const stories = new Set<string>();
@@ -341,6 +569,30 @@ function triage(facts: readonly RunFacts[], now: number, root: string | null): B
   return out;
 }
 
+/** Story 39.4: the facts of every queue run of `project`, in creation order (the board's own read). */
+export function runFacts(deps: Pick<BoardDeps, "queue" | "liveRuns">, project: string): RunFacts[] {
+  const live = new Map((deps.liveRuns?.() ?? []).map((r) => [r.run_id, r]));
+  return deps.queue.runs().filter((r) => r.project_id === project)
+    .map((r) => factsOf(r, deps.queue.events(r.run_id), live.get(r.run_id)));
+}
+
+/** Story 39.4: the runs naming story `N.M` by the board's rule, in creation order — the runs naming it strongly, else
+ * (no run names it strongly) the runs naming it weakly. The board's story run is the last. */
+export function storyRunFacts(facts: readonly RunFacts[], story: string): RunFacts[] {
+  const strong = facts.filter((f) => f.stories.has(story));
+  return strong.length ? strong : facts.filter((f) => f.weak.has(story));
+}
+
+/** Story 39.4: the run ids in the triage's Needs-you column (the run items only). */
+export function needsYouRunIds(facts: readonly RunFacts[], now: number): Set<string> {
+  return new Set(triage(facts, now, null).needs_you.flatMap((i) => ("run_id" in i ? [i.run_id] : [])));
+}
+
+/** Story 39.4: the first open inbox item naming the story's id (`entity`) or its Jira key (`issue`), else null. */
+export function openInboxItem(items: readonly Record<string, unknown>[], id: string, jiraKey: string | null): Record<string, unknown> | null {
+  return items.find((i) => i.state === "open" && (i.entity === id || (jiraKey !== null && i.issue === jiraKey))) ?? null;
+}
+
 // ------------------------------------------------------------ the board
 
 /** The board of a registered project, or null when the registry does not serve `project`. */
@@ -353,14 +605,16 @@ export async function boardFor(project: string, deps: BoardDeps): Promise<BoardA
   const now = (deps.now ?? Date.now)();
   const env = deps.env ?? process.env;
 
-  const live = new Map((deps.liveRuns?.() ?? []).map((r) => [r.run_id, r]));
-  const facts = deps.queue.runs().filter((r) => r.project_id === project)
-    .map((r) => factsOf(r, deps.queue.events(r.run_id), live.get(r.run_id)));
+  const facts = runFacts(deps, project);
 
   const plan: PlanPart = root ? readPlan(root) : { reason: "no plan directory: the registry names no root", epics: [], stories: [] };
   const findings = root && !plan.reason ? readFindings(root) : [];
   const spend = plan.reason ? new Map<string, number>() : spendByEpic(ledgerPath(env, deps.ledger), project);
   const bands = root && !plan.reason ? readBands(root) : {};
+  // Story 39.4: the cards' band, cost and needs-you (one specs readdir per board, the parses cached on their files).
+  const index = root && !plan.reason ? specIndex(root) : [];
+  const inboxItems = root && !plan.reason ? readInbox(root).items : [];
+  const waiting = needsYouRunIds(facts, now);
 
   // Story key N.M → its latest run (creation order: the last wins) among the runs naming it strongly (plan-status,
   // ruling, pause, a live story not `pending` or `done`); a weak name (a live `done`) only fills a key no run names
@@ -378,10 +632,16 @@ export async function boardFor(project: string, deps: BoardDeps): Promise<BoardA
   const epics: BoardEpic[] = plan.epics.map((ep) => {
     const stories: BoardStory[] = plan.stories.filter((s) => s.parent === ep.id).sort(byKey).map((s) => {
       const f = s.key ? latest.get(s.key) : undefined;
+      const files = root && s.key ? storyFiles(root, s.key, index) : null;
+      const named = s.key ? storyRunFacts(facts, s.key) : [];
       return {
         id: s.id, key: s.key ?? "", title: s.title, status: s.status,
         findings: s.key ? findings.filter((x) => x.story === s.key).map(({ id, title, severity }) => ({ id, title, severity })) : [],
         run: f ? { run_id: f.run.run_id, state: f.run.state, pr: f.pr, host_verify: f.host, ended_at: f.endedAt } : null,
+        band: files ? storyBand(files) : null,
+        jira_key: s.jira_key,
+        cost_usd: files && root ? stageLogOf(root, s.key!, files).total.cost_usd : null,
+        needs_you: named.some((x) => waiting.has(x.run.run_id)) || openInboxItem(inboxItems, s.id, s.jira_key) !== null,
       };
     });
     const spent = ep.number !== null ? spend.get(String(Number(ep.number))) ?? 0 : 0;

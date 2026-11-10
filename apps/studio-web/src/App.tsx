@@ -22,6 +22,8 @@
 // Story 39.3: `/app/chat` mounts the studio chat (`StudioChatScreen`) in place of the placeholder strip and the
 // engagement Chat screen; `/app/chat/<id>` keeps the engagement Chat screen. An `open` proposal navigates through the
 // router.
+// Story 39.4: `/app/story/<id>` mounts the story page (`StoryScreen`, its `?project=` from the address's query), no longer
+// the placeholder; `/app/board/<project>` passes its query (`?view=`, `?epic=`) and the router's navigation to the Board.
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { createOfficeStore, LIVE_RUN_STATES } from "./live/store";
 import { openOfficeStream } from "./live/stream";
@@ -37,6 +39,7 @@ import {
   createRouter, engagementRefFor, isLanding, issueRefFor, migrateRemembered, NAV, navActive, notFoundText, PLACEHOLDER, routePath, type Route,
 } from "./screen";
 import { SettingsScreen } from "./settings/SettingsScreen";
+import { StoryScreen } from "./story/StoryScreen";
 import { StatusScreen } from "./status/StatusScreen";
 
 /** The tab's one store (module-level: it outlives StrictMode's remount, so the view is never cleared). */
@@ -50,6 +53,8 @@ const font = "12px ui-monospace, Menlo, Consolas, monospace";
 const pageText = { position: "absolute", inset: 0, padding: "48px 16px 16px", font: "13px/1.4 ui-monospace, Menlo, Consolas, monospace", color: "#e8e8e8", background: "#161616" } as const;
 
 const go = (route: Route, replace = false) => router.navigate(routePath(route), { replace });
+/** The query of a router path (`?…`, else empty): the route table matches the path only. */
+const searchOf = (path: string): string => (path.includes("?") ? path.slice(path.indexOf("?")) : "");
 
 export function App() {
   const [hud, setHud] = useState<CanvasStats>({ zoom: 0, ratio: window.devicePixelRatio || 1, fps: 0 });
@@ -77,7 +82,13 @@ export function App() {
       {route.name === "office" ? (
         <OfficeScreen store={officeStore} onStats={setHud} project={route.project} onProject={(p, replace) => go({ name: "office", project: p }, replace)} />
       ) : route.name === "board" ? (
-        <BoardScreen store={officeStore} project={route.project} onProject={(p, replace) => go({ name: "board", project: p }, replace)} />
+        <BoardScreen
+          store={officeStore}
+          project={route.project}
+          onProject={(p, replace) => go({ name: "board", project: p }, replace)}
+          search={searchOf(path)}
+          onNavigate={(p, replace) => router.navigate(p, { replace: replace === true })}
+        />
       ) : route.name === "inbox" ? (
         <InboxScreen rows={inbox.rows} errors={inbox.errors} loaded={inbox.loaded} onOpen={openIssue} />
       ) : route.name === "issue" ? (
@@ -90,7 +101,9 @@ export function App() {
         <StatusScreen store={officeStore} />
       ) : route.name === "settings" ? (
         <SettingsScreen />
-      ) : route.name === "story" || route.name === "run" || route.name === "checkin" ? (
+      ) : route.name === "story" ? (
+        <StoryScreen store={officeStore} id={route.id} search={searchOf(path)} onNavigate={(p) => router.navigate(p)} />
+      ) : route.name === "run" || route.name === "checkin" ? (
         <div style={pageText}>{PLACEHOLDER[route.name]}</div>
       ) : (
         <div style={pageText}>{notFoundText(route.path)}</div>

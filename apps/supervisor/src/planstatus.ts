@@ -110,7 +110,8 @@ export interface PlanStatusDeps extends WorktreeDeps {
   now?: () => number;
 }
 
-export type Phase = "in-progress" | "review" | "done" | "draft";
+/** Story 39.4: `ready` is the owner's one transition (`POST /stories/{id}/status`, `stories.ts`), never a loop pass's. */
+export type Phase = "in-progress" | "review" | "done" | "draft" | "ready";
 
 /** A registry entry's root through `registry.py show --project-id`: undefined when the registry answers that the
  * project is not registered (or names no usable root); any other failure (a timeout, no JSON, an unreadable registry)
