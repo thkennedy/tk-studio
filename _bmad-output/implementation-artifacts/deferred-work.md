@@ -1,6 +1,6 @@
 # Deferred Work
 
-<!-- deferred-work counter: last minted DW-216; mint through plansync.py deferred mint -->
+<!-- deferred-work counter: last minted DW-217; mint through plansync.py deferred mint -->
 
 ### DW-124: Contract §4 `submit` admitted a full job definition but the CLI/skill surface was id-only
 origin: migrated from legacy ledger ("Deferred from: code review of feat/tk-studio-connector (2026-08-06)"), 2026-10-29
@@ -1843,4 +1843,12 @@ source_spec: `39-3-the-studio-chat-spec.md`
 location: n/a
 severity: low
 reason: The follow-up-review damping cap (limits.max_followup_reviews = 1) was spent with the story finalized (status: done, verify green) while the review pass still recommended an independent follow-up. The work was committed by bmad-loop run 20261110-005232-1b9e; this entry preserves the lingering recommendation for a deliberate later review.
+status: open
+
+### DW-217: The chat page promises a reply in "about a minute"; the first live studio-chat turn took 2 min 21 s — a chat line waits for the pacer's next drain (up to 60 s) before anything starts, and the turn itself ran 92 s (hole 128)
+origin: the Story 39.3 landing 2026-11-10 04:12–04:15Z, the spec's manual check "time the first turn against 'about a minute'": one labelled line POSTed to `/chat` from the agent seat on an idle queue (run `q-studio-chat-20261110T041214Z-b36510`, queue events 6985–6998) — enqueued 04:12:14Z, claimed 04:12:57Z, worktree cut and materialised by 04:13:03Z, the planner's reply line written 04:14:35Z, ended 04:14:43Z
+source_spec: `39-3-the-studio-chat-spec.md` (AC3's pending label; the manual checks; the plan's "Latency" note: "file a DW if the cut and materialise dominate"); `handoff-phase1-loop-2026-10-09.md` 2026-11-10 day-9h update; `kb/agent-pc-setup-runbook.md` hole 128
+location: apps/supervisor/start.ps1 (the pacer: `bun src/tick.ts`, `bun src/cli.ts drain`, then `Start-Sleep -Seconds $IntervalSeconds`, default 60; `POST /chat` enqueues and wakes nothing); apps/studio-web/src/chat/model.ts (the label `Waiting for the planner's reply (about a minute)`); plugins/tk-studio/lib/studiochat.py `context` (what the turn reads before it answers)
+severity: low
+reason: The label is the page's only word on how long the owner waits, and on the first live turn it was wrong by a factor of two on an empty queue. The time went: 43 s waiting to be claimed (the pacer sleeps 60 s between drains, so a line waits 0–60 s, 30 s on average, with nothing else queued), 6 s for the run worktree (cut 4 s, materialise 1 s — the part the plan expected to dominate does not), 92 s for the `claude -p` turn (9 model turns, 534,879 tokens, 0.67 USD, opus-5-5 at high effort, for a two-sentence answer), 8 s to account and close out. The reply itself was correct. Behind a running story the line is not meant to wait for the story (its own lock lane; not yet measured beside a live run), but it still waits for the pacer. Fix to size, any one makes the label true: (1) an enqueue from `POST /chat` wakes a drain at once instead of waiting out the pacer's sleep; (2) the turn's context and effort are sized for a conversational answer (the first turn read half a million tokens); (3) until then the label says what is measured ("usually one to three minutes"). Measure again on the page itself: the desktop and iPad check of `/app/chat` is not done by the studio (the page needs the owner's sign-in).
 status: open
