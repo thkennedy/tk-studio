@@ -1,7 +1,14 @@
 // The Office screen's rules (Story 30.4, design spec §6.3, §7.3): pure functions vitest drives in
 // `environment: "node"`. No pixi.js, no DOM: `fetch`, `localStorage` and the clock are injected.
 // The canvas lives in `src/renderer/scene.ts`, the composition in `OfficeScreen.tsx`.
-import { blockedIssueOf, LIVE_RUN_STATES, OFFICE_STATES, type BlockedIssue, type LiveState, type OfficeAgent, type OfficeRun, type OfficeState } from "../live/store";
+// Story 39.5 (CAP-17, the 2026-09-01 office grammar, addendum §3.4): the HUD shows the run's `stage` (0.1.35), its clock
+// (`runClock` over `GET /runs/{id}`) and a phased bar — the epic as the project bar, its stories as phases, the epic's
+// open review findings (`GET /board`) as a count to drain. Every HUD value is held at least `HOLD_MS` before it may
+// change (`hold`); the clock and the bars lerp over `LERP_MS` (`tween`, `valueAt`); `hudMotion` applies both. Pure, the
+// clock injected.
+import type { BoardAnswer } from "../board/model";
+import { blockedIssueOf, LIVE_RUN_STATES, OFFICE_STATES, type BlockedIssue, type LiveState, type OfficeAgent, type OfficeRun, type OfficeState, type StoryStatus } from "../live/store";
+import { clockLabel, clockUnread, LOADING_CLOCK, runClock, runRowKey, type RunClock, type RunDetail } from "../run/model";
 
 // ------------------------------------------------------------ frames
 
@@ -170,6 +177,14 @@ export const LOADING = "Loading…";
 
 export interface HudLive {
   run_id: string;
+  /** Story 39.5: the run's stage (`office.progress.stage`), `Loading…` until the store names it. */
+  stage: string;
+  /** Story 39.5: the run's clock (`runClock` of its `GET /runs/{id}`), null until read. */
+  clock: RunClock | null;
+  /** The clock's label, `Loading the clock…` until read. */
+  clockText: string;
+  /** Story 39.5: the phased bar. */
+  bar: PhasedBar;
   /** The run's queue state, `pending` while unknown (a progress-born row). */
   state: string;
   /** `Loading…` until the snapshot names it. */
@@ -219,17 +234,40 @@ export function sinceText(lastEventAt: number | null, now: number): string {
   return `${Math.max(0, Math.floor((now - lastEventAt) / 1000))}s ago`;
 }
 
+/** Story 39.5: the HUD's reads — the project's board (null while pending) and the live run's `GET /runs/{id}` (or its
+ * failure, `detailError`: the clock then reads `The clock could not be read: …`, never a loading label forever). */
+export interface HudExtras {
+  board?: BoardRead | null;
+  detail?: (RunDetail & { run_id?: string }) | null;
+  detailError?: { run_id: string; error: string } | null;
+}
+
+/** The HUD's `GET /runs/{id}` re-read key (Settled shape 11): the live run's id and its store row's `runRowKey` (its
+ * `state`, `stage` and open host-verify `leg.since`); "" with no live run. The screen re-reads when it changes. */
+export function hudRunKey(state: LiveState, project: string): string {
+  const run = liveRunOf(state, project);
+  return run ? `${run.run_id}|${runRowKey(run)}` : "";
+}
+
 /** The HUD's fields for `project` from the store's state at `now` (ms). */
-export function hudModel(state: LiveState, project: string, now: number): HudModel {
+export function hudModel(state: LiveState, project: string, now: number, extras: HudExtras = {}): HudModel {
   const since = sinceText(state.lastEventAt, now);
   const run = liveRunOf(state, project);
   if (run) {
     const current = run.epic?.current_story ?? null;
     const story = current ? run.stories.find((s) => s.key === current) : undefined;
+    const detail = extras.detail && extras.detail.run.run_id === run.run_id ? extras.detail : null;
+    const clock = detail ? runClock(detail, now) : null;
     return {
       project,
       live: {
         run_id: run.run_id,
+        stage: run.stage ?? LOADING,
+        clock,
+        clockText: clock
+          ? clock.label
+          : extras.detailError && extras.detailError.run_id === run.run_id ? clockUnread(extras.detailError.error) : LOADING_CLOCK,
+        bar: phasedBar(run, extras.board ?? null),
         state: run.state ?? PENDING,
         engine_run_id: run.engine_run_id ?? LOADING,
         done: run.epic?.done ?? 0,
@@ -248,5 +286,160 @@ export function hudModel(state: LiveState, project: string, now: number): HudMod
     live: null,
     last: last ? { run_id: last.run_id, state: last.state || PENDING, pr: last.pr ?? null, href: safeHref(last.pr) } : null,
     since,
+  };
+}
+
+// ------------------------------------------------------------ the phased bar (Story 39.5, Settled shape 8)
+
+/** The board read the HUD takes: the answer, its failure, or null while pending. */
+export type BoardRead = { ok: true; board: BoardAnswer } | { ok: false; error: string };
+export const LOADING_FINDINGS = "Loading the findings…";
+export interface Phase { key: string; status: StoryStatus; fill: number }
+export interface PhasedBar {
+  total: number;
+  done: number;
+  /** The project bar: `done / total` (0 when `total` is 0). */
+  fraction: number;
+  /** The run's stories (not `extra`), padded with `pending` phases up to `total`. */
+  phases: Phase[];
+  findings: { count: number | null; label: string };
+}
+
+const FILL: Record<StoryStatus, number> = { done: 1, deferred: 1, failed: 1, current: 0.5, pending: 0 };
+
+/** The epic number a run works on: its `spec_folder`'s `spec-epic-<N>`, else the current story's leading `N`. */
+export function epicNumberOf(run: Pick<OfficeRun, "epic">): string | null {
+  const m = /spec-epic-(\d+)/.exec(run.epic?.spec_folder ?? "");
+  if (m) return m[1];
+  const c = /^(\d+)[-.]/.exec(run.epic?.current_story ?? "");
+  return c ? c[1] : null;
+}
+
+/** The phased bar of a live run (the epic the project bar, its stories the phases) and its epic's findings to drain
+ * (the board epic whose stories hold an `N.M` key of the run's epic number). */
+export function phasedBar(run: Pick<OfficeRun, "epic" | "stories">, board: BoardRead | null): PhasedBar {
+  const total = Math.max(0, run.epic?.total ?? 0);
+  const done = run.epic?.done ?? 0;
+  const phases: Phase[] = (run.stories ?? []).filter((s) => !s.extra).map((s) => ({ key: s.key, status: s.status, fill: FILL[s.status] ?? 0 }));
+  // The padding's keys name its position; `hudMotion` holds and lerps each phase by position, so a story replacing a
+  // placeholder lerps its fill from the placeholder's.
+  for (let i = phases.length; i < total; i++) phases.push({ key: `pending-${i + 1}`, status: "pending", fill: 0 });
+  let findings: PhasedBar["findings"];
+  if (board === null) findings = { count: null, label: LOADING_FINDINGS };
+  else if (!board.ok) findings = { count: null, label: `Findings unread: ${board.error}` };
+  else {
+    const n = epicNumberOf(run);
+    const epic = n === null ? undefined : board.board.epics.find((e) => e.stories.some((s) => s.key.startsWith(`${n}.`)));
+    findings = epic ? { count: epic.findings, label: `${epic.findings} findings to drain` } : { count: null, label: "No findings read for this epic" };
+  }
+  return { total, done, fraction: total > 0 ? done / total : 0, phases, findings };
+}
+
+// ------------------------------------------------------------ the hold and the lerp (Story 39.5, Settled shape 9)
+
+export const HOLD_MS = 1000;
+export const LERP_MS = 500;
+export interface Held<T> { value: T; since: number }
+export interface Tween { from: number; to: number; start: number }
+
+/** A HUD value held at least `HOLD_MS`: the first shows at once; an equal (JSON) raw value keeps `prev`; a different
+ * one replaces the shown value only once it has shown `HOLD_MS`, then shows from `now`. A burst A→B→A inside the hold
+ * never shows B. */
+export function hold<T>(prev: Held<T> | null, raw: T, now: number): Held<T> {
+  if (prev === null) return { value: raw, since: now };
+  if (JSON.stringify(prev.value) === JSON.stringify(raw)) return prev;
+  return now - prev.since >= HOLD_MS ? { value: raw, since: now } : prev;
+}
+
+/** The tween's value at `now`: linear from `from` to `to` over `LERP_MS`, the target from `start + LERP_MS` on. */
+export function valueAt(tw: Tween, now: number): number {
+  const k = Math.min(1, Math.max(0, (now - tw.start) / LERP_MS));
+  return tw.from + (tw.to - tw.from) * k;
+}
+
+/** Toward `target`: the first target shows at once; a new target starts from the current value (a retarget mid-tween
+ * never jumps); the same target keeps `prev`. */
+export function tween(prev: Tween | null, target: number, now: number): Tween {
+  if (prev === null) return { from: target, to: target, start: now - LERP_MS };
+  if (prev.to === target) return prev;
+  return { from: valueAt(prev, now), to: target, start: now };
+}
+
+/** Whether a tween is still moving at `now` (the screen animates with `requestAnimationFrame` while one is). */
+export const inFlight = (tw: Tween, now: number): boolean => now < tw.start + LERP_MS && tw.from !== tw.to;
+
+/** The HUD's motion state: each held value by key, each tween by key. */
+export interface HudMotion { held: Record<string, Held<unknown>>; tweens: Record<string, Tween> }
+/** What the HUD shows of a live run after the hold and the lerp. */
+export interface HudShown {
+  run_id: string;
+  /** The run's queue state, held. */
+  state: string;
+  story: string;
+  /** The current story's phase, held. */
+  phase: string;
+  /** `done N · failed N · total N`, held as one. */
+  counts: string;
+  /** The engine's run id, held. */
+  engine_run_id: string;
+  stage: string;
+  findings: string;
+  clockText: string;
+  clockContext: string | null;
+  over: boolean;
+  fraction: number;
+  phases: Phase[];
+  moving: boolean;
+}
+
+/** Apply the hold to every HUD value (the run id and state, the story and its phase, the stage, the counts, the
+ * engine id, the findings, the clock — its mode, guard, context and elapsed seconds held as one value, so a guard hand-over never shows
+ * the new guard against the old elapsed — and each phase by its position), then the lerp to the clock's elapsed
+ * seconds, the project bar's fraction and each phase's fill (by position: a story replacing a placeholder lerps). */
+export function hudMotion(prev: HudMotion | null, live: HudLive, now: number): { motion: HudMotion; shown: HudShown } {
+  const held: Record<string, Held<unknown>> = {};
+  const tweens: Record<string, Tween> = {};
+  const h = <T,>(key: string, raw: T): T => {
+    const next = hold((prev?.held[key] as Held<T> | undefined) ?? null, raw, now);
+    held[key] = next;
+    return next.value;
+  };
+  const t = (key: string, target: number): number => {
+    const next = tween(prev?.tweens[key] ?? null, target, now);
+    tweens[key] = next;
+    return valueAt(next, now);
+  };
+  const run_id = h("run_id", live.run_id);
+  const state = h("state", live.state);
+  const story = h("story", live.story);
+  const phase = h("phase", live.phase);
+  const stage = h("stage", live.stage);
+  const counts = h("counts", `done ${live.done} · failed ${live.failed} · total ${live.total}`);
+  const findings = h("findings", live.bar.findings.label);
+  const engine_run_id = h("engine_run_id", live.engine_run_id);
+  const clock = h<{ mode: RunClock["mode"]; guard_s: number | null; context: string | null; elapsed_s: number } | { text: string }>(
+    "clock",
+    live.clock ? { mode: live.clock.mode, guard_s: live.clock.guard_s, context: live.clock.context, elapsed_s: live.clock.elapsed_s } : { text: live.clockText },
+  );
+  let clockText: string;
+  let clockContext: string | null = null;
+  let over = false;
+  if ("mode" in clock) {
+    // The tween is keyed by the clock's mode and guard: a hand-over starts the new clock at its own value, never a
+    // lerp from the old guard's elapsed (backwards, and over the new guard on the way).
+    const elapsed = t(`elapsed:${clock.mode}:${clock.guard_s ?? ""}`, clock.elapsed_s);
+    clockText = clockLabel(clock.mode, elapsed, clock.guard_s);
+    clockContext = clock.context;
+    over = clock.guard_s !== null && Math.floor(elapsed) > clock.guard_s;
+  } else clockText = clock.text;
+  const fraction = t("fraction", h("fraction_raw", live.bar.fraction));
+  const phases = live.bar.phases.map((p, i) => {
+    const held = h(`phase:${i}`, { key: p.key, status: p.status });
+    return { key: held.key, status: held.status, fill: t(`fill:${i}`, FILL[held.status] ?? 0) };
+  });
+  const moving = Object.values(tweens).some((tw) => inFlight(tw, now));
+  return {
+    motion: { held, tweens },
+    shown: { run_id, state, story, phase, counts, engine_run_id, stage, findings, clockText, clockContext, over, fraction, phases, moving },
   };
 }

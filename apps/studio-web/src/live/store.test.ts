@@ -66,7 +66,7 @@ describe("the office store", () => {
     const store = seeded();
     store.applyDelta("b-6", "office.progress", { run_id: "r2", epic: epic({ done: 0 }) });
     let r2 = store.getState().view?.runs.find((r) => r.run_id === "r2");
-    expect(r2).toEqual({ run_id: "r2", project: null, state: null, engine_run_id: null, epic: epic({ done: 0 }), stories: [] });
+    expect(r2).toEqual({ run_id: "r2", project: null, state: null, engine_run_id: null, stage: null, leg: null, epic: epic({ done: 0 }), stories: [] });
     store.applyDelta("b-7", "office.run", { run_id: "r2", project: "proj", state: "running", from: null });
     r2 = store.getState().view?.runs.find((r) => r.run_id === "r2");
     expect(r2?.state).toBe("running");
@@ -363,5 +363,50 @@ describe("the engagements and office.engagement (Story 32.7, contract 0.1.27)", 
     store.applyDelta("b-7", "office.engagement", { id: "ENG-001", state: "quoted" });
     expect(store.getState().lastId).toBe("b-6");
     expect(store.getState().view?.engagements).toEqual(rows);
+  });
+});
+
+describe("the run's stage (Story 39.5, contract 0.1.35)", () => {
+  it("rides the snapshot, is set by a progress delta carrying it and kept by one without", () => {
+    const store = createOfficeStore();
+    const snap = snapshot();
+    store.applySnapshot("b-5", { ...snap, runs: [{ ...snap.runs[0], stage: "dev attempt 1 of 2" }] });
+    expect(store.getState().view!.runs[0].stage).toBe("dev attempt 1 of 2");
+    store.applyDelta("b-6", "office.progress", { run_id: "r1", epic: epic(), stage: "review pass 2 of 2" });
+    expect(store.getState().view!.runs[0].stage).toBe("review pass 2 of 2");
+    store.applyDelta("b-7", "office.progress", { run_id: "r1", epic: epic({ done: 2 }) });
+    expect(store.getState().view!.runs[0].stage).toBe("review pass 2 of 2");
+    expect(store.getState().view!.runs[0].epic.done).toBe(2);
+  });
+
+  it("a row born of office.run has stage null; a new row from progress takes the delta's stage", () => {
+    const store = seeded();
+    store.applyDelta("b-6", "office.run", { run_id: "r3", project: "proj", state: "queued", from: null });
+    expect(store.getState().view!.runs.find((r) => r.run_id === "r3")!.stage).toBeNull();
+    store.applyDelta("b-7", "office.progress", { run_id: "r4", epic: epic(), stage: "launching" });
+    expect(store.getState().view!.runs.find((r) => r.run_id === "r4")!.stage).toBe("launching");
+  });
+});
+
+describe("the run's leg (Story 39.5, operator ruling 2026-11-10)", () => {
+  const since = "2026-11-10T08:00:00Z";
+  it("rides the snapshot, is set and cleared by a progress delta carrying the key, kept by one without", () => {
+    const store = createOfficeStore();
+    const snap = snapshot();
+    store.applySnapshot("b-5", { ...snap, runs: [{ ...snap.runs[0], stage: "host verify leg", leg: { since } }] });
+    expect(store.getState().view!.runs[0].leg).toEqual({ since });
+    store.applyDelta("b-6", "office.progress", { run_id: "r1", epic: epic(), stage: "host verify leg", leg: null });
+    expect(store.getState().view!.runs[0].leg).toBeNull();
+    const later = "2026-11-10T08:05:00Z";
+    store.applyDelta("b-7", "office.progress", { run_id: "r1", epic: epic(), stage: "host verify leg", leg: { since: later } });
+    expect(store.getState().view!.runs[0].leg).toEqual({ since: later });
+    store.applyDelta("b-8", "office.progress", { run_id: "r1", epic: epic({ done: 2 }) });
+    expect(store.getState().view!.runs[0].leg).toEqual({ since: later });
+  });
+
+  it("a row born of office.run has leg null", () => {
+    const store = seeded();
+    store.applyDelta("b-6", "office.run", { run_id: "r3", project: "proj", state: "queued", from: null });
+    expect(store.getState().view!.runs.find((r) => r.run_id === "r3")!.leg).toBeNull();
   });
 });

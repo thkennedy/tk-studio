@@ -1,9 +1,14 @@
 // The Status screen's view (Story 30.6): a pure function of the one store's state. The queue's counts, the
 // supervisor's version and the ledger's last events come from the office snapshot's `supervisor` and `ledger`
-// (contract 0.1.25, additive); the live runs, the agents and the office section from the same store. No fetch and
-// no timer: the screen re-renders on a store change. The read-only page (no JavaScript) is `GET /status`, linked
-// absolutely because of the web's `<base href="/app/">`.
+// (contract 0.1.25, additive); the live runs, the agents and the office section from the same store. The read-only
+// page (no JavaScript) is `GET /status`, linked absolutely because of the web's `<base href="/app/">`.
+// Story 39.5 (CAP-17): the queue (`queueRows`) — every live run of `GET /status` (JSON), grouped queued, claimed,
+// running, paused (then external), each with its job, story, start and clock (`runClock` over its `GET /runs/{id}`),
+// a link to its run page, Cancel, and for a paused run the reason in words and the inbox item that resolves it. The
+// reads are triggered by store changes (`liveSignature`), never by a timer; a 1 s tick drives the clocks only.
+import type { FetchLike } from "../inbox/model";
 import { LIVE_RUN_STATES, type LedgerTail, type LiveState, type OfficeRun } from "../live/store";
+import { canCancel, clockUnread, LOADING_CLOCK, NO_STORY_YET, runClock, runPagePath, type ClaimRefused, type RunAnswer, type RunResult, type RunRow } from "../run/model";
 
 export const STATUS_PAGE_URL = "/status";
 export const NONE = "—";
@@ -98,4 +103,122 @@ export function statusView(state: LiveState): StatusView {
     },
     ledger: view.ledger ?? null,
   };
+}
+
+// ------------------------------------------------------------ the queue (Story 39.5, Settled shape 7)
+
+/** A `GET /status` `live[]` run: the queue row with its open claim refusal (0.1.28). */
+export type StatusLiveRun = RunRow & { claim_refused?: ClaimRefused | null };
+export interface StatusAnswer { ok: true; counts: Record<string, number>; live: StatusLiveRun[] }
+export type StatusResult = { ok: true; status: StatusAnswer } | { ok: false; error: string };
+
+export const LOADING_START = "Loading the start…";
+export const startUnread = (error: string): string => `The start could not be read: ${error}`;
+export const LOADING_QUEUE = "Loading the queue…";
+/** The order the queue lists its groups in (the AC's), then `external`. */
+export const QUEUE_ORDER = ["queued", "claimed", "running", "paused", "external"] as const;
+
+/** `GET /status` as JSON (a non-HTML `Accept`) with the session cookie. Never throws. */
+export async function fetchStatus(fetchFn: FetchLike = (u, i) => fetch(u, i)): Promise<StatusResult> {
+  const url = STATUS_PAGE_URL;
+  try {
+    const res = await fetchFn(url, { credentials: "same-origin", headers: { accept: "application/json" } });
+    let body: unknown = null;
+    try { body = await res.json(); } catch { body = null; }
+    const obj = typeof body === "object" && body !== null && !Array.isArray(body) ? (body as Record<string, unknown>) : null;
+    if (!res.ok) return { ok: false, error: `${url} answered ${res.status}${obj && typeof obj.error === "string" ? ` ${obj.error}` : ""}` };
+    if (!obj || obj.ok !== true || !Array.isArray(obj.live)) return { ok: false, error: `${url}: no queue in the answer` };
+    const live = (obj.live as unknown[]).filter((r): r is StatusLiveRun => typeof r === "object" && r !== null && typeof (r as StatusLiveRun).run_id === "string");
+    return { ok: true, status: { ok: true, counts: (obj.counts ?? {}) as Record<string, number>, live } };
+  } catch (e) {
+    return { ok: false, error: `${url}: ${e instanceof Error ? e.message : String(e)}` };
+  }
+}
+
+export interface QueueRow {
+  run_id: string;
+  /** The queue state, `claimed` for a running run with neither a worker nor an engine yet. */
+  state: string;
+  job: string;
+  story: string;
+  start: string;
+  clock: string;
+  href: string;
+  cancel: { show: boolean; enabled: boolean; note: string | null };
+  /** A paused run: the reason in words and the inbox item that resolves it. */
+  paused: { reason: string; inbox: { key: string; href: string } | null } | null;
+  /** A queued run the drain could not claim: `Waiting to be claimed: <reason>` (` (resolve: <resolves>)`). */
+  refused: string | null;
+}
+
+/** The store's live-run signature (each `run_id:state:stage:leg.since`, the leg per the operator ruling 2026-11-10):
+ * the queue is re-read when it changes. */
+export function liveSignature(state: LiveState): string {
+  return (state.view?.runs ?? []).map((r) => `${r.run_id}:${r.state ?? ""}:${r.stage ?? ""}:${r.leg?.since ?? ""}`).join("|");
+}
+
+const claimedOf = (r: StatusLiveRun): boolean => r.state === "running" && !r.worker_pid && !r.engine_run_id;
+
+/** Each live run's reads merged into the last ones (Settled shape 7): a successful read replaces the run's answer; a
+ * failed one keeps the previous answer (never back to a loading label) and records the failure; a run no longer read
+ * (not live) drops out. */
+export function mergeDetails(
+  prev: Readonly<Record<string, RunAnswer | undefined>>,
+  reads: readonly { run_id: string; result: RunResult }[],
+): { details: Record<string, RunAnswer | undefined>; errors: Record<string, string> } {
+  const details: Record<string, RunAnswer | undefined> = {};
+  const errors: Record<string, string> = {};
+  for (const { run_id, result } of reads) {
+    if (result.ok) details[run_id] = result.answer;
+    else {
+      if (prev[run_id]) details[run_id] = prev[run_id];
+      errors[run_id] = result.error;
+    }
+  }
+  return { details, errors };
+}
+
+/** The queue rows (Settled shape 7): `details` holds each run's `GET /runs/{id}` answer (absent while unread), `errors`
+ * each failed read (a run never read shows the failure, not a loading label). */
+export function queueRows(
+  status: StatusAnswer, details: Readonly<Record<string, RunAnswer | undefined>>, live: LiveState, now: number,
+  errors: Readonly<Record<string, string>> = {},
+): QueueRow[] {
+  const view = live.view;
+  const rank = (s: string) => { const i = (QUEUE_ORDER as readonly string[]).indexOf(s); return i < 0 ? QUEUE_ORDER.length : i; };
+  const rows = status.live.map((r) => ({ r, state: claimedOf(r) ? "claimed" : r.state }));
+  rows.sort((a, b) => rank(a.state) - rank(b.state) || (a.r.created < b.r.created ? -1 : a.r.created > b.r.created ? 1 : 0));
+  return rows.map(({ r, state }) => {
+    const detail = details[r.run_id];
+    const storeRun = view?.runs.find((x) => x.run_id === r.run_id);
+    const claimedAt = detail ? [...detail.events].reverse().find((e) => e.kind === "claimed")?.at ?? null : null;
+    const failed = errors[r.run_id] ?? null;
+    const start = r.state === "queued" ? r.created : detail ? claimedAt ?? r.created : failed !== null ? startUnread(failed) : LOADING_START;
+    const clock = detail ? runClock(detail, now).label
+      : r.state === "queued" ? runClock({ run: r, events: [] }, now).label
+        : failed !== null ? clockUnread(failed) : LOADING_CLOCK;
+    let paused: QueueRow["paused"] = null;
+    if (r.state === "paused") {
+      const mine = (view?.agents ?? []).filter((a) => a.current_run === r.run_id && (r.project_id === null || a.project === r.project_id));
+      const reason = mine.find((a) => a.reason)?.reason ?? (r.reason || null);
+      const issue = mine.find((a) => a.blocked_issue?.issue)?.blocked_issue?.issue ?? null;
+      paused = {
+        reason: `Paused: ${reason ?? "no reason recorded"}`,
+        inbox: issue ? { key: issue, href: `/app/inbox/${encodeURIComponent(issue)}` } : null,
+      };
+    }
+    const refusal = r.state === "queued" && r.claim_refused ? r.claim_refused : null;
+    return {
+      run_id: r.run_id,
+      state,
+      job: r.job_id,
+      story: storeRun?.epic?.current_story ?? NO_STORY_YET,
+      start,
+      clock,
+      href: runPagePath(r.run_id),
+      cancel: canCancel(r),
+      paused,
+      refused: refusal ? `Waiting to be claimed: ${refusal.reason}${refusal.resolves ? ` (resolve: ${refusal.resolves})` : ""}` : null,
+    };
+  });
 }

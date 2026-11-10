@@ -24,6 +24,17 @@
  * project, as a run's lines are by `run <run_id>: `). The hub emits `office.engagement` `{id, project, state,
  * from, title, needs_you}` on each change (`state: null` once the record is gone). The records are the truth; the
  * `engagement` service event is never read here.
+ *
+ * Story 39.5 (contract 0.1.35, additive): each live run's `stage` — one per `OFFICE_MAP` row (its `stage` column), on
+ * the snapshot's `runs[]` and on every `office.progress` (`{run_id, epic, stage, story?}`); `dev attempt <n> of <m>`
+ * and `review pass <n> of <m>` take `<n>` from the open session's task-id ordinal (else `state.json`
+ * `tasks[<current>].attempt`/`.review_cycle`, else 1) and `<m>` from `state.json` `policy_snapshot.limits`
+ * (`max_dev_attempts`/`max_review_cycles`, else the engine defaults 2 and 3), never below `<n>`. A change of `stage`
+ * alone is an epic-only `office.progress`. No new file is read: `state.json` is already cached.
+ * `leg` (operator ruling 2026-11-10, additive): the open host-verify leg beside `stage` on the snapshot's `runs[]` and
+ * on every `office.progress` (`{run_id, epic, stage, leg, story?}`) — `{since: <at>}` while the latest
+ * `host-verify-leg` lease has a non-null owner and no `host-verify` follows it, else null (`legOf`). A change of `leg`
+ * alone (compared by its `since`) is an epic-only `office.progress`, so the web re-reads `GET /runs/{id}` on it.
  */
 import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -71,6 +82,16 @@ export interface OfficeSignals {
   engineEnded: boolean;
   /** A queue `host-verify` after the latest `launched`; true with no `launched` (no host-verify is pending). */
   hostVerified: boolean;
+  /** Story 39.5: the current story's `state.json` phase, else null. */
+  phase: string | null;
+  /** Story 39.5: `state.json` `policy_snapshot.limits` (each a positive integer, else the engine defaults 2 and 3). */
+  limits: { max_dev_attempts: number; max_review_cycles: number };
+  /** Story 39.5: a `closing-out` lease held — the latest `closing-out` event's `detail.owner` non-null, no `closed_out`
+   * after it. */
+  closingOut: boolean;
+  /** Story 39.5: `state.json` `tasks[<current>].attempt` / `.review_cycle`, else null. */
+  attempt: number | null;
+  reviewCycle: number | null;
 }
 
 export interface OfficeRow {
@@ -80,32 +101,49 @@ export interface OfficeRow {
   when: (s: OfficeSignals) => boolean;
   /** The roles this row lights; every other role is `idle` while the run is live, `offline` otherwise. */
   states: Readonly<Partial<Record<Role, OfficeState>>>;
+  /** Story 39.5 (contract 0.1.35): the run's stage while this row applies. */
+  stage: (s: OfficeSignals) => string;
 }
 
 const isReview = (role: string | undefined) => role === "review" || role === "triage";
 
+/** The engine's defaults for `policy_snapshot.limits` (bmad-loop `policy.py`). */
+export const ENGINE_LIMITS = { max_dev_attempts: 2, max_review_cycles: 3 } as const;
+/** `<n> of <m>`: `<n>` the open session's task-id ordinal, else `fallback`, else 1; `<m>` never below `<n>`. */
+function countOf(s: OfficeSignals, fallback: number | null, max: number): string {
+  const m = /-(\d+)$/.exec(s.session?.task_id ?? "");
+  const n = m ? Number(m[1]) : fallback ?? 1;
+  return `${n} of ${Math.max(n, max)}`;
+}
+
 /** The one mapping table (planner ruling): the first row whose `when` holds wins. */
 export const OFFICE_MAP: readonly OfficeRow[] = [
-  { row: 1, leg: "none", signal: "no live run, and the latest run is not blocked", when: (s) => s.run === null, states: {} },
+  { row: 1, leg: "none", signal: "no live run, and the latest run is not blocked", when: (s) => s.run === null, states: {},
+    stage: () => "no run" },
   { row: 2, leg: "blocked run", signal: "the latest run is blocked, no newer run", when: (s) => s.blocked,
-    states: { orchestrator: "blocked", session: "blocked" } },
-  { row: 3, leg: "queued / lock-wait", signal: "run queued (including after lock-wait)", when: (s) => s.queued, states: {} },
+    states: { orchestrator: "blocked", session: "blocked" }, stage: () => "blocked" },
+  { row: 3, leg: "queued / lock-wait", signal: "run queued (including after lock-wait)", when: (s) => s.queued, states: {},
+    stage: () => "queued" },
   { row: 4, leg: "paused / awaiting-ruling / escalate",
     signal: "run paused; awaiting-ruling the latest of awaiting-ruling/close-out/close-out-failed/engine-resume/resumed/paused; journal story-escalated/run-paused unresolved; state.json paused_reason set",
-    when: (s) => s.waiting, states: { orchestrator: "waiting-for-human", session: "waiting-for-human" } },
+    when: (s) => s.waiting, states: { orchestrator: "waiting-for-human", session: "waiting-for-human" }, stage: () => "waiting for a ruling" },
   { row: 5, leg: "launch", signal: "run running, no launched event yet (engine_run_id null), or none since the latest close-out/engine-resume", when: (s) => s.launching,
-    states: { orchestrator: "thinking" } },
+    states: { orchestrator: "thinking" }, stage: () => "launching" },
   { row: 6, leg: "planner", signal: "an open journal session whose task_id contains -studio-pipeline.gate-",
-    when: (s) => s.session !== null && s.gate, states: { planner: "thinking", session: "thinking" } },
+    when: (s) => s.session !== null && s.gate, states: { planner: "thinking", session: "thinking" }, stage: () => "studio gate" },
   { row: 7, leg: "dev session", signal: "an open journal session, role dev", when: (s) => s.session?.role === "dev",
-    states: { session: "typing", implementer: "typing" } },
+    states: { session: "typing", implementer: "typing" },
+    stage: (s) => `dev attempt ${countOf(s, s.attempt, s.limits.max_dev_attempts)}` },
   { row: 8, leg: "review session", signal: "an open journal session, role review (or triage)", when: (s) => isReview(s.session?.role),
-    states: { session: "reading", reviewer: "reading" } },
+    states: { session: "reading", reviewer: "reading" },
+    stage: (s) => (s.session?.role === "triage" ? "triage" : `review pass ${countOf(s, s.reviewCycle, s.limits.max_review_cycles)}`) },
   { row: 9, leg: "engine verify", signal: "no open session, engine not ended, current story phase dev-verify/review-verify/committing",
-    when: (s) => s.session === null && !s.engineEnded && s.verifyPhase, states: { session: "running" } },
+    when: (s) => s.session === null && !s.engineEnded && s.verifyPhase, states: { session: "running" },
+    stage: (s) => (s.phase === "committing" ? "committing" : "engine verify") },
   { row: 10, leg: "host-verify", signal: "engine ended (journal run-complete/run-stop/run-crash or queue engine-gone), a launched and no host-verify after the latest launched",
-    when: (s) => s.engineEnded && !s.hostVerified, states: { orchestrator: "running" } },
-  { row: 11, leg: "none", signal: "otherwise (between legs, close-out)", when: () => true, states: {} },
+    when: (s) => s.engineEnded && !s.hostVerified, states: { orchestrator: "running" }, stage: () => "host verify leg" },
+  { row: 11, leg: "none", signal: "otherwise (between legs, close-out)", when: () => true, states: {},
+    stage: (s) => (s.closingOut || s.engineEnded ? "close-out" : "between sessions") },
 ];
 
 /** The row that applies, and each role's state by it. */
@@ -114,6 +152,11 @@ export function mapRoles(s: OfficeSignals): { row: OfficeRow; states: Record<Rol
   const rest: OfficeState = s.live ? "idle" : "offline";
   const states = Object.fromEntries(ROLES.map((role) => [role, row.states[role] ?? rest])) as Record<Role, OfficeState>;
   return { row, states };
+}
+
+/** Story 39.5: a run's stage — the `stage` column of the row that applies. */
+export function stageOf(s: OfficeSignals): string {
+  return OFFICE_MAP.find((r) => r.when(s))!.stage(s);
 }
 
 // ------------------------------------------------------------ the engine files (cached reads)
@@ -311,7 +354,9 @@ export interface OfficeStory {
   key: string; title?: string; status: StoryStatus; phase: string | null; overlay: "done" | "failed" | null; extra?: true;
 }
 export interface OfficeEpic { spec_folder: string | null; done: number; deferred: number; failed: number; total: number; current_story: string | null }
-export interface OfficeRun { run_id: string; project: string | null; state: string; engine_run_id: string | null; epic: OfficeEpic; stories: OfficeStory[] }
+/** `stage` (Story 39.5, contract 0.1.35, additive): the run's stage by its `OFFICE_MAP` row (`stageOf`). */
+/** `leg` (operator ruling 2026-11-10, additive): the open host-verify leg (`legOf`), else null. */
+export interface OfficeRun { run_id: string; project: string | null; state: string; engine_run_id: string | null; stage: string; leg: { since: string } | null; epic: OfficeEpic; stories: OfficeStory[] }
 /** `reason` (Story 30.4, contract 0.1.25, additive): what a `waiting-for-human` or `blocked` agent waits for; null in
  * every other state. */
 export interface OfficeAgent {
@@ -394,6 +439,37 @@ const lastIndex = <T>(xs: readonly T[], pred: (x: T) => boolean) => { for (let i
 const kindIn = (...kinds: string[]) => (e: { kind: string }) => kinds.includes(e.kind);
 const VERIFY_PHASES = new Set(["dev-verify", "review-verify", "committing"]);
 const RULING_KINDS = ["awaiting-ruling", "close-out", "close-out-failed", "engine-resume", "resumed", "paused"];
+const posInt = (v: unknown): number | null => (typeof v === "number" && Number.isInteger(v) && v > 0 ? v : null);
+
+/** Story 39.5: `state.json` `policy_snapshot.limits`, each a positive integer, else the engine's default. */
+function limitsOf(state: Record<string, any> | null): OfficeSignals["limits"] {
+  const l = state?.policy_snapshot?.limits;
+  const lim = l && typeof l === "object" ? l as Record<string, unknown> : {};
+  return {
+    max_dev_attempts: posInt(lim.max_dev_attempts) ?? ENGINE_LIMITS.max_dev_attempts,
+    max_review_cycles: posInt(lim.max_review_cycles) ?? ENGINE_LIMITS.max_review_cycles,
+  };
+}
+
+/** Story 39.5: a `closing-out` lease held — the latest `closing-out` event's `detail.owner` non-null, no `closed_out`
+ * after it. */
+function closingOutHeld(events: readonly QueueEvent[]): boolean {
+  const at = lastIndex(events, kindIn("closing-out"));
+  if (at < 0 || lastIndex(events, kindIn("closed_out")) > at) return false;
+  const owner = events[at].detail?.owner;
+  return owner !== null && owner !== undefined;
+}
+
+/** Story 39.5 (`leg`, operator ruling 2026-11-10): the open host-verify leg — `{since: <at>}` when the latest
+ * `host-verify-leg` event's `detail.owner` is non-null and no `host-verify` follows it (`Queue.takeVerifyLeg`'s lease
+ * test without the owner-liveness probe), else null: a release (`owner: null`) or the leg's `host-verify` closes it,
+ * a retry or a takeover opens a new `since`. */
+export function legOf(events: readonly QueueEvent[]): { since: string } | null {
+  const at = lastIndex(events, kindIn("host-verify-leg"));
+  if (at < 0 || lastIndex(events, kindIn("host-verify")) > at) return null;
+  const owner = events[at].detail?.owner;
+  return owner !== null && owner !== undefined ? { since: events[at].at } : null;
+}
 
 /** Awaiting a ruling (Story 30.5 exports the rule `analyseRun` uses, for the board): the latest of the
  * pause/ruling/move-out kinds, when it is `awaiting-ruling` (the page's ruling check, `page.ts`, with `resumed`): a
@@ -443,7 +519,7 @@ function pausedStoryOf(run: QueueRun, events: readonly QueueEvent[], entries: re
   return str(entries[at].story_key);
 }
 
-interface RunAnalysis { signals: Omit<OfficeSignals, "run">; epic: OfficeEpic; stories: OfficeStory[]; waitReason: string | null; pausedStory: string | null }
+interface RunAnalysis { signals: Omit<OfficeSignals, "run">; leg: { since: string } | null; epic: OfficeEpic; stories: OfficeStory[]; waitReason: string | null; pausedStory: string | null }
 
 /** Progress (AC2, planner ruling on the denominator): the first `stories-validated.count` manifest entries are the
  * run's stories, later ones `extra`; with no manifest the journal's `story-start` keys, the first `count` of them
@@ -548,7 +624,8 @@ function analyseRun(run: QueueRun, events: readonly QueueEvent[], problems: stri
     }
     session = [...open.values()].at(-1) ?? null;
   }
-  const phase = epic.current_story ? str((state?.tasks as Record<string, any> | undefined)?.[epic.current_story]?.phase) : null;
+  const task = epic.current_story ? (state?.tasks as Record<string, any> | undefined)?.[epic.current_story] : undefined;
+  const phase = task ? str(task.phase) : null;
   const waitReason = waitReasonOf(events, entries, state);
   return {
     signals: {
@@ -561,14 +638,17 @@ function analyseRun(run: QueueRun, events: readonly QueueEvent[], problems: stri
       // Host-verify is pending only after a `launched` (the supervisor never host-verifies a run it did not
       // launch, e.g. an adopted `external` run): with none, the run never enters row 10.
       engineEnded, hostVerified: launchedAt < 0 || lastIndex(events, kindIn("host-verify")) > launchedAt,
+      phase, limits: limitsOf(state), closingOut: closingOutHeld(events),
+      attempt: posInt(task?.attempt), reviewCycle: posInt(task?.review_cycle),
     },
-    epic, stories, waitReason, pausedStory: pausedStoryOf(run, events, entries),
+    leg: legOf(events), epic, stories, waitReason, pausedStory: pausedStoryOf(run, events, entries),
   };
 }
 
 const NO_SIGNALS: Omit<OfficeSignals, "run"> = {
   live: false, blocked: false, queued: false, waiting: false, launching: false, session: null, gate: false,
   verifyPhase: false, engineEnded: false, hostVerified: false,
+  phase: null, limits: { ...ENGINE_LIMITS }, closingOut: false, attempt: null, reviewCycle: null,
 };
 
 /** Two `last_run` entries equal in every field. */
@@ -614,7 +694,10 @@ function projectCore(queue: Queue, given?: readonly QueueRun[]): {
     },
     liveRuns: () => runs.filter((r) => LIVE_RUN_STATES.has(r.state)).map((r) => {
       const a = analysis(r);
-      return { run_id: r.run_id, project: r.project_id, state: r.state, engine_run_id: r.engine_run_id, epic: a.epic, stories: a.stories };
+      return {
+        run_id: r.run_id, project: r.project_id, state: r.state, engine_run_id: r.engine_run_id, stage: stageOf({ run: r, ...a.signals }),
+        leg: a.leg, epic: a.epic, stories: a.stories,
+      };
     }),
     lastRuns: () => {
       const newest = new Map<string, QueueRun>();
@@ -835,9 +918,13 @@ export class OfficeHub {
       const p = prevRuns.get(r.run_id);
       const before = new Map((p?.stories ?? []).map((s) => [s.key, JSON.stringify(s)]));
       const changed = r.stories.filter((s) => before.get(s.key) !== JSON.stringify(s));
-      if (p && !changed.length && JSON.stringify(p.epic) === JSON.stringify(r.epic)) continue;
-      if (!p || !changed.length) this.emit(out, "office.progress", { run_id: r.run_id, epic: r.epic });
-      else for (const s of changed) this.emit(out, "office.progress", { run_id: r.run_id, epic: r.epic, story: s });
+      // Story 39.5: a change of `stage` or `leg` (by its `since`) alone is an epic-only progress delta; every delta
+      // carries both.
+      const leg = r.leg ?? null;
+      if (p && !changed.length && JSON.stringify(p.epic) === JSON.stringify(r.epic) && (p.stage ?? null) === (r.stage ?? null)
+        && (p.leg?.since ?? null) === (leg?.since ?? null)) continue;
+      if (!p || !changed.length) this.emit(out, "office.progress", { run_id: r.run_id, epic: r.epic, stage: r.stage, leg });
+      else for (const s of changed) this.emit(out, "office.progress", { run_id: r.run_id, epic: r.epic, stage: r.stage, leg, story: s });
     }
     const nextRuns = new Map(next.runs.map((r) => [r.run_id, r]));
     for (const r of next.runs) {

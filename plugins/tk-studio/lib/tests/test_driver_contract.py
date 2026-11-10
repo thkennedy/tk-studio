@@ -4269,13 +4269,15 @@ class DriverContractTestCase(unittest.TestCase):
         self.assertEqual(header.count("0.1.35 (Story 39.4, additive)"), 1)
         self.assertLess(header.index("0.1.35 (Story 39.3, additive)"),
                         header.index("0.1.35 (Story 39.4, additive)"))
-        clause = " ".join(header[header.index("0.1.35 (Story 39.4, additive)"):].split())
+        # Story 39.5 re-bounds the clause at its own (the header no longer ends with 39.4's)
+        clause = " ".join(header[header.index("0.1.35 (Story 39.4, additive)"):
+                                 header.index("0.1.35 (Story 39.5, additive)")].split())
         for phrase in ("the kanban and the story", "`GET /stories/{id}?project=<id>`", "`POST /stories/{id}/status`",
                        "the owner's one transition `draft → ready`",
                        "the `plan-status` service event with `actor: \"owner\"`",
                        "`GET /board`'s story `band`, `jira_key`, `cost_usd` and `needs_you`"):
             self.assertIn(phrase, clause)
-        self.assertTrue(clause.endswith("— additive) |"))
+        self.assertTrue(clause.endswith("— additive;"))
         rulings = next(line for line in self.text.splitlines() if line.startswith("| Story / rulings"))
         self.assertRegex(rulings, r"Story 38\.7 \(Epic 38\), Story 39\.1(, Story 39\.\d+)* \(Epic 39\)")
         self.assertIn("Story 39.3, Story 39.4", rulings)
@@ -4284,7 +4286,7 @@ class DriverContractTestCase(unittest.TestCase):
         self.assertEqual(flat.count(title), 1)
         self.assertLess(flat.index("**0.1.35 (Story 39.3, additive).**"), flat.index(title))
         note = flat[flat.index(title):]
-        note = note[:note.index("## 8. Conformance")]
+        note = note[:note.index("**0.1.35 (Story 39.5, additive).**")]
         subs = ("**The story read:**", "**The status request:**", "**The event:**", "**The board's story fields:**",
                 "**The web:**", "**The serve process:**")
         self.assertEqual([note.index(s) for s in subs], sorted(note.index(s) for s in subs))
@@ -4316,6 +4318,45 @@ class DriverContractTestCase(unittest.TestCase):
                           if line.startswith("| the studio chat (Story 39.3, 0.1.35) | `GET /chat?project="))
         self.assertTrue(lines[studio_get + 1].startswith("| the story (Story 39.4, 0.1.35) |"))
         self.assertTrue(lines[studio_get + 2].startswith("| the story's status (Story 39.4, 0.1.35) |"))
+
+    def test_0_1_35_story_39_5_the_runs_timeline_and_the_progress_in_view(self):
+        header = next(line for line in self.text.splitlines()
+                      if line.startswith("| **Contract version**"))
+        self.assertIn("**0.1.35**", header)
+        self.assertNotIn("**0.1.36**", header)
+        self.assertEqual(header.count("0.1.35 (Story 39.5, additive)"), 1)
+        self.assertLess(header.index("0.1.35 (Story 39.4, additive)"),
+                        header.index("0.1.35 (Story 39.5, additive)"))
+        clause = " ".join(header[header.index("0.1.35 (Story 39.5, additive)"):].split())
+        for phrase in ("the run's stage", "`stage` on the snapshot's `runs[]`",
+                       "every `office.progress` (`{run_id, epic, stage, leg, story?}`)", "one per row of the office mapping table",
+                       "`review pass <n> of <m>` from the engine's `policy_snapshot.limits`",
+                       "`leg` beside `stage` (the open host-verify leg, `null` or `{since}`)"):
+            self.assertIn(phrase, clause)
+        self.assertTrue(clause.endswith("— additive) |"))
+        rulings = next(line for line in self.text.splitlines() if line.startswith("| Story / rulings"))
+        self.assertRegex(rulings, r"Story 38\.7 \(Epic 38\), Story 39\.1(, Story 39\.\d+)* \(Epic 39\)")
+        self.assertIn("Story 39.5", rulings)
+        flat = " ".join(self.text.split())
+        title = "**0.1.35 (Story 39.5, additive).** The run's timeline and the progress in view."
+        self.assertEqual(flat.count(title), 1)
+        self.assertLess(flat.index("**0.1.35 (Story 39.4, additive).**"), flat.index(title))
+        note = flat[flat.index(title):]
+        note = note[:note.index("## 8. Conformance")]
+        subs = ("**The stage:**", "**The leg:**", "**The web's reads:**", "**The serve process:**")
+        self.assertEqual([note.index(s) for s in subs], sorted(note.index(s) for s in subs))
+        for phrase in ("`{run_id, epic, stage, leg, story?}`", "`review pass <n> of <m>`", "`policy_snapshot.limits",
+                       "the engine defaults 2 and 3", "never below `<n>`",
+                       "A change of `stage` alone is an epic-only `office.progress`.", "`dev attempt <n> of <m>`",
+                       "`waiting for a ruling`", "`host verify leg`", "`between sessions`", "`GET /stories/{id}`",
+                       "`POST /runs/{id}/cancel`", "the CSRF token of `GET /inbox?project=`", "`GET /status` (JSON)",
+                       "No route, field or event is added beyond `stage` and `leg`.",
+                       "`leg`", "`{since}`", "A change of `leg` alone is an epic-only `office.progress`",
+                       "the web re-reads `GET /runs/{id}` when the run's `state`, `stage` or `leg` changes",
+                       "no fetch timer",
+                       "`office.ts` runs in serve",
+                       "Every other field, kind and route is unchanged."):
+            self.assertIn(phrase, note)
 
     def test_story_35_7_the_skill_sweep_waits_540_s_inside_the_bash_cap(self):
         # the skill's one sweep call must print its block inside the Bash tool's 600 s cap

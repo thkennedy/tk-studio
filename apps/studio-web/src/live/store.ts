@@ -16,6 +16,11 @@
 // each snapshot, `[]` when absent) and an `office.engagement` delta `{id, project, state, from, title?, needs_you?}`
 // keyed by project + id sets one row (`state: null` removes it: the record vanished or became unreadable); the Chat
 // nav count reads them.
+// Story 39.5 (0.1.35, additive): a run carries `stage` (its `OFFICE_MAP` row's stage, e.g. `review pass 2 of 2`) on the
+// snapshot's `runs[]` and on every `office.progress`; a delta carrying a string sets it, one without keeps the row's,
+// and a row born of an `office.run` has `stage: null` until a progress delta names it. Beside it, `leg` (operator
+// ruling 2026-11-10, additive): the open host-verify leg, `{since}` or `null`; a delta carrying the key (an object or
+// `null`) sets it, one without keeps the row's, and a row born of an `office.run` has `leg: null`.
 
 // ------------------------------------------------------------ mirrored types (apps/supervisor/src/office.ts)
 // Mirrored, never imported across apps.
@@ -48,6 +53,11 @@ export interface OfficeRun {
   /** `null` only for a run first seen in an `office.progress` delta, until its `office.run` arrives. */
   state: string | null;
   engine_run_id: string | null;
+  /** Story 39.5 (0.1.35): the run's stage; null until known, absent from an older supervisor's answer. */
+  stage?: string | null;
+  /** Story 39.5 (`leg`, operator ruling 2026-11-10): the open host-verify leg; null when none, absent from an older
+   * supervisor's answer. A change of its `since` is a `GET /runs/{id}` re-read signal. */
+  leg?: { since: string } | null;
   epic: OfficeEpic;
   stories: OfficeStory[];
 }
@@ -184,6 +194,13 @@ function applyAgent(view: OfficeView, d: Record<string, unknown>): OfficeView | 
   return { ...view, agents };
 }
 
+/** `leg` from a progress delta: set when the delta carries the key (an object with a string `since`, or `null`). */
+function legOfDelta(d: Record<string, unknown>): Pick<OfficeRun, "leg"> {
+  if (!("leg" in d)) return {};
+  if (d.leg === null) return { leg: null };
+  return isObj(d.leg) && typeof d.leg.since === "string" ? { leg: { since: d.leg.since } } : {};
+}
+
 function applyProgress(view: OfficeView, d: Record<string, unknown>): OfficeView | null {
   const runId = d.run_id;
   if (typeof runId !== "string" || !isObj(d.epic)) return null;
@@ -191,7 +208,7 @@ function applyProgress(view: OfficeView, d: Record<string, unknown>): OfficeView
   const story = isObj(d.story) && typeof d.story.key === "string" ? (d.story as unknown as OfficeStory) : null;
   const i = view.runs.findIndex((r) => r.run_id === runId);
   // A run new to the live set sends its progress before its `office.run`: create the row.
-  const base: OfficeRun = i >= 0 ? view.runs[i] : { run_id: runId, project: null, state: null, engine_run_id: null, epic, stories: [] };
+  const base: OfficeRun = i >= 0 ? view.runs[i] : { run_id: runId, project: null, state: null, engine_run_id: null, stage: null, leg: null, epic, stories: [] };
   let stories = base.stories;
   if (story) {
     const j = stories.findIndex((s) => s.key === story.key);
@@ -200,7 +217,7 @@ function applyProgress(view: OfficeView, d: Record<string, unknown>): OfficeView
     const merged: OfficeStory = prev?.title !== undefined && story.title === undefined ? { ...story, title: prev.title } : story;
     stories = j >= 0 ? stories.map((s, k) => (k === j ? merged : s)) : [...stories, merged];
   }
-  const run: OfficeRun = { ...base, epic, stories };
+  const run: OfficeRun = { ...base, epic, stories, ...(typeof d.stage === "string" ? { stage: d.stage } : {}), ...legOfDelta(d) };
   const runs = i >= 0 ? view.runs.map((r, k) => (k === i ? run : r)) : [...view.runs, run];
   return { ...view, runs };
 }
@@ -260,6 +277,8 @@ function applyRun(view: OfficeView, d: Record<string, unknown>): OfficeView | nu
     project: project ?? null,
     state,
     engine_run_id: null,
+    stage: null,
+    leg: null,
     epic: { spec_folder: null, done: 0, deferred: 0, failed: 0, total: 0, current_story: null },
     stories: [],
   };

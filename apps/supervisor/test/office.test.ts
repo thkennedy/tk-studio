@@ -11,7 +11,7 @@ import { createApi } from "../src/api";
 import { newEngagement, writeEngagement, type EngagementState } from "../src/engagement";
 import { SESSION_COOKIE, signSession } from "../src/auth";
 import {
-  blockedIssueFor, engagementBlockedIssue, INBOX_REL, OFFICE_MAP, OFFICE_STATES, OfficeHub, officeCachedPaths, officeStates, projectOffice, readInbox, type OfficeState,
+  blockedIssueFor, engagementBlockedIssue, INBOX_REL, legOf, OFFICE_MAP, OFFICE_STATES, OfficeHub, officeCachedPaths, officeStates, projectOffice, readInbox, type OfficeState,
   type OfficeView,
 } from "../src/office";
 import { gatherPage, renderPage } from "../src/page";
@@ -316,6 +316,158 @@ describe("the mapping table (AC1)", () => {
   });
 });
 
+describe("the stage (Story 39.5, contract 0.1.35 additive)", () => {
+  const stage = (v: OfficeView) => v.runs[0]?.stage;
+  /** A launched run with a hand-made journal and state.json (no manifest). */
+  async function handMade(w: ReturnType<typeof world>, lines: Record<string, unknown>[], state: Record<string, unknown> = {}) {
+    const { run, runDir } = await w.launch({ files: false, manifest: false });
+    mkdirSync(runDir, { recursive: true });
+    const all = [{ kind: "run-start" }, { kind: "stories-validated", count: 1, spec_folder: SPEC }, { kind: "story-start", story_key: S2 }, ...lines];
+    writeFileSync(join(runDir, "journal.jsonl"), all.map((l, i) => JSON.stringify({ ts: 1792300000 + i, ...l })).join("\n") + "\n");
+    writeFileSync(join(runDir, "state.json"), JSON.stringify({ spec_folder: SPEC, tasks: { [S2]: { story_key: S2, phase: "review-running" } }, ...state }));
+    return { run, runDir };
+  }
+
+  test("every OFFICE_MAP row has a stage; rows 1 and 2 read no run and blocked", () => {
+    for (const r of OFFICE_MAP) expect(typeof r.stage).toBe("function");
+    expect(OFFICE_MAP[0].stage({} as any)).toBe("no run");
+    expect(OFFICE_MAP[1].stage({} as any)).toBe("blocked");
+  });
+
+  test("the recorded journal: dev attempt 1 of 2, review pass 1 of 3 (the engine defaults), studio gate", async () => {
+    const dev = world(); await dev.launch({ lines: CUT.dev, phases: { [S2]: "dev-running" } });
+    expect(stage(projectOffice(dev.queue))).toBe("dev attempt 1 of 2");
+    const review = world(); await review.launch({ lines: CUT.review, phases: { [S2]: "review-running" } });
+    expect(stage(projectOffice(review.queue))).toBe("review pass 1 of 3");
+    const gate = world(); await gate.launch({ lines: CUT.gate });
+    expect(stage(projectOffice(gate.queue))).toBe("studio gate");
+  });
+
+  test("policy_snapshot.limits.max_review_cycles 2 and a -review-2 session: review pass 2 of 2; <m> never below <n>", async () => {
+    const lines = [{ kind: "session-start", task_id: `${S2}-review-2`, role: "review" }];
+    const w = world();
+    await handMade(w, lines, { policy_snapshot: { limits: { max_review_cycles: 2, max_dev_attempts: 4 } } });
+    expect(stage(projectOffice(w.queue))).toBe("review pass 2 of 2");
+    const low = world();
+    await handMade(low, lines, { policy_snapshot: { limits: { max_review_cycles: 1 } } });
+    expect(stage(projectOffice(low.queue))).toBe("review pass 2 of 2");
+    const dev = world();
+    await handMade(dev, [{ kind: "session-start", task_id: `${S2}-dev-3`, role: "dev" }], { policy_snapshot: { limits: { max_dev_attempts: 4 } } });
+    expect(stage(projectOffice(dev.queue))).toBe("dev attempt 3 of 4");
+  });
+
+  test("no task-id ordinal: state.json's attempt / review_cycle, else 1; triage reads triage", async () => {
+    const w = world();
+    await handMade(w, [{ kind: "session-start", task_id: "a-review-session", role: "review" }],
+      { tasks: { [S2]: { story_key: S2, phase: "review-running", review_cycle: 2 } } });
+    expect(stage(projectOffice(w.queue))).toBe("review pass 2 of 3");
+    const none = world();
+    await handMade(none, [{ kind: "session-start", task_id: "a-dev-session", role: "dev" }]);
+    expect(stage(projectOffice(none.queue))).toBe("dev attempt 1 of 2");
+    const t = world();
+    await handMade(t, [{ kind: "session-start", task_id: `${S2}-triage-1`, role: "triage" }]);
+    expect(stage(projectOffice(t.queue))).toBe("triage");
+  });
+
+  test("queued, waiting for a ruling, launching", async () => {
+    const q = world(); q.enqueue();
+    expect(stage(projectOffice(q.queue))).toBe("queued");
+    const l = world(); await l.claim(l.enqueue());
+    expect(stage(projectOffice(l.queue))).toBe("launching");
+    const p = world();
+    const { run } = await p.launch({ lines: CUT.dev });
+    p.queue.markPaused(run.run_id, { engine: { paused_story_key: S2, paused_stage: "escalation", paused_reason: "x" } });
+    expect(stage(projectOffice(p.queue))).toBe("waiting for a ruling");
+  });
+
+  test("engine verify / committing; between sessions; host verify leg; close-out", async () => {
+    for (const [phase, want] of [["dev-verify", "engine verify"], ["committing", "committing"], ["review-running", "between sessions"]]) {
+      const w = world();
+      await w.launch({ lines: CUT.devEnded, phases: { [S2]: phase } });
+      expect(stage(projectOffice(w.queue))).toBe(want);
+    }
+    const ended = world();
+    const { run } = await ended.launch({ fixture: "complete" });
+    expect(stage(projectOffice(ended.queue))).toBe("host verify leg");
+    ended.queue.note(run.run_id, "host-verify", { ok: true });
+    expect(stage(projectOffice(ended.queue))).toBe("close-out"); // the engine ended
+    // A closing-out lease held on a run between sessions: close-out; let go of: between sessions again.
+    const lease = world();
+    const { run: lr } = await lease.launch({ lines: CUT.devEnded, phases: { [S2]: "review-running" } });
+    lease.queue.note(lr.run_id, "closing-out", { owner: { pid: 1, host: "h", nonce: "n" } });
+    expect(stage(projectOffice(lease.queue))).toBe("close-out");
+    lease.queue.note(lr.run_id, "closing-out", { owner: null });
+    expect(stage(projectOffice(lease.queue))).toBe("between sessions");
+  });
+
+  test("a stage-only change is one epic-only office.progress carrying stage; every progress delta carries stage", async () => {
+    const w = world();
+    const { runDir } = await w.launch({ lines: CUT.dev, phases: { [S2]: "dev-running" } });
+    const hub = new OfficeHub({ queue: w.queue, graceMs: 0 });
+    expect(hub.snapshot().runs[0].stage).toBe("dev attempt 1 of 2");
+    expect(hub.refresh()).toEqual([]);
+    appendFileSync(join(runDir, "journal.jsonl"), INFLIGHT.slice(CUT.dev, CUT.devEnded).join("\n") + "\n");
+    const progress = hub.refresh().filter((e) => e.kind === "office.progress");
+    expect(progress).toHaveLength(1);
+    expect(Object.keys(progress[0].data).sort()).toEqual(["epic", "leg", "run_id", "stage"]);
+    expect(progress[0].data.leg).toBeNull();
+    expect(progress[0].data.stage).toBe("between sessions");
+    appendFileSync(join(runDir, "journal.jsonl"), JSON.stringify({ ts: 1, kind: "story-done", story_key: S2, commit: "c" }) + "\n");
+    const story = hub.refresh().filter((e) => e.kind === "office.progress");
+    expect(story.length).toBeGreaterThan(0);
+    for (const e of story) { expect(e.data).toHaveProperty("stage"); expect(e.data).toHaveProperty("leg"); }
+    expect(story.some((e) => e.data.story)).toBe(true);
+  });
+
+  test("leg (operator ruling 2026-11-10): null before the lease, {since} with it, null after its host-verify and after a release", async () => {
+    const legOfView = (v: OfficeView) => v.runs[0]?.leg;
+    const owner = { pid: 1, host: "h", nonce: "n" };
+    const w = world();
+    const { run } = await w.launch({ fixture: "complete" });
+    expect(legOfView(projectOffice(w.queue))).toBeNull();
+    w.queue.note(run.run_id, "host-verify-leg", { owner, by: "close-out" });
+    const lease = w.queue.events(run.run_id).findLast((e) => e.kind === "host-verify-leg")!;
+    expect(legOfView(projectOffice(w.queue))).toEqual({ since: lease.at });
+    expect(stage(projectOffice(w.queue))).toBe("host verify leg");
+    w.queue.note(run.run_id, "host-verify", { ok: true });
+    expect(legOfView(projectOffice(w.queue))).toBeNull();
+    const r = world();
+    const { run: rr } = await r.launch({ fixture: "complete" });
+    r.queue.note(rr.run_id, "host-verify-leg", { owner, by: "close-out" });
+    expect(legOfView(projectOffice(r.queue))).not.toBeNull();
+    r.queue.note(rr.run_id, "host-verify-leg", { owner: null, released: owner });
+    expect(legOfView(projectOffice(r.queue))).toBeNull();
+  });
+
+  test("legOf: a retry or a takeover opens a new since", () => {
+    const ev = (seq: number, kind: string, detail: Record<string, unknown> | null) =>
+      ({ seq, run_id: "r", at: `2026-11-10T00:00:0${seq}Z`, kind, from_state: "running", to_state: "running", detail });
+    const owner = { pid: 1, host: "h", nonce: "n" };
+    expect(legOf([])).toBeNull();
+    expect(legOf([ev(1, "host-verify-leg", { owner })])).toEqual({ since: "2026-11-10T00:00:01Z" });
+    expect(legOf([ev(1, "host-verify-leg", { owner }), ev(2, "host-verify-leg", { owner: { ...owner, nonce: "m" } })]))
+      .toEqual({ since: "2026-11-10T00:00:02Z" });
+    expect(legOf([ev(1, "host-verify-leg", { owner }), ev(2, "host-verify", { ok: false }), ev(3, "host-verify-leg", { owner })]))
+      .toEqual({ since: "2026-11-10T00:00:03Z" });
+  });
+
+  test("a lease landing while the stage already reads host verify leg emits exactly one epic-only progress with leg set, stage unchanged", async () => {
+    const w = world();
+    const { run } = await w.launch({ fixture: "complete" });
+    const hub = new OfficeHub({ queue: w.queue, graceMs: 0 });
+    expect(hub.snapshot().runs[0]).toMatchObject({ stage: "host verify leg", leg: null });
+    expect(hub.refresh()).toEqual([]);
+    w.queue.note(run.run_id, "host-verify-leg", { owner: { pid: 1, host: "h", nonce: "n" }, by: "close-out" });
+    const since = w.queue.events(run.run_id).findLast((e) => e.kind === "host-verify-leg")!.at;
+    const progress = hub.refresh().filter((e) => e.kind === "office.progress");
+    expect(progress).toHaveLength(1);
+    expect(Object.keys(progress[0].data).sort()).toEqual(["epic", "leg", "run_id", "stage"]);
+    expect(progress[0].data).toMatchObject({ run_id: run.run_id, stage: "host verify leg", leg: { since } });
+    expect(hub.snapshot().runs[0].leg).toEqual({ since });
+    expect(hub.refresh().filter((e) => e.kind === "office.progress")).toEqual([]); // unchanged: no delta
+  });
+});
+
 describe("the grace timer (AC1, injected clock)", () => {
   function hubOver(raw: { state: OfficeState }) {
     let t = 1_000_000;
@@ -554,9 +706,10 @@ describe("the stream (AC3)", () => {
     // A state change: the review session opens.
     appendFileSync(join(runDir, "journal.jsonl"), INFLIGHT.slice(CUT.dev, CUT.review).join("\n") + "\n");
     await r.until((t) => t.includes("event:office.agent"));
-    // A story-done line: progress.
+    // A story-done line: progress. (Story 39.5: the review session's opening already sent a stage-only progress
+    // frame, so wait for the one carrying the story.)
     appendFileSync(join(runDir, "journal.jsonl"), JSON.stringify({ ts: 1, kind: "story-done", story_key: S2, commit: "c" }) + "\n");
-    await r.until((t) => t.includes("event:office.progress"));
+    await r.until((t) => t.includes('"story":'));
     // A run state change.
     w.queue.markPaused(run.run_id, { engine: {} });
     await r.until((t) => t.includes("event:office.run"));
@@ -566,7 +719,7 @@ describe("the stream (AC3)", () => {
     expect(kinds.indexOf("office.agent")).toBeLessThan(kinds.indexOf("office.progress"));
     expect(kinds.indexOf("office.progress")).toBeLessThan(kinds.indexOf("office.run"));
     expect(fs.find((f) => f.event === "office.agent" && f.data.agent_id === "p/reviewer")!.data).toMatchObject({ state: "reading", from: "idle", current_run: run.run_id });
-    const progress = fs.find((f) => f.event === "office.progress")!;
+    const progress = fs.find((f) => f.event === "office.progress" && f.data.story)!;
     expect(progress.data).toMatchObject({ run_id: run.run_id, epic: { done: 2, total: 4 }, story: { key: S2, status: "done", overlay: "done" } });
     expect(fs.find((f) => f.event === "office.run")!.data).toEqual({ run_id: run.run_id, project: "p", state: "paused", from: "running" });
     // Ids are `<boot>-<seq>`, increasing.
