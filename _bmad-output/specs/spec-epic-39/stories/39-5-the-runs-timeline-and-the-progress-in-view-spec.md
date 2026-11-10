@@ -319,6 +319,13 @@ DEVIATION SCORE (pass 5): 0; the story's `deviation_score` stays 1 (pass 4).
 | dev | 3 | 2026-11-10T10:18:12Z | 2026-11-10T10:52:16Z | 84607c25-0db7-4d7c-abd1-c152937294bc | claude-opus-5-5 | medium | 12939552 | 79317 | 7.7282 | completed |
 | review | 2 | 2026-11-10T10:52:17Z | 2026-11-10T10:59:28Z | d496d516-fef7-43d2-a430-13f9a6134f6f | claude-opus-5-5 | medium | 3983427 | 34633 | 3.1775 | completed |
 | gate | 1 | 2026-11-10T10:59:29Z | 2026-11-10T11:01:34Z | 066fddc7-0d9f-4827-b818-fec39f5944de | claude-opus-5-5 | medium | 1977500 | 12032 | 1.3454 | completed |
+| close-out | 1 | 2026-11-10T08:05:56Z | 2026-11-10T08:05:56Z | — | — | — | — | — | — | no changes |
+| host-leg | 1 | 2026-11-10T08:06:03Z | 2026-11-10T08:06:03Z | — | — | — | — | — | — | skipped |
+| close-out | 2 | 2026-11-10T08:06:03Z | 2026-11-10T09:03:34Z | — | — | — | — | — | — | draft PR |
+| host-leg | 2 | 2026-11-10T09:03:41Z | 2026-11-10T10:17:26Z | — | — | — | — | — | — | green |
+| host-leg | 3 | 2026-11-10T11:02:24Z | 2026-11-10T12:16:19Z | — | — | — | — | — | — | green |
+| close-out | 3 | 2026-11-10T12:16:19Z | 2026-11-10T12:16:27Z | — | — | — | — | — | — | PR |
+| merge | — | 2026-11-10T12:18:09Z | 2026-11-10T12:18:09Z | — | — | — | — | — | — | merged |
 
 
 ## Auto Run Result
