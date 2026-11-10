@@ -7,14 +7,22 @@
 // Story 39.1: the project is the address's (`/app/office/<project>`, the `project` prop); with none, the remembered
 // choice is picked and replaces the address (`onProject(p, true)`); the switcher pushes it (`onProject(p, false)`). A
 // served address project is remembered as the switcher's is; one not served is replaced as none is.
+// Story 39.5 (CAP-17): the HUD shows the run's stage, its clock and a phased bar (the epic the project bar, its stories
+// the phases, the epic's open findings a count to drain). `GET /board?project=` is re-read on a project change and when
+// the live run's `epic.done` or `stage` changes; `GET /runs/<live run>` when `hudRunKey` changes (the live run, its
+// `state`, `stage`, open host-verify leg `leg.since` or worker `worker.since`, the operator rulings 2026-11-10) — never on a timer; a failed read
+// keeps the last answer and the clock names the failure. Every HUD value is held 1 s and the clock and the bars lerp (`hudMotion`); `now` runs on
+// `requestAnimationFrame` while a tween is in flight, on the 1 s timer otherwise.
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { Application } from "pixi.js";
+import { fetchBoard } from "../board/model";
 import type { OfficeStore } from "../live/store";
+import { fetchRun, type RunAnswer } from "../run/model";
 import {
   createApp, layoutScene, loadSheet, syncDesks, TILE, type PlacedDesks, type Scene, type Sheet,
 } from "../renderer/scene";
 import {
-  bubbleFor, desksFrom, fetchAgents, hudModel, projectsFrom, rememberedProject, rememberProject, type RegistryRow,
+  bubbleFor, desksFrom, fetchAgents, hudModel, hudMotion, hudRunKey, projectsFrom, rememberedProject, rememberProject, type BoardRead, type HudMotion, type RegistryRow,
 } from "./model";
 import { addressProject } from "../screen";
 
@@ -121,6 +129,41 @@ export function OfficeScreen({ store, onStats, project, onProject }: {
     return () => window.clearInterval(timer);
   }, []);
 
+  // Story 39.5: the HUD's reads — the board (the findings to drain) and the live run's detail (the clock).
+  const [board, setBoard] = useState<{ project: string; read: BoardRead } | null>(null);
+  const [detail, setDetail] = useState<RunAnswer | null>(null);
+  const [detailError, setDetailError] = useState<{ run_id: string; error: string } | null>(null);
+  const liveRun = project !== null ? hudModel(live, project, now).live : null;
+  const liveRunId = liveRun?.run_id ?? null;
+  const liveStage = liveRun?.stage ?? null;
+  const liveDone = liveRun?.done ?? null;
+  const runKey = project !== null ? hudRunKey(live, project) : "";
+  useEffect(() => {
+    if (project === null) return;
+    let cancelled = false;
+    void fetchBoard(project).then((r) => {
+      if (!cancelled) setBoard({ project, read: r.ok ? { ok: true, board: r.board } : { ok: false, error: r.error } });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [project, liveDone, liveStage]);
+  useEffect(() => {
+    if (liveRunId === null) return;
+    let cancelled = false;
+    void fetchRun(liveRunId).then((r) => {
+      if (cancelled) return;
+      if (r.ok) {
+        setDetail(r.answer);
+        setDetailError(null);
+      } else setDetailError({ run_id: liveRunId, error: r.error });
+    });
+    return () => {
+      cancelled = true;
+    };
+    // `runKey` carries the run id, its state, stage, leg and worker (`hudRunKey`).
+  }, [liveRunId, runKey]);
+
   // A pose change swaps frames in place; a new desk set rebuilds only the desks.
   useEffect(() => {
     syncRef.current?.();
@@ -226,7 +269,27 @@ export function OfficeScreen({ store, onStats, project, onProject }: {
     };
   }, [onStats]);
 
-  const hud = project !== null ? hudModel(live, project, now) : null;
+  const hud = project !== null
+    ? hudModel(live, project, now, {
+      board: board && board.project === project ? board.read : null, detail: detail && detail.run_id === liveRunId ? detail : null, detailError,
+    })
+    : null;
+  // The hold and the lerp: one motion state across renders, reset when the run changes.
+  const motionRef = useRef<{ run: string; motion: HudMotion } | null>(null);
+  let shown = null;
+  if (hud?.live) {
+    const prev = motionRef.current && motionRef.current.run === hud.live.run_id ? motionRef.current.motion : null;
+    const m = hudMotion(prev, hud.live, now);
+    motionRef.current = { run: hud.live.run_id, motion: m.motion };
+    shown = m.shown;
+  } else motionRef.current = null;
+  const moving = shown?.moving ?? false;
+  // While a tween is in flight, `now` follows the animation frame; otherwise the 1 s timer above.
+  useEffect(() => {
+    if (!moving) return;
+    const frame = window.requestAnimationFrame(() => setNow(Date.now()));
+    return () => window.cancelAnimationFrame(frame);
+  }, [moving, now]);
   const spotOf = new Map(spots.map((s) => [s.agent_id, s]));
 
   return (
@@ -297,18 +360,37 @@ export function OfficeScreen({ store, onStats, project, onProject }: {
         {hud && (
           <div>
             <div>project {hud.project}</div>
-            {hud.live ? (
+            {hud.live && shown ? (
               <>
                 <div>
-                  run {hud.live.run_id} · {hud.live.state}
+                  run {shown.run_id} · {shown.state}
                 </div>
                 <div>
-                  story {hud.live.story} · {hud.live.phase}
+                  story {shown.story} · {shown.phase}
+                </div>
+                <div>stage {shown.stage}</div>
+                <div style={{ color: shown.over ? "#ff8080" : undefined }} title={shown.clockContext ?? undefined}>
+                  clock {shown.clockText}
+                </div>
+                <div style={{ width: 220, height: 6, background: "#333", marginTop: 4 }} title={shown.counts}>
+                  <div style={{ width: `${shown.fraction * 100}%`, height: "100%", background: "#4caf50" }} />
+                </div>
+                <div style={{ display: "flex", gap: 2, width: 220, marginTop: 2 }}>
+                  {shown.phases.map((p) => (
+                    <div key={p.key} title={`${p.key} · ${p.status}`} style={{ flex: 1, height: 8, background: "#333" }}>
+                      <div
+                        style={{
+                          width: `${p.fill * 100}%`, height: "100%",
+                          background: p.status === "failed" ? "#d05050" : p.status === "deferred" ? "#d0a040" : p.status === "current" ? "#4a90d0" : "#4caf50",
+                        }}
+                      />
+                    </div>
+                  ))}
                 </div>
                 <div>
-                  done {hud.live.done} · failed {hud.live.failed} · total {hud.live.total}
+                  {shown.counts} · {shown.findings}
                 </div>
-                <div>engine {hud.live.engine_run_id}</div>
+                <div>engine {shown.engine_run_id}</div>
               </>
             ) : hud.last ? (
               <div>

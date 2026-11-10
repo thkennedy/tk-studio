@@ -24,6 +24,7 @@
 // router.
 // Story 39.4: `/app/story/<id>` mounts the story page (`StoryScreen`, its `?project=` from the address's query), no longer
 // the placeholder; `/app/board/<project>` passes its query (`?view=`, `?epic=`) and the router's navigation to the Board.
+// Story 39.5: `/app/run/<id>` mounts the run page (`RunScreen`), no longer the placeholder; `checkin` stays one.
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { createOfficeStore, LIVE_RUN_STATES } from "./live/store";
 import { openOfficeStream } from "./live/stream";
@@ -39,6 +40,7 @@ import {
   createRouter, engagementRefFor, isLanding, issueRefFor, migrateRemembered, NAV, navActive, notFoundText, PLACEHOLDER, routePath, type Route,
 } from "./screen";
 import { SettingsScreen } from "./settings/SettingsScreen";
+import { RunScreen } from "./run/RunScreen";
 import { StoryScreen } from "./story/StoryScreen";
 import { StatusScreen } from "./status/StatusScreen";
 
@@ -98,12 +100,14 @@ export function App() {
       ) : route.name === "engagement" ? (
         <ChatScreen engagements={live.view?.engagements} open={open} onOpen={(ref) => go({ name: "engagement", id: ref.id, project: ref.project })} onClose={(replace) => go({ name: "chat" }, replace)} />
       ) : route.name === "status" ? (
-        <StatusScreen store={officeStore} />
+        <StatusScreen store={officeStore} onNavigate={(p) => router.navigate(p)} />
       ) : route.name === "settings" ? (
         <SettingsScreen />
       ) : route.name === "story" ? (
         <StoryScreen store={officeStore} id={route.id} search={searchOf(path)} onNavigate={(p) => router.navigate(p)} />
-      ) : route.name === "run" || route.name === "checkin" ? (
+      ) : route.name === "run" ? (
+        <RunScreen store={officeStore} id={route.id} onNavigate={(p) => router.navigate(p)} />
+      ) : route.name === "checkin" ? (
         <div style={pageText}>{PLACEHOLDER[route.name]}</div>
       ) : (
         <div style={pageText}>{notFoundText(route.path)}</div>
