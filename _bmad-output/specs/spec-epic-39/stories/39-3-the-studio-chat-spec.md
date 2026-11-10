@@ -344,6 +344,9 @@ DRIFT: the tap adds a deferred throttled flush — text would stall until the ne
 | review | 1 | 2026-11-10T02:00:41Z | 2026-11-10T02:24:04Z | 18211d97-a898-4f0f-b7e5-e489f7cbdfda | claude-opus-5-5 | medium | 13362562 | 98676 | 8.0012 | completed |
 | review | 2 | 2026-11-10T02:24:04Z | 2026-11-10T02:50:30Z | f147872e-3573-4fc7-8940-063020260289 | claude-opus-5-5 | medium | 12831946 | 103799 | 7.8755 | completed |
 | gate | 1 | 2026-11-10T02:50:30Z | 2026-11-10T02:53:12Z | b64728f4-9bd6-4fe2-bec4-95af20a48816 | claude-opus-5-5 | medium | 2888831 | 15626 | 1.7628 | completed |
+| host-leg | 1 | 2026-11-10T02:53:26Z | 2026-11-10T04:08:02Z | — | — | — | — | — | — | green |
+| close-out | 1 | 2026-11-10T04:08:02Z | 2026-11-10T04:08:10Z | — | — | — | — | — | — | PR |
+| merge | — | 2026-11-10T04:09:11Z | 2026-11-10T04:09:11Z | — | — | — | — | — | — | merged |
 
 ## Reconcile
 
